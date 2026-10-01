@@ -4,7 +4,8 @@ description: >
   Makes the agent prove what it says it did. Every statement of done-ness is a
   claim; every claim needs evidence, a rerunnable deterministic check whose
   observed output confirms or refutes it. Ends work with a claims ledger
-  instead of a vibe. Supports thoroughness levels: lite, full (default), ultra,
+  instead of a vibe. Evidence comes from cascading providers (frontend, api,
+  generic, or a project's own). Supports thoroughness levels: lite, full (default), ultra,
   which set how much effort goes into producing evidence. Use on ANY task that
   ends with the agent reporting something as done, fixed, working, passing, or
   verified, and before opening a PR. Also use whenever the user says
@@ -69,6 +70,40 @@ Static and presence checks are fine for claims about static things ("the
 export was removed"). They are never sufficient for claims about behavior
 ("the bug is fixed").
 
+## Providers
+
+How evidence gets produced depends on what a claim touches. A **provider**
+knows how to produce evidence for one surface. Providers live next to this
+file in [`providers/`](providers/) and follow the contract in
+[`providers/CONTRACT.md`](providers/CONTRACT.md).
+
+| Provider | Handles |
+|---|---|
+| [frontend](providers/frontend.md) | UI renders, interactions, layout, accessibility |
+| [api](providers/api.md) | HTTP endpoints: status, body, auth, validation |
+| [generic](providers/generic.md) | Anything else: tests, scripts, commands. Always available. |
+
+For each claim, cascade:
+
+1. **Classify** the surfaces it touches: UI, API, data, CLI, library, infra.
+2. **Pick the most specific provider** per surface, first match wins:
+   1. **Project provider**: `.kip/receipts.md` in the repo being worked on,
+      if present. It knows this repo's commands, ports, and fixtures, and
+      overrides or extends Kip providers for the surfaces it declares.
+   2. **Kip provider**: the matching file in `providers/`.
+   3. **generic**.
+   4. **None**: the claim is ⚠️, naming the missing provider.
+3. **Compose** when a claim spans surfaces. "The signup form creates the
+   user" needs frontend AND api. The claim is ✅ only if every required
+   provider's evidence confirms it.
+4. **Fall through** when a provider's requirements aren't met (no dev server,
+   no browser tool, no running API). Drop to the next provider in the cascade
+   and note the downgrade in the ledger. Downgraded evidence must still meet
+   the thoroughness level, or the claim is ⚠️.
+
+Read a provider's file before using it. Add a provider when a real claim needs
+one; don't scaffold providers for surfaces nobody has claimed anything about.
+
 ## Verdicts
 
 Every claim ends with exactly one:
@@ -104,11 +139,12 @@ up a level for that claim rather than calling it verified.
 End the response with the ledger. Prose before it stays short.
 
 ```
-| # | Claim | Evidence | Result | Verdict |
-|---|-------|----------|--------|---------|
-| 1 | `parseDate(null)` returns null instead of throwing | `npm test -- parseDate` (red on main, green on branch) | 4 passed, 0 failed | ✅ |
-| 2 | All 3 callers handle the null return | `rg "parseDate\(" src/` + `npm test -- invoices orders` | 3 call sites; 12 passed | ✅ |
-| 3 | Invoice PDF renders with empty date | needs the PDF service running locally | — | ⚠️ run `make pdf-dev` then `/invoices/123.pdf` |
+| # | Claim | Provider | Evidence | Result | Verdict |
+|---|-------|----------|----------|--------|---------|
+| 1 | `parseDate(null)` returns null instead of throwing | generic | `npm test -- parseDate` (red on main, green on branch) | 4 passed, 0 failed | ✅ |
+| 2 | `POST /invoices` accepts an empty due date | api | `curl -s -XPOST :3000/invoices -d '{"due":null}'` | `201`, body has `"due":null` | ✅ |
+| 3 | Invoice form shows "No due date" when blank | frontend → generic (no browser tool) | `npm test -- InvoiceForm` | 2 passed | ✅ (downgraded) |
+| 4 | Invoice PDF renders with empty date | none | needs the PDF service running locally | — | ⚠️ run `make pdf-dev` then `/invoices/123.pdf` |
 
 Thoroughness: full (claim 2 escalated to ultra: touches billing)
 ```
