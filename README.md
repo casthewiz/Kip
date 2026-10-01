@@ -8,6 +8,7 @@ Personal Cursor skills and user rules — generic enough to reuse on any project
 | --- | --- |
 | [ponytail](skills/ponytail/SKILL.md) | Laziest solution that actually works |
 | [marie-kondo](skills/marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
+| [receipts](skills/receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
 
 ## Install
 

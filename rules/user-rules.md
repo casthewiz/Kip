@@ -43,6 +43,12 @@ When asking clarifying questions with fixed choices, always use the AskQuestion 
 
 ---
 
+## Claims and evidence
+
+Anything you believe you accomplished is a claim until evidence settles it. Evidence is a rerunnable, deterministic check (command, test, request, query) plus its observed output, and it must be capable of failing if the claim is false. "I read the code and it looks right" is not evidence. Never report something as done, fixed, working, or passing without evidence; label it unverified and say why. Follow the `/receipts` skill for thoroughness levels and the claims ledger.
+
+---
+
 ## Implementation workflow
 
-When doing a code implementation task, follow the `/ponytail` skill for the implementation itself. Before considering the task "done", run a final pass using the `/marie-kondo` skill over the changes made in this session (comments, duplication, dead code, unnecessary indirection).
+When doing a code implementation task, follow the `/ponytail` skill for the implementation itself. Before considering the task "done", run a pass using the `/marie-kondo` skill over the changes made in this session (comments, duplication, dead code, unnecessary indirection), then finish with the `/receipts` skill: list every claim about the work and back each one with evidence at the current thoroughness level.
