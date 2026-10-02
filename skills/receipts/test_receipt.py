@@ -53,15 +53,17 @@ def main():
         sh("git", "add", ".")
         sh("git", "commit", "-qm", "init")
 
-        # Destination must be chosen; cloud sinks need an issue; unknown sinks are refused.
-        assert "required" in rc("init", ok=False)
+        # Local by default; cloud sinks are opt-in, need an issue; unknown sinks are refused.
         assert "--issue is required" in rc("init", "--sink", "fake", ok=False)
         assert "unknown sink nope" in rc("init", "--sink", "nope", ok=False)
         sinks = rc("sinks")
         assert "local" in sinks and "fake       ready" in sinks and "linear     missing LINEAR_API_KEY" in sinks, sinks
+        opted = Path(rc("init", "--sink", "fake", "--issue", "ENG-9"))
+        assert json.loads((opted / "receipt.json").read_text())["sinks"] == ["local", "fake"]
 
-        run = Path(rc("init", "--sink", "fake", "--sink", "linear", "--issue", "ENG-1", "--level", "full"))
-        assert json.loads((run / "receipt.json").read_text())["sinks"] == ["local", "fake", "linear"]
+        run = Path(rc("init", "--level", "full"))
+        rec = json.loads((run / "receipt.json").read_text())
+        assert rec["sinks"] == ["local"] and rec["issue"] is None, rec
         assert rc("claim", "app prints hi") == "c1"
         rc("claim", "secret is redacted")
         rc("claim", "pdf renders")
@@ -100,10 +102,17 @@ def main():
         assert "supersecret123" not in log and "[FAKE_API_TOKEN]" in log, log
         assert (run / "files" / "c2e1.patch").exists(), "dirty tree not captured"
 
-        # Publish: fake posts, linear is skipped for missing env, so the command fails overall.
-        out = rc("publish", ok=False)
+        # Local-only run: publish stays local until the run opts into a sink.
+        assert f"local only: {run}" in rc("publish")
+        assert not sink_log.exists(), "local-only publish touched a sink"
+        assert "--issue is required" in rc("publish", "--sink", "fake", ok=False)
+        assert json.loads((run / "receipt.json").read_text())["sinks"] == ["local"], "failed opt-in was saved"
+
+        # Opt in after the fact: fake posts, linear is skipped for missing env, so the command fails overall.
+        out = rc("publish", "--sink", "fake", "--sink", "linear", "--issue", "ENG-1", ok=False)
         assert "fake: posted https://fake.test/ENG-1#cm1" in out and "linear: skipped, missing LINEAR_API_KEY" in out, out
-        out = rc("publish", ok=False)
+        assert "start a new run" in rc("publish", "--sink", "fake", "--issue", "OTHER-2", ok=False)
+        out = rc("publish", "--sink", "fake", ok=False)  # keeps the run's issue without repeating it
         assert "fake: updated" in out, out
         events = json.loads(sink_log.read_text())
         assert [e[0] for e in events] == ["upload", "create", "update"], events
@@ -112,11 +121,8 @@ def main():
         assert events[1][2] == rc("render", "--sink", "fake"), "posted body differs from render output"
         rec = json.loads((run / "receipt.json").read_text())
         assert rec["published"]["fake"] == {"comment_id": "cm1", "url": "https://fake.test/ENG-1#cm1"}, rec
-        assert "linear" not in rec["published"], rec
-
-        # Local-only runs have nothing to publish.
-        local = Path(rc("init", "--sink", "local"))
-        assert f"local only: {local}" in rc("publish")
+        assert "linear" not in rec["published"] and rec["sinks"] == ["local", "fake", "linear"], rec
+        assert rec["issue"] == "ENG-1", rec
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

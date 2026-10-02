@@ -116,7 +116,8 @@ so exit codes and output come from the run, not from your summary of it.
 ```bash
 R=~/.claude/skills/receipts/receipt.py               # or ~/.cursor/...
 python3 $R sinks                                     # what's available and configured
-python3 $R init --sink linear --issue ENG-123 --level full   # after confirming the destination
+python3 $R init --level full                         # local only (the default)
+#  or: init --sink linear --issue ENG-123 --level full  # if the user opted into a sink
 python3 $R claim "POST /invoices accepts null due" --provider api --level ultra
 python3 $R run c1 --red -- npm test -- invoices      # ultra: on the old code, must fail
 python3 $R run c1 -- npm test -- invoices            # on the new code, must pass
@@ -125,7 +126,8 @@ python3 $R observe c3 --passed "form shows 'No due date'"   # browser-tool check
 python3 $R attach c3 shot.png                        # screenshots, videos, logs
 python3 $R unverified c4 "needs the PDF service"
 python3 $R render                                    # the ledger
-python3 $R publish                                   # post to the run's chosen sinks
+python3 $R publish                                   # post to the run's sinks, if any
+python3 $R publish --sink jira --issue PROJ-9        # opt a local run into a sink later
 ```
 
 Each run is a folder under `~/.kip/receipts/<repo>/<run-id>/` (override with
@@ -186,23 +188,32 @@ up a level for that claim rather than calling it verified.
 
 ## Destination
 
-**Every session that produces evidence confirms where it goes before
+**Evidence is local first.** Every run is stored locally, and that's the
+default destination: `receipt.py init` with no `--sink` records locally and
+publishes nowhere. Uploading to Linear, Jira, or another sink is opt-in.
+
+**Every session that produces evidence confirms its destination before
 recording anything.** Run `receipt.py sinks`, then ask the user (with the
 question tool, if available):
 
-- Where should this session's evidence go? Local only, or local plus one or
-  more configured sinks (Linear, Jira, or any project sink). Mark sinks whose
-  environment variables are missing as unavailable rather than offering them.
-- For each cloud sink, which issue? Suggest the key from the branch name or
-  recent commits, if any, and let the user correct it.
+- Where should this session's evidence go? **Local only** is the first,
+  recommended option. Then local plus each configured sink (Linear, Jira, or
+  a project sink). Leave out sinks whose environment variables are missing,
+  and say which ones they are.
+- For each cloud sink picked, which issue? Suggest the key from the branch
+  name or recent commits, and let the user correct it.
 
-A project's `.kip/receipts.md` may name a preferred destination; offer it as
-the recommended choice, but still ask. `receipt.py init` refuses to start
-without `--sink`, and requires `--issue` for any cloud sink.
+A project's `.kip/receipts.md` may name a different preferred destination;
+offer it as the recommended option instead, but still ask. `init` requires
+`--issue` for any cloud sink.
 
-The user's answer authorizes publishing this run's results there, so
-`publish` needs no second confirmation. It never authorizes anywhere else:
-to change destination, ask again and start a new run.
+The user can also opt in later: if a run was local only, offer once, after
+the ledger, to upload it. On a yes, `receipt.py publish --sink <name>
+--issue <KEY>` adds that sink to the run and publishes.
+
+The user's choice authorizes publishing this run there, so `publish` needs
+no second confirmation. It never authorizes any other sink or issue; a run
+stays tied to one issue, so a different issue means a new run.
 
 ## Sinks
 

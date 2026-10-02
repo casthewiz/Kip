@@ -2,15 +2,16 @@
 """Deterministic receipts: record claims and evidence, publish them to sinks.
 
   receipt.py sinks                                          list sinks and whether each is configured
-  receipt.py init --sink NAME [--sink NAME] [--issue KEY] [--level lite|full|ultra]
-                                                            start a run, print its dir
+  receipt.py init [--sink NAME --issue KEY] [--level lite|full|ultra]
+                                                            start a run (local only by default), print its dir
   receipt.py claim "TEXT" [--provider NAME] [--level L]     add a claim, print its id
   receipt.py run CLAIM [--red] [--static] -- CMD ...        run CMD, record the result
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
   receipt.py render [--sink NAME]                           print the ledger as that sink would post it
-  receipt.py publish                                        upload files and upsert the comment on each sink
+  receipt.py publish [--sink NAME --issue KEY]              upload files and upsert the comment on each sink,
+                                                            optionally opting the run into another sink first
   receipt.py path                                           print the run dir
 
 Every command takes --run DIR; default is the latest run for the current repo.
@@ -140,13 +141,19 @@ def cmd_sinks(a):
         print(f"{name:10} {'always on' if name == 'local' else 'missing ' + ', '.join(missing) if missing else 'ready'}")
 
 
-def cmd_init(a):
-    sinks = list(dict.fromkeys(["local", *a.sink]))
+def check_sinks(sinks, issue):
+    """Local is always first; cloud sinks are opt-in and need an issue to post to."""
+    sinks = list(dict.fromkeys(["local", *sinks]))
     unknown = set(sinks) - set(sink_names())
     if unknown:
         sys.exit(f"unknown sink {', '.join(sorted(unknown))}; available: {', '.join(sink_names())}")
-    if len(sinks) > 1 and not a.issue:
+    if len(sinks) > 1 and not issue:
         sys.exit(f"--issue is required to publish to {', '.join(sinks[1:])}")
+    return sinks
+
+
+def cmd_init(a):
+    sinks = check_sinks(a.sink, a.issue)
     now = datetime.datetime.now(datetime.timezone.utc)
     rid = now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     d = ROOT / repo_name() / rid
@@ -343,6 +350,12 @@ def cmd_publish(a):
     d = run_dir(a)
     rec = load(d)
     verify_hashes(d, rec)
+    if a.sink:
+        if a.issue and rec["issue"] and a.issue != rec["issue"]:
+            sys.exit(f"run is for {rec['issue']}, not {a.issue}; start a new run for a different issue")
+        rec["issue"] = rec["issue"] or a.issue
+        rec["sinks"] = check_sinks(rec["sinks"] + a.sink, rec["issue"])
+        save(d, rec)
     failed = []
     for name in [s for s in rec["sinks"] if s != "local"]:
         mod = load_sink(name)
@@ -386,8 +399,8 @@ def main():
     s.set_defaults(fn=cmd_sinks)
 
     s = sub.add_parser("init", parents=[common])
-    s.add_argument("--sink", action="append", required=True,
-                   help="where evidence goes, confirmed with the user: local, linear, jira, ...")
+    s.add_argument("--sink", action="append", default=[],
+                   help="also publish to this sink (opt-in, confirmed with the user); local is always on")
     s.add_argument("--issue")
     s.add_argument("--level", choices=["lite", "full", "ultra"], default="full")
     s.set_defaults(fn=cmd_init)
@@ -428,6 +441,8 @@ def main():
     s.set_defaults(fn=cmd_render)
 
     s = sub.add_parser("publish", parents=[common])
+    s.add_argument("--sink", action="append", default=[], help="opt this run into another sink first")
+    s.add_argument("--issue", help="issue for newly added sinks, if the run has none")
     s.set_defaults(fn=cmd_publish)
 
     s = sub.add_parser("path", parents=[common])

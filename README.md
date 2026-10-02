@@ -51,8 +51,9 @@ a single project instead, symlink into that repo's `.claude/skills/` or
 ### Receipts storage
 
 `receipts` records evidence with `python3` (standard library only) under
-`~/.kip/receipts/`, and asks each session where else to publish it. To make
-a tracker available, export its credentials in your shell profile:
+`~/.kip/receipts/`. Local is the default; each session asks whether to also
+upload to a tracker, and a local run can be uploaded later. To make a
+tracker available, export its credentials in your shell profile:
 
 - Linear: `LINEAR_API_KEY`
 - Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
