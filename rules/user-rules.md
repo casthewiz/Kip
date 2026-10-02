@@ -1,6 +1,6 @@
-# User rules (paste into Cursor Settings → Rules → User Rules)
+# User rules
 
-These are stored as markdown here for portability. Cursor does not load this file automatically.
+Always-on rules for any agent. Claude Code: import from `~/.claude/CLAUDE.md`. Cursor: paste into Cursor Settings → Rules → User Rules. See the README.
 
 ---
 
@@ -37,9 +37,9 @@ Not lazy about: understanding the problem (read it fully and trace the real flow
 
 ---
 
-## AskQuestion for fixed choices
+## Question tool for fixed choices
 
-When asking clarifying questions with fixed choices, always use the AskQuestion tool (Question UI) instead of listing options inline in chat. Prefer one focused AskQuestion per turn. Only fall back to inline questions if AskQuestion is unavailable in the current session.
+When asking clarifying questions with fixed choices, always use the structured question tool (AskQuestion in Cursor, AskUserQuestion in Claude Code) instead of listing options inline in chat. Prefer one focused question per turn. Only fall back to inline questions if no question tool is available in the current session.
 
 ---
 
