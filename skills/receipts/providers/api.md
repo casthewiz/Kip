@@ -39,3 +39,12 @@ Everything in full, plus:
 ## Observation
 The exact request (method, path, body, with secrets redacted), status code,
 the relevant body excerpt, and the read-back result for writes.
+
+Run requests through `receipt.py run` with `curl --fail-with-body -s` so a
+4xx/5xx fails the evidence. When a 4xx is the expected result (auth,
+validation), assert the status explicitly:
+`sh -c 'test "$(curl -s -o /dev/null -w "%{http_code}" URL)" = 401'`.
+
+## Files
+Command output is captured by `receipt.py run`. At ultra, also attach large
+response bodies (`curl -o body.json`) instead of relying on the excerpt.

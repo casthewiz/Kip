@@ -5,7 +5,9 @@ description: >
   claim; every claim needs evidence, a rerunnable deterministic check whose
   observed output confirms or refutes it. Ends work with a claims ledger
   instead of a vibe. Evidence comes from cascading providers (frontend, api,
-  generic, or a project's own). Supports thoroughness levels: lite, full (default), ultra,
+  generic, or a project's own), is recorded deterministically by receipt.py,
+  and published to a destination confirmed each session (local, Linear,
+  Jira, or any pluggable sink) as comments, images, and videos. Supports thoroughness levels: lite, full (default), ultra,
   which set how much effort goes into producing evidence. Use on ANY task that
   ends with the agent reporting something as done, fixed, working, passing, or
   verified, and before opening a PR. Also use whenever the user says
@@ -104,15 +106,62 @@ For each claim, cascade:
 Read a provider's file before using it. Add a provider when a real claim needs
 one; don't scaffold providers for surfaces nobody has claimed anything about.
 
+## Recording
+
+Evidence is recorded by [`receipt.py`](receipt.py) in this skill's folder
+(`~/.claude/skills/receipts/receipt.py` or `~/.cursor/skills/receipts/receipt.py`
+once installed), never typed up by hand. The script runs each check itself,
+so exit codes and output come from the run, not from your summary of it.
+
+```bash
+R=~/.claude/skills/receipts/receipt.py               # or ~/.cursor/...
+python3 $R sinks                                     # what's available and configured
+python3 $R init --sink linear --issue ENG-123 --level full   # after confirming the destination
+python3 $R claim "POST /invoices accepts null due" --provider api --level ultra
+python3 $R run c1 --red -- npm test -- invoices      # ultra: on the old code, must fail
+python3 $R run c1 -- npm test -- invoices            # on the new code, must pass
+python3 $R run c2 --static -- npx tsc --noEmit       # static, not behavior
+python3 $R observe c3 --passed "form shows 'No due date'"   # browser-tool checks only
+python3 $R attach c3 shot.png                        # screenshots, videos, logs
+python3 $R unverified c4 "needs the PDF service"
+python3 $R render                                    # the ledger
+python3 $R publish                                   # post to the run's chosen sinks
+```
+
+Each run is a folder under `~/.kip/receipts/<repo>/<run-id>/` (override with
+`$KIP_RECEIPTS_DIR`): a `receipt.json` and a `files/` folder. What makes it
+deterministic:
+
+- **Pinned code.** Every piece of evidence records the commit it ran against,
+  plus a patch of uncommitted changes, so anyone can recreate the exact tree
+  and rerun the exact command.
+- **Captured output.** Full output is saved as a log with its sha256; the
+  ledger quotes the tail. Values of environment variables named like
+  `*TOKEN*`, `*KEY*`, `*SECRET*`, `*PASSWORD*` are redacted before anything
+  is written.
+- **Computed verdicts.** You don't pick the verdict; `receipt.py` derives it
+  from the recorded results and the claim's thoroughness level.
+- **Tamper check.** `render` refuses to run if any recorded file's hash no
+  longer matches.
+- **Same record, same output.** Rendering is a pure function of
+  `receipt.json`.
+
+Prefer `run` over `observe`. An observation is your account of what you saw,
+which is weaker; use it only when the check is an agent tool (a browser pane)
+with no command equivalent, and attach the screenshot.
+
 ## Verdicts
 
-Every claim ends with exactly one:
+`receipt.py` assigns every claim exactly one:
 
-- ✅ **verified**: evidence ran and confirmed it.
-- ❌ **refuted**: evidence ran and contradicted it. Fix it and re-run, or
+- ✅ **verified**: all evidence passed.
+- ❌ **refuted**: a check on the new code failed. Fix it and re-run, or
   report it plainly. Never quietly drop a refuted claim.
-- ⚠️ **unverified**: no evidence could be produced. State why (needs prod
-  credentials, needs hardware, no test harness) and what would verify it.
+- ❌ **check can't fail**: a `--red` run passed, so the check proves nothing.
+  Write a check that would fail without the change.
+- ⚠️ **unverified**: no evidence, or marked `unverified` with a reason (needs
+  prod credentials, needs hardware, no test harness) and what would verify it.
+- ⚠️ **falsifiability not shown**: the claim is at ultra and has no `--red` run.
 
 An unverified claim is never reported as done. "Should work" is ⚠️.
 
@@ -129,28 +178,64 @@ claims you make.
 
 **Automatic floor.** Claims touching money, auth, security, permissions, data
 deletion, migrations, or anything that risks data loss are held to **ultra**
-regardless of the current level. Say so in the ledger.
+regardless of the current level. Record them with `claim --level ultra` so
+the verdict enforces it.
 
 **Escalate, don't stall.** If evidence at the current level is ambiguous, go
 up a level for that claim rather than calling it verified.
 
+## Destination
+
+**Every session that produces evidence confirms where it goes before
+recording anything.** Run `receipt.py sinks`, then ask the user (with the
+question tool, if available):
+
+- Where should this session's evidence go? Local only, or local plus one or
+  more configured sinks (Linear, Jira, or any project sink). Mark sinks whose
+  environment variables are missing as unavailable rather than offering them.
+- For each cloud sink, which issue? Suggest the key from the branch name or
+  recent commits, if any, and let the user correct it.
+
+A project's `.kip/receipts.md` may name a preferred destination; offer it as
+the recommended choice, but still ask. `receipt.py init` refuses to start
+without `--sink`, and requires `--issue` for any cloud sink.
+
+The user's answer authorizes publishing this run's results there, so
+`publish` needs no second confirmation. It never authorizes anywhere else:
+to change destination, ask again and start a new run.
+
+## Sinks
+
+A sink publishes the record somewhere other than the local folder. `local` is
+built in and always on; every other sink is one Python module with two
+functions (`upload` a file, `publish` a comment) described in
+[`sinks/CONTRACT.md`](sinks/CONTRACT.md). Adding a destination means adding
+one module: Kip's live in [`sinks/`](sinks/), and a repo can add or override
+its own in `<repo>/.kip/sinks/`.
+
+| Sink | Publishes | Requires |
+|---|---|---|
+| local | `receipt.json` + files under `~/.kip/receipts/<repo>/<run-id>/` | nothing |
+| [linear](sinks/linear.py) | Issue comment with the ledger; images embedded, videos and logs linked | `LINEAR_API_KEY` |
+| [jira](sinks/jira.py) | Issue comment in Jira markup; files as attachments, images as thumbnails | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
+
+`receipt.py publish` is the same for every sink: upload each file once, post
+`render` output verbatim (never a rewrite), and update the run's existing
+comment instead of adding a second one. Preview what a sink will post with
+`receipt.py render --sink <name>`. If a sink's variables aren't set but its
+MCP server is connected, you may post `render --sink <name>` output through
+the MCP server instead; say that files weren't uploaded.
+
 ## Output
 
-End the response with the ledger. Prose before it stays short.
+End the response with `receipt.py render` output, pasted as is. Prose before
+it stays short. Then one line: what's ⚠️ or ❌ and what the user should do
+about it, plus the link `publish` printed for each sink, or that it was
+kept local. If a sink was skipped or failed, say so; the local record is
+still complete.
 
-```
-| # | Claim | Provider | Evidence | Result | Verdict |
-|---|-------|----------|----------|--------|---------|
-| 1 | `parseDate(null)` returns null instead of throwing | generic | `npm test -- parseDate` (red on main, green on branch) | 4 passed, 0 failed | ✅ |
-| 2 | `POST /invoices` accepts an empty due date | api | `curl -s -XPOST :3000/invoices -d '{"due":null}'` | `201`, body has `"due":null` | ✅ |
-| 3 | Invoice form shows "No due date" when blank | frontend → generic (no browser tool) | `npm test -- InvoiceForm` | 2 passed | ✅ (downgraded) |
-| 4 | Invoice PDF renders with empty date | none | needs the PDF service running locally | — | ⚠️ run `make pdf-dev` then `/invoices/123.pdf` |
-
-Thoroughness: full (claim 2 escalated to ultra: touches billing)
-```
-
-Then one line: what's ⚠️ or ❌ and what the user should do about it. If
-everything is ✅, say nothing more.
+If `receipt.py` can't run (no Python 3), write the ledger by hand in the same
+shape, and mark every claim ⚠️ that you can't back with quoted output.
 
 ## Boundaries
 

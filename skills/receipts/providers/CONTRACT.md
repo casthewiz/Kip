@@ -27,6 +27,11 @@ edge cases that matter here, and what "end to end" means here.
 ## Observation
 Exactly what to record in the ledger's Result column (status codes,
 assertion counts, screenshot paths, log excerpts). Never a paraphrase.
+
+## Files
+What to capture and attach with `receipt.py attach` (screenshots, videos,
+response bodies), at which level. Command output is captured automatically
+by `receipt.py run`; list only what it doesn't cover.
 ```
 
 ## Project providers

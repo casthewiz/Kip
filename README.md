@@ -48,6 +48,18 @@ Drop either folder from the loop if you only use one tool. To scope skills to
 a single project instead, symlink into that repo's `.claude/skills/` or
 `.cursor/skills/`.
 
+### Receipts storage
+
+`receipts` records evidence with `python3` (standard library only) under
+`~/.kip/receipts/`, and asks each session where else to publish it. To make
+a tracker available, export its credentials in your shell profile:
+
+- Linear: `LINEAR_API_KEY`
+- Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
+
+New destinations are one Python module each; see
+[skills/receipts/sinks/CONTRACT.md](skills/receipts/sinks/CONTRACT.md).
+
 ## Rules
 
 [rules/user-rules.md](rules/user-rules.md) holds the always-on rules (lazy

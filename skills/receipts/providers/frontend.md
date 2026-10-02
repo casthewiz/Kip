@@ -40,3 +40,16 @@ Everything in full, plus:
 ## Observation
 URL, the steps taken, the assertion and what the page actually contained,
 console error count, and a screenshot path when the claim is visual.
+
+Prefer a Playwright (or Cypress) script run through `receipt.py run` over
+driving a browser tool by hand: the script's assertions decide the verdict.
+Use `receipt.py observe` only for checks done in an agent browser tool.
+
+## Files
+- **full**: a screenshot of the end state the claim describes
+  (`page.screenshot({ path })`, or the browser tool's screenshot saved to
+  disk), attached to the claim.
+- **ultra**: also a video of the interaction. Playwright records one per
+  test with `--video=on` (or `recordVideo` on the browser context) into
+  `test-results/`; attach the `.webm`. Add the screenshot from the
+  falsifiability run too, so the red and green states sit side by side.
