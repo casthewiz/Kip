@@ -7,6 +7,8 @@ work in any project, with Claude Code or Cursor.
 
 | Skill | Purpose |
 | --- | --- |
+| **[analysis/](skills/analysis/)** | *How problems get understood* |
+| [decompose](skills/analysis/decompose/SKILL.md) | Understand a problem and break it into units of work |
 | **[implementation/](skills/implementation/)** | *How code gets written* |
 | [ponytail](skills/implementation/ponytail/SKILL.md) | Laziest solution that actually works |
 | [marie-kondo](skills/implementation/marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
