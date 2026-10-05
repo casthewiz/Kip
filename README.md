@@ -8,16 +8,16 @@ work in any project, with Claude Code or Cursor.
 | Skill | Purpose |
 | --- | --- |
 | **[analysis/](skills/analysis/)** | *How problems get understood* |
-| [decompose](skills/analysis/decompose/SKILL.md) | Understand a problem and break it into units of work |
+| [kip-decompose](skills/analysis/kip-decompose/SKILL.md) | Understand a problem and break it into units of work |
 | **[implementation/](skills/implementation/)** | *How code gets written* |
-| [ponytail](skills/implementation/ponytail/SKILL.md) | Laziest solution that actually works |
-| [marie-kondo](skills/implementation/marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
+| [kip-ponytail](skills/implementation/kip-ponytail/SKILL.md) | Laziest solution that actually works |
+| [kip-marie-kondo](skills/implementation/kip-marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
 | **Verification** | *How work gets proven* |
-| [receipts](skills/receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
+| [kip-receipts](skills/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
 
 Each skill is a folder with a `SKILL.md` (YAML frontmatter + instructions),
 the format both Claude Code and Cursor load. Supporting files live inside the
-skill's folder (e.g. [receipts/providers](skills/receipts/providers/)).
+skill's folder (e.g. [kip-receipts/providers](skills/kip-receipts/providers/)).
 Skills can be grouped into category folders like `implementation/`; the
 install step flattens them, so skill names must be unique across categories.
 
@@ -50,7 +50,7 @@ a single project instead, symlink into that repo's `.claude/skills/` or
 
 ### Receipts storage
 
-`receipts` records evidence with `python3` (standard library only) under
+`kip-receipts` records evidence with `python3` (standard library only) under
 `~/.kip/receipts/`. Local is the default; each session asks whether to also
 upload to a tracker, and a local run can be uploaded later. To make a
 tracker available, export its credentials in your shell profile:
@@ -59,7 +59,7 @@ tracker available, export its credentials in your shell profile:
 - Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
 
 New destinations are one Python module each; see
-[skills/receipts/sinks/CONTRACT.md](skills/receipts/sinks/CONTRACT.md).
+[skills/kip-receipts/sinks/CONTRACT.md](skills/kip-receipts/sinks/CONTRACT.md).
 
 ## Rules
 
@@ -80,7 +80,7 @@ pulling changes.
 ## Verify
 
 Start a new session in either tool and ask what skills are available, or
-invoke one directly (`/ponytail`, `/receipts`). Skills load at session start,
+invoke one directly (`/kip-ponytail`, `/kip-receipts`). Skills load at session start,
 so restart any session that was open during install.
 
 ## License

@@ -1,5 +1,5 @@
 ---
-name: marie-kondo
+name: kip-marie-kondo
 description: >-
   Tidies the current git branch by removing comments and code that are
   duplicative, superfluous, verbose, or otherwise don't spark joy, scoped

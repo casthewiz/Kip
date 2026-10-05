@@ -1,5 +1,5 @@
 ---
-name: ponytail
+name: kip-ponytail
 description: >
   Forces the laziest solution that actually works, simplest, shortest, most
   minimal. Channels a senior dev who has seen everything: question whether the
@@ -27,7 +27,7 @@ code is the code never written.
 
 ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if
 unsure. Off only: "stop ponytail" / "normal mode". Default: **full**.
-Switch: `/ponytail lite|full|ultra`.
+Switch: `/kip-ponytail lite|full|ultra`.
 
 ## The ladder
 

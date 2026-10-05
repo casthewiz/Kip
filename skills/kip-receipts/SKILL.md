@@ -1,5 +1,5 @@
 ---
-name: receipts
+name: kip-receipts
 description: >
   Makes the agent prove what it says it did. Every statement of done-ness is a
   claim; every claim needs evidence, a rerunnable deterministic check whose
@@ -7,13 +7,17 @@ description: >
   instead of a vibe. Evidence comes from cascading providers (frontend, api,
   generic, or a project's own), is recorded deterministically by receipt.py,
   and published to a destination confirmed each session (local, Linear,
-  Jira, or any pluggable sink) as comments, images, and videos. Supports thoroughness levels: lite, full (default), ultra,
-  which set how much effort goes into producing evidence. Use on ANY task that
-  ends with the agent reporting something as done, fixed, working, passing, or
-  verified, and before opening a PR. Also use whenever the user says
-  "receipts", "show your work", "prove it", "verify that", "are you sure",
-  "did you test it", or "claims and evidence". Do NOT use for pure
-  question-answering where nothing was changed or done.
+  Jira, or any pluggable sink) as comments, images, and videos. Verifies
+  anyone's work, not just this session's: a PR, a ticket's acceptance
+  criteria, or a deployed site, including Playwright desk tests across
+  mobile, tablet, and desktop viewports. Supports thoroughness levels: lite,
+  full (default), ultra, which set how much effort goes into producing
+  evidence. Use on ANY task that ends with the agent reporting something as
+  done, fixed, working, passing, or verified, and before opening a PR. Also
+  use whenever the user says "receipts", "show your work", "prove it",
+  "verify that", "are you sure", "did you test it", "claims and evidence",
+  "desk test", "QA this", "check it on mobile", or "test across viewports".
+  Do NOT use for pure question-answering where nothing was changed or done.
 argument-hint: "[lite|full|ultra]"
 license: MIT
 ---
@@ -26,7 +30,7 @@ believe you accomplished is a **claim** until **evidence** settles it.
 ## Persistence
 
 ACTIVE EVERY RESPONSE that reports work. Off only: "stop receipts" / "normal
-mode". Default: **full**. Switch: `/receipts lite|full|ultra`.
+mode". Default: **full**. Switch: `/kip-receipts lite|full|ultra`.
 
 ## Claims
 
@@ -43,6 +47,56 @@ passed is grading your own homework.
 
 Every claim you make in prose ("fixed", "works", "passes", "no regressions")
 must appear in the ledger. If it isn't in the ledger, don't say it.
+
+## Whose work
+
+Receipts verifies claims, not this session's diff. The work can come from
+anyone: this session, another agent, a teammate's PR, a vendor's deploy.
+Claims come from wherever the promise was made:
+
+- This session's own work.
+- A ticket's acceptance criteria, a PR description, or `kip-decompose` units.
+- The user listing behaviors to desk-test ("check signup works on mobile").
+
+Someone else saying "tested" or "works on my machine" is a claim, never
+evidence. Verify it like any other.
+
+Point receipts at what's being verified:
+
+- **Code in a checkout** (any author): check out the branch or PR first.
+  Evidence pins the commit and any uncommitted changes, as usual.
+- **A remote site** (preview deploy, staging, prod): `init --target <URL>`.
+  Its code isn't in this checkout, so evidence is marked remote and not
+  pinned to a commit. The record says so instead of pinning the wrong code.
+  The recorded commands and the specs in the run's `specs/` folder still
+  make every check rerunnable.
+
+Falsifiability doesn't require having made the change. Run the same check
+with `--red` against a **baseline** that lacks the behavior: the base
+branch, prod when the change is on staging, the previous deploy. With no
+baseline available, an ultra claim stays ⚠️ "falsifiability not shown",
+which is the honest result.
+
+## Desk testing websites
+
+To verify how a website behaves, whoever built it, use Playwright through
+[`playwright/desktest.py`](playwright/desktest.py). It runs one spec against
+a URL at mobile, tablet, and desktop viewports, each recorded as separate
+evidence with screenshots (plus video and a trace at ultra). The
+[frontend provider](providers/frontend.md) has the full procedure.
+
+```bash
+python3 $R init --target https://staging.example.com --level full
+python3 $R claim "Signup shows a confirmation on every viewport" --provider frontend
+cp ~/.claude/skills/kip-receipts/playwright/example.spec.ts "$(python3 $R path)/specs/c1.spec.ts"  # edit it
+python3 ~/.claude/skills/kip-receipts/playwright/desktest.py c1 https://staging.example.com \
+  "$(python3 $R path)/specs/c1.spec.ts"
+```
+
+Playwright lives in `~/.kip`, not in the project, so this works on any site.
+If it isn't installed, ask before running `playwright/setup.sh`: it downloads
+`@playwright/test` from npm and a Chromium build (about 150 MB) unless one is
+already cached.
 
 ## Evidence
 
@@ -109,12 +163,12 @@ one; don't scaffold providers for surfaces nobody has claimed anything about.
 ## Recording
 
 Evidence is recorded by [`receipt.py`](receipt.py) in this skill's folder
-(`~/.claude/skills/receipts/receipt.py` or `~/.cursor/skills/receipts/receipt.py`
+(`~/.claude/skills/kip-receipts/receipt.py` or `~/.cursor/skills/kip-receipts/receipt.py`
 once installed), never typed up by hand. The script runs each check itself,
 so exit codes and output come from the run, not from your summary of it.
 
 ```bash
-R=~/.claude/skills/receipts/receipt.py               # or ~/.cursor/...
+R=~/.claude/skills/kip-receipts/receipt.py               # or ~/.cursor/...
 python3 $R sinks                                     # what's available and configured
 python3 $R init --level full                         # local only (the default)
 #  or: init --sink linear --issue ENG-123 --level full  # if the user opted into a sink
@@ -175,7 +229,7 @@ claims you make.
 | Level | Evidence required per claim |
 |---|---|
 | **lite** | Cheapest check that touches the claim: typecheck, build, lint, grep. Behavior claims at lite are ⚠️ unless a check already existed and was run. |
-| **full** | At least one **behavior** check that exercises the claim, with output quoted. If none exists, write the smallest one (ponytail's "one runnable check"). Default. |
+| **full** | At least one **behavior** check that exercises the claim, with output quoted. If none exists, write the smallest one (kip-ponytail's "one runnable check"). Default. |
 | **ultra** | Everything in full, plus: prove falsifiability (revert or break the change, watch the check go red, restore it); cover edge cases and every sibling caller of changed code; run it end to end in the real app or environment, not just unit tests. |
 
 **Automatic floor.** Claims touching money, auth, security, permissions, data
@@ -250,9 +304,9 @@ shape, and mark every claim ⚠️ that you can't back with quoted output.
 
 ## Boundaries
 
-Receipts governs how you prove work, not what you build (that's ponytail) or
-how you tidy it (that's marie-kondo). Evidence checks you write to verify a
-claim follow ponytail: smallest thing that can fail, no frameworks. Keep them
+Receipts governs how you prove work, not what you build (that's kip-ponytail) or
+how you tidy it (that's kip-marie-kondo). Evidence checks you write to verify a
+claim follow kip-ponytail: smallest thing that can fail, no frameworks. Keep them
 if they're useful regression checks; delete throwaway probes.
 
 "stop receipts" / "normal mode": revert. Level persists until changed or

@@ -2,10 +2,11 @@
 """Deterministic receipts: record claims and evidence, publish them to sinks.
 
   receipt.py sinks                                          list sinks and whether each is configured
-  receipt.py init [--sink NAME --issue KEY] [--level lite|full|ultra]
+  receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra]
                                                             start a run (local only by default), print its dir
   receipt.py claim "TEXT" [--provider NAME] [--level L]     add a claim, print its id
-  receipt.py run CLAIM [--red] [--static] -- CMD ...        run CMD, record the result
+  receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] -- CMD ...
+                                                            run CMD, record the result, attach media from DIR
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
@@ -38,7 +39,7 @@ ROOT = Path(os.environ.get("KIP_RECEIPTS_DIR", Path.home() / ".kip" / "receipts"
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 EXCERPT_LINES = 15
 FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image",
-              ".mp4": "video", ".webm": "video", ".mov": "video"}
+              ".mp4": "video", ".webm": "video", ".mov": "video", ".zip": "trace"}
 
 
 def git(*args):
@@ -116,8 +117,11 @@ def find_claim(rec, cid):
     sys.exit(f"unknown claim {cid}; claims: {', '.join(c['id'] for c in rec['claims']) or 'none'}")
 
 
-def code_state(d, eid):
-    """Pin the code an evidence ran against: HEAD, plus the uncommitted diff if any."""
+def code_state(d, rec, eid):
+    """Pin the code an evidence ran against: HEAD, plus the uncommitted diff if any.
+    A remote target isn't this checkout, so there's nothing local to pin."""
+    if rec.get("target"):
+        return {"commit": None, "patch": None, "remote": True}
     state = {"commit": git("rev-parse", "HEAD"), "patch": None}
     diff = git("diff", "HEAD")
     if diff:
@@ -128,11 +132,39 @@ def code_state(d, eid):
     return state
 
 
-def new_evidence(d, c, **fields):
+def new_evidence(d, rec, c, **fields):
     eid = f"{c['id']}e{len(c['evidence']) + 1}"
-    e = {"id": eid, **fields, **code_state(d, eid)}
+    e = {"id": eid, **fields, **code_state(d, rec, eid)}
     c["evidence"].append(e)
     return e
+
+
+def rel_to(path, d):
+    try:
+        return path.resolve().relative_to(d.resolve())
+    except ValueError:
+        return None
+
+
+def command_inputs(cmd, d):
+    """Hash every file a command names (specs, configs, scripts), so a rerun can tell
+    whether it's running the same inputs. Files inside the run dir are tamper-checked."""
+    inputs = []
+    for arg in cmd:
+        p = Path(arg)
+        if p.is_file():
+            inside = rel_to(p, d)
+            inputs.append({"path": str(inside) if inside else str(p.resolve()), "inside_run": bool(inside),
+                           "sha256": sha256(p)})
+    return inputs
+
+
+def attach_file(d, c, src, kind=None, name=None):
+    dest = d / "files" / f"{c['id']}f{len(c['files']) + 1}-{name or src.name}"
+    shutil.copy2(src, dest)
+    c["files"].append({"type": kind or FILE_TYPES.get(src.suffix.lower(), "log"),
+                       "path": f"files/{dest.name}", "sha256": sha256(dest), "uploads": {}})
+    return dest
 
 
 def cmd_sinks(a):
@@ -158,9 +190,11 @@ def cmd_init(a):
     rid = now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     d = ROOT / repo_name() / rid
     (d / "files").mkdir(parents=True)
+    (d / "specs").mkdir()  # test code written for this run lives with its evidence
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"),
-             "level": a.level, "issue": a.issue, "sinks": sinks, "published": {}, "claims": []})
+             "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
+             "claims": []})
     (d.parent / "LATEST").write_text(rid + "\n")
     print(d)
 
@@ -188,21 +222,30 @@ def cmd_run(a):
     except OSError as err:
         code, out = 127, f"{cmd[0]}: {err.strerror}\n"
     passed = code != 0 if a.red else code == 0
-    e = new_evidence(d, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
-                     command=cmd, cwd=os.getcwd(), exit_code=code, passed=passed,
+    e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
+                     label=a.label, command=cmd, cwd=os.getcwd(), inputs=command_inputs(cmd, d), exit_code=code, passed=passed,
                      excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
     log = d / "files" / f"{e['id']}.log"
     log.write_text(out)
     e["log"] = {"path": f"files/{log.name}", "sha256": sha256(log)}
+    collected = []
+    if a.collect and Path(a.collect).is_dir():
+        root = Path(a.collect)
+        for p in sorted(root.rglob("*")):
+            kind = FILE_TYPES.get(p.suffix.lower())
+            if p.is_file() and kind:
+                name = f"{e['id']}-" + "-".join(p.relative_to(root).parts)
+                collected.append(attach_file(d, c, p, kind, name).name)
     save(d, rec)
     expected = "expected failure" if a.red else "expected success"
-    print(f"{e['id']}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}")
+    print(f"{e['id']}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
+          + (f", collected {len(collected)} file(s)" if a.collect else ""))
 
 
 def cmd_observe(a):
     d = run_dir(a)
     rec = load(d)
-    e = new_evidence(d, find_claim(rec, a.claim), kind="observed", phase="green",
+    e = new_evidence(d, rec, find_claim(rec, a.claim), kind="observed", phase="green",
                      observation=a.text, passed=a.passed)
     save(d, rec)
     print(e["id"])
@@ -214,11 +257,7 @@ def cmd_attach(a):
         sys.exit(f"no such file: {src}")
     d = run_dir(a)
     rec = load(d)
-    c = find_claim(rec, a.claim)
-    dest = d / "files" / f"{c['id']}f{len(c['files']) + 1}-{src.name}"
-    shutil.copy2(src, dest)
-    c["files"].append({"type": a.type or FILE_TYPES.get(src.suffix.lower(), "log"),
-                       "path": f"files/{dest.name}", "sha256": sha256(dest), "uploads": {}})
+    dest = attach_file(d, find_claim(rec, a.claim), src, a.type)
     save(d, rec)
     print(dest)
 
@@ -248,24 +287,46 @@ def verify_hashes(d, rec):
     """Refuse to render evidence whose files changed since they were recorded."""
     entries = [f for c in rec["claims"] for f in c["files"]]
     entries += [e[k] for c in rec["claims"] for e in c["evidence"] for k in ("log", "patch") if e.get(k)]
+    entries += [i for c in rec["claims"] for e in c["evidence"] for i in e.get("inputs", []) if i["inside_run"]]
     for f in entries:
         p = d / f["path"]
         if p.exists() and sha256(p) != f["sha256"]:
             sys.exit(f"hash mismatch for {f['path']}: file changed after it was recorded")
 
 
-def summarize(e):
+def summarize(e, full=False):
+    """Table rows use the evidence's label when it has one; details always show the full command."""
     if e["kind"] == "observed":
         return f"observed: {e['observation']}"
     red = ", red" if e["phase"] == "red" else ""
-    return f"`{shlex.join(e['command'])}` (exit {e['exit_code']}{red})"
+    cmd = f"`{shlex.join(e['command'])}`"
+    label = e.get("label")
+    head = (f"{label}: {cmd}" if label else cmd) if full else (label or cmd)
+    return f"{head} (exit {e['exit_code']}{red})"
+
+
+def subject(rec, code):
+    if rec.get("target"):
+        return f"{rec['target']} (remote: state not pinned)"
+    return f"{rec['repo']} @ {code((rec['commit'] or '?')[:7])} ({rec['branch']})"
+
+
+def evidence_meta(e, code):
+    meta = ["remote"] if e.get("remote") else \
+        [f"commit {code((e['commit'] or '?')[:7])}"] + (["uncommitted changes"] if e["patch"] else [])
+    if e.get("log"):
+        meta.append(f"log sha256 {code(e['log']['sha256'][:12])}")
+    return " · ".join(meta)
 
 
 def render_markdown(rec, sink=None):
     def cell(s):
         return str(s).replace("|", "\\|").replace("\n", " ")
 
-    out = [f"### Receipts · {rec['repo']} @ `{(rec['commit'] or '?')[:7]}` ({rec['branch']}) · {rec['level']}", "",
+    def code(s):
+        return f"`{s}`"
+
+    out = [f"### Receipts · {subject(rec, code)} · {rec['level']}", "",
            "| # | Claim | Provider | Evidence | Verdict |", "|---|---|---|---|---|"]
     for c in rec["claims"]:
         v = verdict(c, rec["level"]) + (f": {c['unverified']}" if c["unverified"] else "")
@@ -276,10 +337,7 @@ def render_markdown(rec, sink=None):
             continue
         out += ["", f"**{c['id']}**: {c['text']}"]
         for e in c["evidence"]:
-            meta = [f"commit `{(e['commit'] or '?')[:7]}`"] + (["uncommitted changes"] if e["patch"] else [])
-            if e.get("log"):
-                meta.append(f"log sha256 `{e['log']['sha256'][:12]}`")
-            out += ["", f"- {summarize(e)} · {' · '.join(meta)}"]
+            out += ["", f"- {summarize(e, full=True)} · {evidence_meta(e, code)}"]
             if e.get("excerpt"):
                 out += ["", "```", e["excerpt"], "```"]
         for f in c["files"]:
@@ -300,11 +358,13 @@ def render_jira(rec, sink=None):
     def cell(s):
         return str(s).replace("|", "\\|").replace("\n", " ")
 
-    def jsum(e):
-        return re.sub(r"`([^`]+)`", r"{{\1}}", summarize(e))
+    def jsum(e, full=False):
+        return re.sub(r"`([^`]+)`", r"{{\1}}", summarize(e, full))
 
-    out = [f"h3. Receipts · {rec['repo']} @ {{{{{(rec['commit'] or '?')[:7]}}}}} ({rec['branch']}) · {rec['level']}",
-           "", "||#||Claim||Provider||Evidence||Verdict||"]
+    def code(s):
+        return f"{{{{{s}}}}}"
+
+    out = [f"h3. Receipts · {subject(rec, code)} · {rec['level']}", "", "||#||Claim||Provider||Evidence||Verdict||"]
     for c in rec["claims"]:
         v = verdict(c, rec["level"]) + (f": {c['unverified']}" if c["unverified"] else "")
         ev = " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
@@ -314,10 +374,7 @@ def render_jira(rec, sink=None):
             continue
         out += ["", f"*{c['id']}*: {c['text']}"]
         for e in c["evidence"]:
-            meta = [f"commit {{{{{(e['commit'] or '?')[:7]}}}}}"] + (["uncommitted changes"] if e["patch"] else [])
-            if e.get("log"):
-                meta.append(f"log sha256 {{{{{e['log']['sha256'][:12]}}}}}")
-            out += ["", f"* {jsum(e)} · {' · '.join(meta)}"]
+            out += ["", f"* {jsum(e, full=True)} · {evidence_meta(e, code)}"]
             if e.get("excerpt"):
                 out += ["{noformat}", e["excerpt"], "{noformat}"]
         for f in c["files"]:
@@ -402,6 +459,7 @@ def main():
     s.add_argument("--sink", action="append", default=[],
                    help="also publish to this sink (opt-in, confirmed with the user); local is always on")
     s.add_argument("--issue")
+    s.add_argument("--target", help="URL under test when it isn't this checkout (staging, prod, a preview deploy)")
     s.add_argument("--level", choices=["lite", "full", "ultra"], default="full")
     s.set_defaults(fn=cmd_init)
 
@@ -415,6 +473,8 @@ def main():
     s.add_argument("claim")
     s.add_argument("--red", action="store_true", help="falsifiability run: expected to fail")
     s.add_argument("--static", action="store_true", help="typecheck/lint/grep, not behavior")
+    s.add_argument("--collect", help="after the run, attach every image, video, and trace under this dir")
+    s.add_argument("--label", help="short name for the ledger table; the full command stays in the details")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("observe", parents=[common])
@@ -428,7 +488,7 @@ def main():
     s = sub.add_parser("attach", parents=[common])
     s.add_argument("claim")
     s.add_argument("path")
-    s.add_argument("--type", choices=["image", "video", "log"])
+    s.add_argument("--type", choices=["image", "video", "trace", "log"])
     s.set_defaults(fn=cmd_attach)
 
     s = sub.add_parser("unverified", parents=[common])

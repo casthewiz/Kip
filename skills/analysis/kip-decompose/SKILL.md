@@ -1,10 +1,10 @@
 ---
-name: decompose
+name: kip-decompose
 description: >
   Understands a problem statement before anything is built, and helps the
   prompter understand it too, then breaks it into units of work. Each unit
   has a goal, dependencies, whether it can run in parallel, and the claims
-  that will mean it's done (verified later by receipts). Supports effort
+  that will mean it's done (verified later by kip-receipts). Supports effort
   levels: lite (shallow, efficient chunking and sequencing), full (default),
   ultra (deep: the underlying problem traced through the real code and data,
   assumptions and open questions surfaced, units grounded in what was found).
@@ -26,7 +26,7 @@ implementation code here; the output is understanding and a plan someone
 ## Persistence
 
 Runs once per problem statement, then hands off. Default: **full**. Switch:
-`/decompose lite|full|ultra`.
+`/kip-decompose lite|full|ultra`.
 
 ## Effort
 
@@ -66,13 +66,13 @@ its own. Each one has:
 - **Parallel**: whether it can run alongside other units (`yes` if it has no
   unmet dependencies and touches different files).
 - **Claims**: the falsifiable statements that will mean it's done. These are
-  `receipts` claims, written now, verified later. Name the provider surface
+  `kip-receipts` claims, written now, verified later. Name the provider surface
   when it's obvious (`api`, `frontend`).
 - **Touches**: files, functions, tables, or services, at full and ultra.
 
 Cutting rules:
 
-- Apply ponytail's first rung to every unit: does it need to exist? Flag
+- Apply kip-ponytail's first rung to every unit: does it need to exist? Flag
   speculative units and leave them out.
 - A unit too big to state in one goal line gets split. A unit too small to
   verify on its own gets merged into its neighbor.
@@ -103,8 +103,8 @@ line on where to start: the first unit, or every parallel unit at once.
 
 ## Boundaries
 
-Decompose governs understanding and planning. Ponytail governs how each unit
-gets built, marie-kondo tidies it, and receipts verifies the claims written
+Decompose governs understanding and planning. kip-ponytail governs how each unit
+gets built, kip-marie-kondo tidies it, and kip-receipts verifies the claims written
 here. Don't start implementing inside this skill unless the user asks to go
 straight on.
 

@@ -8,6 +8,19 @@ import tempfile
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("receipt.py")
+DESKTEST = Path(__file__).with_name("playwright") / "desktest.py"
+
+# Stands in for the playwright CLI: writes a screenshot (and a video at ultra) per
+# project, and fails on mobile when the site is "broken".
+FAKE_PLAYWRIGHT = '''#!/bin/sh
+for arg; do case "$arg" in --project=*) vp="${arg#--project=}";; esac; done
+mkdir -p "$KIP_OUT/signup-$vp"
+printf 'png' > "$KIP_OUT/signup-$vp/test-finished-1.png"
+[ "$KIP_LEVEL" = ultra ] && printf 'webm' > "$KIP_OUT/signup-$vp/video.webm"
+echo "1 test on $vp against $BASE_URL"
+case "$BASE_URL:$vp" in *broken*:mobile) echo "overflow on mobile"; exit 1;; esac
+exit 0
+'''
 
 # A project-level sink, loaded from <repo>/.kip/sinks/, that logs calls instead of posting.
 FAKE_SINK = '''
@@ -123,6 +136,50 @@ def main():
         assert rec["published"]["fake"] == {"comment_id": "cm1", "url": "https://fake.test/ENG-1#cm1"}, rec
         assert "linear" not in rec["published"] and rec["sinks"] == ["local", "fake", "linear"], rec
         assert rec["issue"] == "ENG-1", rec
+
+        # Desk test a remote site someone else built: per-viewport evidence, collected media,
+        # remote marking instead of pinning this checkout's commit, and the spec hash-pinned.
+        pw = Path(tmp, "playwright")
+        pw.write_text(FAKE_PLAYWRIGHT)
+        pw.chmod(0o755)
+        remote = Path(rc("init", "--target", "https://staging.example.test", "--level", "ultra"))
+        assert (remote / "specs").is_dir()
+        rc("claim", "signup works on every viewport", "--provider", "frontend")
+        spec = remote / "specs" / "c1.spec.ts"
+        spec.write_text("// spec\n")
+        dt = sh(sys.executable, str(DESKTEST), "c1", "https://broken.example.test", str(spec),
+                ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        assert "mobile   c1e1: exit 1" in dt and "desktop  c1e3: exit 0" in dt, dt
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(spec), "--viewports", "mobile",
+           extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        # Falsifiability without having made the change: the broken baseline must fail on mobile.
+        assert "mobile   c1e5: exit 1 (expected failure) -> pass" in sh(
+            sys.executable, str(DESKTEST), "c1", "https://broken.example.test", str(spec), "--red",
+            "--viewports", "mobile", extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        rec = json.loads((remote / "receipt.json").read_text())
+        ev, files = rec["claims"][0]["evidence"], rec["claims"][0]["files"]
+        assert [(e["phase"], e["passed"]) for e in ev] == \
+            [("green", False), ("green", True), ("green", True), ("green", True), ("red", True)], ev
+        assert all(e["remote"] and e["commit"] is None and e["patch"] is None for e in ev), ev
+        assert ev[0]["command"][:2] == ["env", "BASE_URL=https://broken.example.test"], ev[0]["command"]
+        assert "--project=mobile" in ev[0]["command"] and "KIP_LEVEL=ultra" in ev[0]["command"], ev[0]["command"]
+        inputs = {i["path"]: i["inside_run"] for i in ev[0]["inputs"]}
+        assert inputs.get("specs/c1.spec.ts") is True and inputs.get(str(pw.resolve())) is False, inputs
+        names = [Path(f["path"]).name for f in files]
+        assert "c1f1-c1e1-signup-mobile-test-finished-1.png" in names, names
+        assert sorted(f["type"] for f in files) == ["image"] * 5 + ["video"] * 5, files
+        md = rc("render", "--run", str(remote))
+        assert md.startswith("### Receipts · https://staging.example.test (remote: state not pinned) · ultra"), md
+        assert "· remote · log sha256" in md and "commit `" not in md, md
+        table_row = next(line for line in md.splitlines() if line.startswith("| c1 |"))
+        assert "desktest mobile https://broken.example.test (exit 1)<br>" in table_row, table_row
+        assert "`env " not in table_row, "full commands belong in the details, not the table"
+        assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
+        assert "❌ refuted" in md, md
+        assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
+                                              "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        spec.write_text("// edited after the run\n")
+        assert "hash mismatch for specs/c1.spec.ts" in rc("render", "--run", str(remote), ok=False)
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

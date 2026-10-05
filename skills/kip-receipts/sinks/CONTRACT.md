@@ -13,7 +13,7 @@ Checked in order, first match wins:
 
 1. `<repo>/.kip/sinks/<name>.py`: project sinks, to add one or override
    Kip's for a single repo.
-2. `skills/receipts/sinks/<name>.py`: Kip's sinks.
+2. `skills/kip-receipts/sinks/<name>.py`: Kip's sinks.
 
 `receipt.py sinks` lists every sink found and whether it's configured.
 
