@@ -4,8 +4,8 @@
   kip.py config                         print the merged config
   kip.py doctor                         what each configured surface needs, and whether it's here
   kip.py install [--host NAME] [--project]
-                                        link skills (and rules) into each host, and this
-                                        repo at ~/.kip/kip; idempotent
+                                        link skills (and rules, and hooks) into each host,
+                                        and this repo at ~/.kip/kip; idempotent
 
 Config layers, later wins: defaults.json next to this file, then
 $KIP_HOME/config.json (default ~/.kip), then <repo>/.kip/config.json. Dicts
@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
 RULES = ROOT / "rules" / "user-rules.md"
+RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
 SURFACES = ("hosts", "connectors", "evidence", "destinations")
 CONNECTOR_KINDS = ("mcp", "tool")
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
@@ -136,6 +138,10 @@ def cmd_doctor(a):
             s = status(cfg, entry)
             if s != "ready" and entry.get("fallback"):
                 s += f" → falls back to {entry['fallback']}"
+            if kind == "hosts" and entry.get("hooks"):
+                s += " · hooks " + ("installed" if hooks_installed(entry["hooks"]) else "not installed (run install)")
+            elif kind == "hosts" and entry.get("rules"):
+                s += " · rules only, no hooks"
             print(f"  {name:14} {s}")
 
 
@@ -178,6 +184,41 @@ def install_rules(rules):
     print(f"  rules: imported in {target}")
 
 
+def is_kip(group):
+    """Kip's hook groups are the ones calling receipt.py check, wherever the repo lived when installed."""
+    return any("kip-receipts/receipt.py check" in h.get("command", "") for h in group.get("hooks", []))
+
+
+def hook_groups(hooks):
+    """The host's hook events with {receipt} filled in, as the host's settings expect them."""
+    cmd = shlex.quote(str(RECEIPT))
+    return {event: [{**g, "hooks": [{**h, "command": h["command"].format(receipt=cmd)} for h in g["hooks"]]}
+                    for g in groups] for event, groups in hooks["events"].items()}
+
+
+def read_settings(path):
+    try:
+        return json.loads(path.read_text()) if path.exists() else {}
+    except ValueError as err:
+        sys.exit(f"{path}: {err}; fix it before installing hooks")
+
+
+def hooks_installed(hooks):
+    on = read_settings(Path(hooks["settings"]).expanduser()).get("hooks", {})
+    return all(any(is_kip(g) for g in on.get(event, [])) for event in hooks["events"])
+
+
+def install_hooks(hooks, path):
+    """Replace Kip's own hook groups in the host's settings; leave every other hook alone."""
+    settings = read_settings(path)
+    on = settings.setdefault("hooks", {})
+    for event, groups in hook_groups(hooks).items():
+        on[event] = [g for g in on.get(event, []) if not is_kip(g)] + groups
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n")
+    print(f"  hooks: {', '.join(hooks['events'])} in {path}")
+
+
 def cmd_install(a):
     cfg = load()
     hosts = cfg["hosts"]
@@ -206,6 +247,9 @@ def cmd_install(a):
         link(top / h["project_skills"] if a.project else Path(h["skills"]).expanduser(), found)
         if h.get("rules") and not a.project:
             install_rules(h["rules"])
+        if h.get("hooks"):
+            hk = h["hooks"]
+            install_hooks(hk, top / hk["project_settings"] if a.project else Path(hk["settings"]).expanduser())
 
 
 def main():

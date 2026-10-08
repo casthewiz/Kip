@@ -123,6 +123,7 @@ def main():
         assert "`c1f1-shot.png` (sha256" in md and "not uploaded" in md, md
         assert md.endswith(f"`kip-receipt {run.name}`"), md
         assert md == rc("render"), "render is not deterministic"
+        assert "| # | Claim | Provider | Evidence | Verdict |" in md, "unplanned runs grew a Unit column"
 
         jira = rc("render", "--sink", "jira")
         assert jira.startswith("h3. Receipts") and "{{c1f1-shot.png}}" in jira and "not uploaded" in jira, jira
@@ -220,6 +221,39 @@ def main():
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
         spec.write_text("// edited after the run\n")
         assert "hash mismatch for specs/c1.spec.ts" in rc("render", "--run", str(remote), ok=False)
+
+        # Gate: kip-decompose plans claims into a run; host hooks block finishing once work has
+        # landed while a claim is unaddressed, and block opening a PR while one is refuted.
+        def check(*args, event=None, cwd=repo, extra_env=None):
+            r = subprocess.run([sys.executable, str(SCRIPT), "check", *args], cwd=cwd, env={**env, **(extra_env or {})},
+                               input=None if event is None else json.dumps(event), capture_output=True, text=True)
+            return r.returncode, (r.stdout + r.stderr).strip()
+
+        assert check(extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "empty"))}) == (0, "check: no receipt run for this repo")
+        plan = Path(rc("init", "--level", "full"))
+        assert rc("claim", "app prints hi!", "--unit", "1") == "c1"
+        rc("claim", "app runs on the device", "--unit", "2", "--provider", "api")
+        assert json.loads((plan / "receipt.json").read_text())["claims"][1]["unit"] == "2"
+        md = rc("render")
+        assert "| # | Unit | Claim | Provider | Evidence | Verdict |" in md and "| c2 | 2 | app runs on the device |" in md, md
+        assert "||#||Unit||Claim||" in rc("render", "--sink", "jira")
+        assert check("--hook", "stop", event={}) == (0, "check: no code changed since the run started")
+
+        (repo / "app.py").write_text('print("hi!!")\n')
+        code, out = check("--hook", "stop", event={"cwd": str(repo)}, cwd=tmp)
+        assert code == 2 and "c1 ⚠️ unverified: app prints hi!" in out and "c2 ⚠️ unverified" in out, out
+        assert check("--hook", "stop", event={"stop_hook_active": True})[0] == 0, "stop hook could loop"
+        assert check("--hook", "pr", event={"tool_input": {"command": "git commit -m x"}})[0] == 0
+        assert check("--hook", "pr", event={"tool_input": {"command": "gh pr create --fill"}})[0] == 2
+        sh("git", "checkout", "-q", "-b", "elsewhere")
+        assert "not this branch" in check("--hook", "stop", event={})[1]
+        sh("git", "checkout", "-q", "-")
+
+        rc("run", "c1", "--", "false")
+        rc("unverified", "c2", "needs the device")
+        assert check("--hook", "stop", event={})[0] == 0, "refuted claims are reported, not blocked, at stop"
+        code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}})
+        assert code == 2 and "c1 ❌ refuted" in out and "  c2 " not in out, out
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

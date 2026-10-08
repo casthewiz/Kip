@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RULES = ROOT / "rules" / "user-rules.md"
+RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
 
 
 def main():
@@ -65,7 +66,13 @@ def main():
 
         # Install: detected hosts only, every skill linked, rules imported once, idempotent.
         skills = sorted(p.parent.name for p in (ROOT / "skills").rglob("SKILL.md"))
+        settings = home / ".claude" / "settings.json"
+        mine = {"hooks": [{"type": "command", "command": "say done"}]}
+        stale = {"hooks": [{"type": "command", "command": "python3 /old/skills/verification/kip-receipts/receipt.py check --hook stop"}]}
+        write(settings, {"model": "x", "hooks": {"Stop": [mine, stale]}})
+        assert "claude-code    ready · hooks not installed" in kip("doctor")
         out = kip("install")
+        first = settings.read_text()
         assert "cursor: skipped, missing ~/.cursor" in out, out
         for d in (home / ".kip" / "skills", home / ".claude" / "skills"):
             assert sorted(p.name for p in d.iterdir()) == skills, d
@@ -74,6 +81,20 @@ def main():
         claude_md = home / ".claude" / "CLAUDE.md"
         assert claude_md.read_text() == f"@{RULES}\n", claude_md.read_text()
         assert "rules: already imported" in kip("install") and claude_md.read_text() == f"@{RULES}\n"
+
+        # Hooks: Kip's groups are added once, a stale Kip path is replaced, the user's own hooks and keys stay.
+        on = json.loads(settings.read_text())
+        assert on["model"] == "x" and on["hooks"]["Stop"][0] == mine and len(on["hooks"]["Stop"]) == 2, on
+        assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
+        pre = on["hooks"]["PreToolUse"]
+        assert len(pre) == 1 and pre[0]["matcher"] == "Bash" and pre[0]["hooks"][0]["command"].endswith("--hook pr"), pre
+        assert settings.read_text() == first, "second install changed hooks"
+        assert "claude-code    ready · hooks installed" in kip("doctor")
+        assert "cursor         missing ~/.cursor · rules only, no hooks" in kip("doctor")
+        settings.write_text("{not json")
+        assert "fix it before installing hooks" in kip("install", "--host", "claude-code", ok=False)
+        assert settings.read_text() == "{not json"
+        write(settings, on)
         # An existing ~-relative import counts as already imported.
         (home / "Kip").symlink_to(ROOT)
         claude_md.write_text("# mine\n@~/Kip/rules/user-rules.md\n")
@@ -92,6 +113,7 @@ def main():
         out = kip("install", "--host", "cursor")
         assert "rules: Paste" in out and len(list((home / ".cursor" / "skills").iterdir())) == len(skills), out
         kip("install", "--project")
+        assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills
         assert "unknown host nope" in kip("install", "--host", "nope", ok=False)
     print("kip.py: all checks passed")

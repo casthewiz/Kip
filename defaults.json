@@ -5,7 +5,15 @@
       "requires": {"file": ["~/.claude"]},
       "skills": "~/.claude/skills",
       "project_skills": ".claude/skills",
-      "rules": {"append": "~/.claude/CLAUDE.md", "line": "@{rules}"}
+      "rules": {"append": "~/.claude/CLAUDE.md", "line": "@{rules}"},
+      "hooks": {
+        "settings": "~/.claude/settings.json",
+        "project_settings": ".claude/settings.json",
+        "events": {
+          "Stop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook stop"}]}],
+          "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]}]
+        }
+      }
     },
     "cursor": {
       "requires": {"file": ["~/.cursor"]},

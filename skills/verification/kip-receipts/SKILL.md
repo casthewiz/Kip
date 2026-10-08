@@ -190,6 +190,13 @@ python3 $R publish                                   # post to the run's sinks, 
 python3 $R publish --sink jira --issue PROJ-9        # opt a local run into a sink later
 ```
 
+**Continue a planned run.** If `kip-decompose` already recorded this
+task's claims, `receipt.py render` shows them with a Unit column on this
+branch. Add evidence to that run instead of calling `init` again; add
+claims to it only for promises the plan missed. A run's destination can be
+added later with `publish --sink`, so a planned run still gets the
+destination question before its first evidence.
+
 Each run is a folder under `~/.kip/receipts/<repo>/<run-id>/` (override with
 `$KIP_RECEIPTS_DIR`): a `receipt.json` and a `files/` folder. What makes it
 deterministic:
@@ -253,7 +260,7 @@ default destination: `receipt.py init` with no `--sink` records locally and
 publishes nowhere. Uploading to Linear, Jira, or another sink is opt-in.
 
 **Every session that produces evidence confirms its destination before
-recording anything.** Run `receipt.py sinks`, then ask the user (with the
+recording any evidence.** Run `receipt.py sinks`, then ask the user (with the
 question tool, if available):
 
 - Where should this session's evidence go? The destination `sinks` marks
@@ -316,6 +323,16 @@ still complete.
 
 If `receipt.py` can't run (no Python 3), write the ledger by hand in the same
 shape, and mark every claim ⚠️ that you can't back with quoted output.
+
+## Gate
+
+`kip.py install` wires `receipt.py check` into hosts that support hooks
+(Claude Code: `Stop` and `PreToolUse`). Once code has changed since the
+run's `init`, finishing a turn is blocked while any claim on this branch's
+run has neither evidence nor an `unverified` reason, and `gh pr create` is
+blocked while any claim is also ❌. The block message lists the claims;
+address them, don't work around the hook. A host without hooks (Cursor)
+relies on these rules alone.
 
 ## Boundaries
 

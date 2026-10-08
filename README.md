@@ -28,6 +28,16 @@ git clone https://github.com/casthewiz/Kip.git ~/Documents/GitHub/Kip
 python3 ~/Documents/GitHub/Kip/kip.py install
 ```
 
+Or ask your agent to do it, in Claude Code or Cursor:
+
+> Clone https://github.com/casthewiz/Kip.git to ~/Documents/GitHub/Kip, run
+> `python3 kip.py install`, then `python3 kip.py doctor` and tell me what
+> it reports.
+
+Approve the edit to your agent's settings when asked (that's the hooks),
+and paste the rules yourself if `install` says to. Then start a new
+session: skills, rules, and hooks load at session start.
+
 `install` links every skill (any folder with a `SKILL.md`, however deeply
 nested; names must be unique) into each **host** it detects, wires up the always-on
 [rules](rules/user-rules.md) (lazy senior developer, claims and evidence,
@@ -38,6 +48,11 @@ skill (links to moved skills are pruned). Options:
 - `--host cursor`: install for one host, even if it isn't detected.
 - `--project`: link into this repo's `.claude/skills/`, `.cursor/skills/`
   instead of your user folders.
+
+Where a host supports hooks (Claude Code), `install` also adds the
+receipts [gate](skills/verification/kip-receipts/SKILL.md#gate) to its
+settings, leaving your own hooks alone: once code changes, the agent can't
+end a turn with unaddressed claims or open a PR with refuted ones.
 
 Skills are always also linked into `~/.kip/skills/`, a host-neutral path
 that skills use to call their own scripts. Claude Code gets the rules as an
@@ -59,7 +74,7 @@ surface needs and whether it's here.
 
 | Kind | What it is | Defaults |
 | --- | --- | --- |
-| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, or `manual` instructions) | kip, claude-code, cursor |
+| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, or `manual` instructions), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (Stop and PR gates), cursor |
 | `connectors` | The agent's own tools a surface can run through: `kind` is `mcp` or `tool` | browser |
 | `evidence` | [Receipts providers](skills/verification/kip-receipts/providers/CONTRACT.md): a `doc` procedure, plus a `fallback` | frontend (Playwright `viewports`), browser, api, generic |
 | `destinations` | [Receipts sinks](skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira |

@@ -20,7 +20,7 @@ When asking clarifying questions with fixed choices, always use the structured q
 
 ## Claims and evidence
 
-Anything you believe you accomplished is a claim until evidence settles it. Evidence is a rerunnable, deterministic check (command, test, request, query) plus its observed output, and it must be capable of failing if the claim is false. "I read the code and it looks right" is not evidence. Never report something as done, fixed, working, or passing without evidence; label it unverified and say why. Follow the `/kip-receipts` skill for thoroughness levels and the claims ledger.
+Anything you believe you accomplished is a claim until evidence settles it. Evidence is a rerunnable, deterministic check (command, test, request, query) plus its observed output, and it must be capable of failing if the claim is false. "I read the code and it looks right" is not evidence. Never report something as done, fixed, working, or passing without evidence; label it unverified and say why. Follow the `/kip-receipts` skill for thoroughness levels and the claims ledger. Where the host supports hooks, this is enforced: unaddressed claims block ending the turn.
 
 ---
 

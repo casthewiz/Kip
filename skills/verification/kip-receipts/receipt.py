@@ -4,7 +4,8 @@
   receipt.py sinks                                          list destinations and whether each is ready
   receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra]
                                                             start a run (local only by default), print its dir
-  receipt.py claim "TEXT" [--provider NAME] [--level L]     add a claim, print its id
+  receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N]
+                                                            add a claim, print its id
   receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] -- CMD ...
                                                             run CMD, record the result, attach media from DIR
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
@@ -15,6 +16,8 @@
                                                             optionally opting the run into another sink first
   receipt.py record --sink NAME --url URL [--comment-id ID] record a comment the agent posted (agent-backed sinks)
   receipt.py path                                           print the run dir
+  receipt.py check [--hook stop|pr]                         exit 2 if this branch's run has open claims
+                                                            and the code changed since init (host hooks)
 
 Every command takes --run DIR; default is the latest run for the current repo.
 Runs live in $KIP_RECEIPTS_DIR (default ~/.kip/receipts)/<repo>/<run-id>/.
@@ -126,6 +129,12 @@ def find_claim(rec, cid):
     sys.exit(f"unknown claim {cid}; claims: {', '.join(c['id'] for c in rec['claims']) or 'none'}")
 
 
+def fingerprint():
+    """Hash of HEAD, the diff, and untracked names: changes once any work lands after init."""
+    state = "\n".join(git(*a) or "" for a in (["rev-parse", "HEAD"], ["diff", "HEAD"], ["status", "--porcelain"]))
+    return hashlib.sha256(state.encode()).hexdigest()
+
+
 def code_state(d, rec, eid):
     """Pin the code an evidence ran against: HEAD, plus the uncommitted diff if any.
     A remote target isn't this checkout, so there's nothing local to pin."""
@@ -202,7 +211,7 @@ def cmd_init(a):
     (d / "files").mkdir(parents=True)
     (d / "specs").mkdir()  # test code written for this run lives with its evidence
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
-             "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"),
+             "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
              "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "claims": []})
     (d.parent / "LATEST").write_text(rid + "\n")
@@ -213,7 +222,7 @@ def cmd_claim(a):
     d = run_dir(a)
     rec = load(d)
     cid = f"c{len(rec['claims']) + 1}"
-    rec["claims"].append({"id": cid, "text": a.text, "provider": a.provider, "level": a.level,
+    rec["claims"].append({"id": cid, "text": a.text, "unit": a.unit, "provider": a.provider, "level": a.level,
                           "evidence": [], "files": [], "unverified": None})
     save(d, rec)
     print(cid)
@@ -329,6 +338,11 @@ def evidence_meta(e, code):
     return " · ".join(meta)
 
 
+def has_units(rec):
+    """Runs planned by kip-decompose tag claims with their unit; others keep the original table."""
+    return any(c.get("unit") for c in rec["claims"])
+
+
 def render_markdown(rec, sink=None):
     def cell(s):
         return str(s).replace("|", "\\|").replace("\n", " ")
@@ -336,12 +350,15 @@ def render_markdown(rec, sink=None):
     def code(s):
         return f"`{s}`"
 
+    units = has_units(rec)
     out = [f"### Receipts · {subject(rec, code)} · {rec['level']}", "",
-           "| # | Claim | Provider | Evidence | Verdict |", "|---|---|---|---|---|"]
+           "| # |" + (" Unit |" if units else "") + " Claim | Provider | Evidence | Verdict |",
+           "|---|" + ("---|" if units else "") + "---|---|---|---|"]
     for c in rec["claims"]:
         v = verdict(c, rec["level"]) + (f": {c['unverified']}" if c["unverified"] else "")
         ev = "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
-        out.append(f"| {c['id']} | {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
+        unit = f" {cell(c.get('unit') or '—')} |" if units else ""
+        out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
     for c in rec["claims"]:
         if not c["evidence"] and not c["files"]:
             continue
@@ -374,11 +391,14 @@ def render_jira(rec, sink=None):
     def code(s):
         return f"{{{{{s}}}}}"
 
-    out = [f"h3. Receipts · {subject(rec, code)} · {rec['level']}", "", "||#||Claim||Provider||Evidence||Verdict||"]
+    units = has_units(rec)
+    out = [f"h3. Receipts · {subject(rec, code)} · {rec['level']}", "",
+           "||#||" + ("Unit||" if units else "") + "Claim||Provider||Evidence||Verdict||"]
     for c in rec["claims"]:
         v = verdict(c, rec["level"]) + (f": {c['unverified']}" if c["unverified"] else "")
         ev = " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
-        out.append(f"|{c['id']}|{cell(c['text'])}|{c['provider'] or 'generic'}|{ev}|{cell(v)}|")
+        unit = f"{cell(c.get('unit') or '—')}|" if units else ""
+        out.append(f"|{c['id']}|{unit}{cell(c['text'])}|{c['provider'] or 'generic'}|{ev}|{cell(v)}|")
     for c in rec["claims"]:
         if not c["evidence"] and not c["files"]:
             continue
@@ -488,6 +508,38 @@ def cmd_path(a):
     print(run_dir(a))
 
 
+def cmd_check(a):
+    """The gate host hooks call. Exit 2 (blocking, reasons on stderr) only when this branch's
+    run has claims nobody addressed and the code changed since init; anything else passes."""
+    hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
+    if hook.get("cwd"):
+        os.chdir(hook["cwd"])
+    if hook.get("stop_hook_active"):  # already nudged once this turn; never loop
+        return
+    if a.hook == "pr" and not re.search(r"\bgh\s+pr\s+create\b", hook.get("tool_input", {}).get("command", "")):
+        return
+    latest = ROOT / repo_name() / "LATEST"
+    if not a.run and not latest.exists():
+        return print("check: no receipt run for this repo")
+    d = run_dir(a)
+    rec = load(d)
+    if rec["branch"] != git("branch", "--show-current"):
+        return print(f"check: latest run is for {rec['branch']}, not this branch")
+    if rec.get("baseline") in (None, fingerprint()):
+        return print("check: no code changed since the run started")
+    pr = a.hook == "pr"
+    blocking = [f"{c['id']} {verdict(c, rec['level'])}: {c['text']}" for c in rec["claims"]
+                if (not c["evidence"] and not c["unverified"]) or (pr and verdict(c, rec["level"]).startswith("❌"))]
+    if not blocking:
+        return print(f"check: every claim in {rec['id']} is addressed")
+    todo = ("fix them, or re-run their checks, before opening a PR" if pr else
+            "record evidence (`receipt.py run`) or why it can't be verified (`receipt.py unverified`), "
+            "then end with `receipt.py render`")
+    print(f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(blocking) + f"\nNext: {todo}.",
+          file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--run", help="run dir (default: latest run for this repo)")
@@ -509,6 +561,7 @@ def main():
     s.add_argument("text")
     s.add_argument("--provider")
     s.add_argument("--level", choices=["lite", "full", "ultra"], help="override the run's level (e.g. ultra floor)")
+    s.add_argument("--unit", help="the kip-decompose unit this claim belongs to")
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("run", parents=[common])
@@ -555,6 +608,10 @@ def main():
 
     s = sub.add_parser("path", parents=[common])
     s.set_defaults(fn=cmd_path)
+
+    s = sub.add_parser("check", parents=[common])
+    s.add_argument("--hook", choices=["stop", "pr"], help="read a host hook's JSON event from stdin")
+    s.set_defaults(fn=cmd_check)
 
     # Split off the wrapped command ourselves; argparse.REMAINDER swallows run's own flags.
     argv, cmd = sys.argv[1:], []

@@ -101,11 +101,29 @@ Effort: full
 Lite drops the Problem section to one line and the Touches column. Then one
 line on where to start: the first unit, or every parallel unit at once.
 
+## Recording the plan
+
+The claims column is the task's record, not just a table. Write it into a
+local `kip-receipts` run so verification picks up the same claims, tagged
+with their unit, instead of retyping them:
+
+```bash
+R=~/.kip/skills/kip-receipts/receipt.py
+python3 $R init --level full                     # the plan's effort; local only, no destination yet
+python3 $R claim "POST /invoices accepts null due" --unit 1 --provider api
+python3 $R claim "Blank date renders 'No due date'" --unit 2 --provider frontend
+```
+
+One `claim` per claim in the table, at the ultra floor (`--level ultra`)
+where kip-receipts requires it. The run records the code as it is now; once
+work lands, the host's hooks won't let the session end while any of these
+claims is unaddressed. If the user changes the plan, start a new run.
+
 ## Boundaries
 
 Decompose governs understanding and planning. kip-ponytail governs how each unit
 gets built, kip-marie-kondo tidies it, and kip-receipts verifies the claims written
-here. Don't start implementing inside this skill unless the user asks to go
-straight on.
+here, in the run it records. Don't start implementing inside this skill
+unless the user asks to go straight on.
 
 Understand it before you cut it.
