@@ -12,12 +12,12 @@ work in any project, with Claude Code or Cursor.
 | **[implementation/](skills/implementation/)** | *How code gets written* |
 | [kip-ponytail](skills/implementation/kip-ponytail/SKILL.md) | Laziest solution that actually works |
 | [kip-marie-kondo](skills/implementation/kip-marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
-| **Verification** | *How work gets proven* |
-| [kip-receipts](skills/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
+| **[verification/](skills/verification/)** | *How work gets proven* |
+| [kip-receipts](skills/verification/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
 
 Each skill is a folder with a `SKILL.md` (YAML frontmatter + instructions),
 the format both Claude Code and Cursor load. Supporting files live inside the
-skill's folder (e.g. [kip-receipts/providers](skills/kip-receipts/providers/)).
+skill's folder (e.g. [kip-receipts/providers](skills/verification/kip-receipts/providers/)).
 Skills can be grouped into category folders like `implementation/`; the
 install step flattens them, so skill names must be unique across categories.
 
@@ -59,7 +59,7 @@ tracker available, export its credentials in your shell profile:
 - Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
 
 New destinations are one Python module each; see
-[skills/kip-receipts/sinks/CONTRACT.md](skills/kip-receipts/sinks/CONTRACT.md).
+[skills/verification/kip-receipts/sinks/CONTRACT.md](skills/verification/kip-receipts/sinks/CONTRACT.md).
 
 ## Rules
 
