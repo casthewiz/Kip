@@ -10,12 +10,28 @@ description: >-
   behavior. Use when the user says "marie kondo", "spark joy", "tidy up my
   branch/diff", "clean up my changes", "make this diff more concise",
   "remove duplicate code from my branch", "stop reinventing components", or
-  before opening a PR when the diff feels bloated.
+  before opening a PR when the diff feels bloated. Supports levels: lite
+  (safe mechanical cuts only), full (default), ultra (also deletes what
+  shouldn't exist at all).
+argument-hint: "[lite|full|ultra]"
+license: MIT
 ---
 
 # Marie Kondo
 
 Tidy the active branch's own changes (not the whole codebase). Only touch lines this branch introduced or modified relative to its base branch — never "fix" unrelated pre-existing code just because you're nearby.
+
+## Levels
+
+Default: **full**. Switch: `/kip-marie-kondo lite|full|ultra`.
+
+| Level | What gets cut |
+|---|---|
+| **lite** | Mechanical cuts only: narration and restating comments, commented-out code, debug leftovers, unused imports and variables. No restructuring. |
+| **full** | Every check in step 3: comments, duplication, dead code, indirection, redundant defensive code, verbose control flow, re-implemented components. Default. |
+| **ultra** | Everything in full, plus question whether each added function, file, option, or abstraction needs to exist at all (YAGNI, per kip-ponytail) and cut what nothing requires. Verify with tests on touched files, not just typecheck. |
+
+At every level the behavior-preservation rule holds: when unsure, leave it in.
 
 ## Workflow
 
