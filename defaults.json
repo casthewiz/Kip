@@ -1,0 +1,41 @@
+{
+  "hosts": {
+    "kip": {"skills": "~/.kip/skills"},
+    "claude-code": {
+      "requires": {"file": ["~/.claude"]},
+      "skills": "~/.claude/skills",
+      "project_skills": ".claude/skills",
+      "rules": {"append": "~/.claude/CLAUDE.md", "line": "@{rules}"}
+    },
+    "cursor": {
+      "requires": {"file": ["~/.cursor"]},
+      "skills": "~/.cursor/skills",
+      "project_skills": ".cursor/skills",
+      "rules": {"manual": "Paste {rules} into Cursor Settings → Rules → User Rules (re-paste after pulling)."}
+    }
+  },
+  "connectors": {
+    "browser": {"kind": "tool", "about": "The agent's own browser pane or browser extension"}
+  },
+  "evidence": {
+    "frontend": {
+      "doc": "skills/verification/kip-receipts/providers/frontend.md",
+      "requires": {"file": ["~/.kip/node_modules/@playwright/test/cli.js"]},
+      "fallback": "browser",
+      "viewports": {
+        "mobile": {"browserName": "chromium", "viewport": {"width": 390, "height": 844}, "deviceScaleFactor": 3, "isMobile": true, "hasTouch": true},
+        "tablet": {"browserName": "chromium", "viewport": {"width": 820, "height": 1180}, "deviceScaleFactor": 2, "isMobile": true, "hasTouch": true},
+        "desktop": {"browserName": "chromium", "viewport": {"width": 1440, "height": 900}}
+      }
+    },
+    "browser": {"doc": "skills/verification/kip-receipts/providers/frontend.md", "via": "browser", "fallback": "generic"},
+    "api": {"doc": "skills/verification/kip-receipts/providers/api.md", "fallback": "generic"},
+    "generic": {"doc": "skills/verification/kip-receipts/providers/generic.md"}
+  },
+  "destinations": {
+    "local": {"type": "local"},
+    "linear": {"type": "linear", "requires": {"env": ["LINEAR_API_KEY"]}},
+    "jira": {"type": "jira", "requires": {"env": ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]}}
+  },
+  "default_destination": "local"
+}

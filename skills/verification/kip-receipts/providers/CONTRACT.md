@@ -1,7 +1,7 @@
 # Provider contract
 
-Every provider, Kip's or a project's `.kip/receipts.md`, is a markdown file
-with these sections. Keep it short; a provider is a procedure, not an essay.
+Every provider, Kip's or a project's, is a markdown file with these
+sections, registered as an `evidence` surface in Kip's config. Keep it short; a provider is a procedure, not an essay.
 
 ```markdown
 # <name> provider
@@ -36,7 +36,16 @@ by `receipt.py run`; list only what it doesn't cover.
 
 ## Project providers
 
-A project's `.kip/receipts.md` uses the same sections, one block per surface
-it covers, headed `# <surface> provider`. It only needs to fill in what's
-specific to that repo (commands, ports, seed users, base URLs) and may say
-"otherwise as Kip's <surface> provider" to inherit the rest.
+A project registers its own in `.kip/config.json`, with `doc` relative to
+that file:
+
+```json
+{"evidence": {"api": {"doc": "api.md", "requires": {"cmd": ["docker"]}, "fallback": "generic"}}}
+```
+
+Using an existing name (`api`) overrides Kip's entry; a new name adds a
+surface. The doc only needs what's specific to that repo (commands, ports,
+seed users, base URLs) and may say "otherwise as Kip's <surface> provider"
+to inherit the rest. `requires` is what `kip.py doctor` checks (`env`,
+`cmd`, `file`); `via` a connector marks a provider that runs through the
+agent's own tools.

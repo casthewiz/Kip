@@ -1,6 +1,6 @@
 # User rules
 
-Always-on rules for any agent. Claude Code: import from `~/.claude/CLAUDE.md`. Cursor: paste into Cursor Settings → Rules → User Rules. See the README.
+Always-on rules for any agent. `python3 kip.py install` wires them into each detected host (see the README).
 
 ---
 

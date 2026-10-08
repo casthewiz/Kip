@@ -3,7 +3,11 @@
 recorded as its own receipts evidence with screenshots (plus video and trace
 at ultra).
 
-  desktest.py CLAIM URL SPEC [--red] [--viewports mobile,tablet,desktop] [--run DIR]
+  desktest.py CLAIM URL SPEC [--red] [--viewports NAME,...] [--run DIR]
+
+Viewports come from Kip's config (evidence.frontend.viewports, see kip.py
+config): mobile, tablet and desktop unless a user or project config changes
+them. Each one is a Playwright `use` block.
 
 URL is whatever is under test: a local dev server, a preview deploy, staging,
 prod. It doesn't have to be work this session did.
@@ -21,13 +25,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / "kip.py").is_file())))
+import kip  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 RECEIPT = HERE.parent / "receipt.py"
 CONFIG = HERE / "kip.config.mjs"
 KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
 PW_CLI = KIP_HOME / "node_modules" / "@playwright" / "test" / "cli.js"
 NODE_VERSION = (HERE / ".nvmrc").read_text().strip()
-VIEWPORTS = ["mobile", "tablet", "desktop"]
 SETUP = f"run `bash {HERE / 'setup.sh'}` once"
 
 
@@ -61,14 +67,15 @@ def main():
     p.add_argument("url")
     p.add_argument("spec")
     p.add_argument("--red", action="store_true", help="run against a baseline that lacks the behavior; must fail")
-    p.add_argument("--viewports", default=",".join(VIEWPORTS))
+    p.add_argument("--viewports", help="comma-separated; default: every configured viewport")
     p.add_argument("--run")
     a = p.parse_args()
 
-    viewports = a.viewports.split(",")
-    unknown = set(viewports) - set(VIEWPORTS)
-    if unknown:
-        sys.exit(f"unknown viewport {', '.join(sorted(unknown))}; available: {', '.join(VIEWPORTS)}")
+    configured = kip.load()["evidence"].get("frontend", {}).get("viewports", {})
+    viewports = a.viewports.split(",") if a.viewports else list(configured)
+    unknown = set(viewports) - set(configured)
+    if unknown or not viewports:
+        sys.exit(f"unknown viewport {', '.join(sorted(unknown))}; available: {', '.join(configured) or 'none'}")
     pw = playwright()
     spec = Path(a.spec).resolve()
     if not spec.is_file():
@@ -88,8 +95,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix=f"kip-{vp}-") as out:
             # Every input is spelled out in the recorded command, so the evidence reruns exactly.
             # NODE_PATH lets specs anywhere (e.g. a custom $KIP_RECEIPTS_DIR) import Kip's @playwright/test.
-            cmd = ["env", f"BASE_URL={a.url}", f"KIP_LEVEL={level}", f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}",
-                   f"NODE_PATH={KIP_HOME / 'node_modules'}",
+            vp_json = json.dumps({vp: configured[vp]}, separators=(",", ":"))
+            cmd = ["env", f"BASE_URL={a.url}", f"KIP_VIEWPORTS={vp_json}", f"KIP_LEVEL={level}",
+                   f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={KIP_HOME / 'node_modules'}",
                    *pw, "test", str(spec), "--config", str(CONFIG), f"--project={vp}"]
             r = subprocess.run([sys.executable, str(RECEIPT), "run", a.claim, *run_args,
                                 *(["--red"] if a.red else []), "--collect", out,

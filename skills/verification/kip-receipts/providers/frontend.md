@@ -14,8 +14,9 @@ server, a preview deploy, staging, prod. It doesn't matter who built it.
    if the claim is about its existing e2e suite.
 
 If 1 is unmet, fall through to generic (component tests). If 2 is unmet and
-the user declines the install, use an agent browser tool with `observe` and
-attached screenshots, and say the evidence is observed, not asserted.
+the user declines the install, fall back to the `browser` surface: an agent
+browser tool with `observe` and attached screenshots, and say the evidence
+is observed, not asserted.
 
 ## lite
 Typecheck and build. Run existing component tests for the touched
@@ -27,13 +28,14 @@ Write a spec for the claim in the run's `specs/` folder (start from
 it across all three viewports:
 
 ```bash
-P=~/.claude/skills/kip-receipts/playwright        # or ~/.cursor/...
+P=~/.kip/skills/kip-receipts/playwright
 cp $P/example.spec.ts "$(python3 $R path)/specs/c1.spec.ts"   # then edit it
 python3 $P/desktest.py c1 http://localhost:3000 "$(python3 $R path)/specs/c1.spec.ts"
 ```
 
-Each viewport (mobile 390×844, tablet 820×1180, desktop 1440×900) becomes
-its own evidence row, so a layout that breaks only on mobile shows up as
+Each configured viewport (by default mobile 390×844, tablet 820×1180,
+desktop 1440×900; a user or project config can change them under
+`evidence.frontend.viewports`) becomes its own evidence row, so a layout that breaks only on mobile shows up as
 exactly that. The spec should:
 - Navigate with relative paths (`BASE_URL` comes from the command).
 - Perform the interaction the claim describes.

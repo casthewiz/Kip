@@ -23,21 +23,34 @@ exit 0
 '''
 
 # A project-level sink, loaded from <repo>/.kip/sinks/, that logs calls instead of posting.
+# Posts to its FAKE_URL setting, so each configured instance lands somewhere different.
 FAKE_SINK = '''
 import json, os
 from pathlib import Path
 FORMAT = "markdown"
-REQUIRES = ["FAKE_SINK_LOG"]
 def _log(*event):
     p = Path(os.environ["FAKE_SINK_LOG"])
     p.write_text(json.dumps((json.loads(p.read_text()) if p.exists() else []) + [list(event)]))
-def upload(issue, path, content_type):
+def upload(conf, issue, path, content_type):
     _log("upload", issue, path.name, content_type)
-    return "https://fake.test/" + path.name
-def publish(issue, body, comment_id):
+    return conf.get("FAKE_URL", "https://fake.test") + "/" + path.name
+def publish(conf, issue, body, comment_id):
     _log("update" if comment_id else "create", issue, body)
-    return comment_id or "cm1", "https://fake.test/" + issue + "#cm1"
+    return comment_id or "cm1", conf.get("FAKE_URL", "https://fake.test") + "/" + issue + "#cm1"
 '''
+
+# Two instances of one sink module with their own settings, an agent-backed destination,
+# and a project default destination.
+PROJECT_CONFIG = {
+    "connectors": {"tracker-mcp": {"kind": "mcp"}},
+    "destinations": {
+        "fake-a": {"type": "fake", "requires": {"env": ["FAKE_URL"]}, "settings": {"FAKE_URL": "https://a.test"}},
+        "fake-b": {"type": "fake", "requires": {"env": ["FAKE_URL"]}, "env": {"FAKE_URL": "FAKE_B_URL"}},
+        "tracker": {"via": "tracker-mcp"},
+        "weird": {"via": "tracker-mcp", "format": "rtf"},
+    },
+    "default_destination": "fake-a",
+}
 
 
 def main():
@@ -45,7 +58,8 @@ def main():
         repo = Path(tmp, "demo")
         repo.mkdir()
         sink_log = Path(tmp, "sink.json")
-        env = {**os.environ, "KIP_RECEIPTS_DIR": str(Path(tmp, "store")), "FAKE_API_TOKEN": "supersecret123",
+        env = {**os.environ, "KIP_RECEIPTS_DIR": str(Path(tmp, "store")), "KIP_HOME": str(Path(tmp, "home")),
+               "FAKE_B_URL": "https://b.test", "FAKE_API_TOKEN": "supersecret123",
                "FAKE_SINK_LOG": str(sink_log), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
@@ -62,6 +76,7 @@ def main():
         (repo / "app.py").write_text('print("hi")\n')
         (repo / ".kip" / "sinks").mkdir(parents=True)
         (repo / ".kip" / "sinks" / "fake.py").write_text(FAKE_SINK)
+        (repo / ".kip" / "config.json").write_text(json.dumps(PROJECT_CONFIG))
         sh("git", "init", "-q")
         sh("git", "add", ".")
         sh("git", "commit", "-qm", "init")
@@ -71,6 +86,7 @@ def main():
         assert "unknown sink nope" in rc("init", "--sink", "nope", ok=False)
         sinks = rc("sinks")
         assert "local" in sinks and "fake       ready" in sinks and "linear     missing LINEAR_API_KEY" in sinks, sinks
+        assert "fake-a     ready (recommended)" in sinks and "tracker    agent-confirm via tracker-mcp (mcp)" in sinks, sinks
         opted = Path(rc("init", "--sink", "fake", "--issue", "ENG-9"))
         assert json.loads((opted / "receipt.json").read_text())["sinks"] == ["local", "fake"]
 
@@ -134,7 +150,23 @@ def main():
         assert events[1][2] == rc("render", "--sink", "fake"), "posted body differs from render output"
         rec = json.loads((run / "receipt.json").read_text())
         assert rec["published"]["fake"] == {"comment_id": "cm1", "url": "https://fake.test/ENG-1#cm1"}, rec
-        assert "linear" not in rec["published"] and rec["sinks"] == ["local", "fake", "linear"], rec
+
+        # Two instances of one module publish with their own settings (a literal, an aliased env var).
+        out = rc("publish", "--sink", "fake-a", "--sink", "fake-b", ok=False)
+        assert "fake-a: posted https://a.test/ENG-1#cm1" in out and "fake-b: posted https://b.test/ENG-1#cm1" in out, out
+        assert "fake-b: skipped, missing FAKE_B_URL" in rc("publish", ok=False, extra_env={"FAKE_B_URL": ""})
+
+        # Agent-backed: nothing is recorded until the agent posts and records it; then publish updates it.
+        out = rc("publish", "--sink", "tracker", ok=False)
+        assert "tracker: agent-backed via tracker-mcp: post a new comment on ENG-1" in out, out
+        assert "tracker" not in json.loads((run / "receipt.json").read_text())["published"]
+        assert "isn't one of this run's sinks" in rc("record", "--sink", "nope", "--url", "u", ok=False)
+        rc("record", "--sink", "tracker", "--url", "https://t.test/ENG-1#c9", "--comment-id", "c9")
+        assert "tracker: agent-backed via tracker-mcp: update comment c9 on ENG-1" in rc("publish", ok=False)
+        assert rc("render", "--sink", "tracker") == rc("render"), "agent-backed render differs from markdown"
+        assert "unknown format rtf" in rc("render", "--sink", "weird", ok=False)
+        rec = json.loads((run / "receipt.json").read_text())
+        assert "linear" not in rec["published"] and rec["sinks"][:3] == ["local", "fake", "linear"], rec
         assert rec["issue"] == "ENG-1", rec
 
         # Desk test a remote site someone else built: per-viewport evidence, collected media,
@@ -176,6 +208,14 @@ def main():
         assert "`env " not in table_row, "full commands belong in the details, not the table"
         assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
         assert "❌ refuted" in md, md
+        # Viewports come from config: a project that only cares about mobile drops the others.
+        (repo / ".kip" / "config.json").write_text(json.dumps(
+            {**PROJECT_CONFIG, "evidence": {"frontend": {"viewports": {"tablet": None, "desktop": None}}}}))
+        dt = sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(spec),
+                extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        assert dt.startswith("mobile ") and len(dt.splitlines()) == 1, dt
+        cmd = json.loads((remote / "receipt.json").read_text())["claims"][0]["evidence"][-1]["command"]
+        assert any(c.startswith('KIP_VIEWPORTS={"mobile":{"browserName":"chromium"') for c in cmd), cmd
         assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
         spec.write_text("// edited after the run\n")

@@ -88,8 +88,8 @@ evidence with screenshots (plus video and a trace at ultra). The
 ```bash
 python3 $R init --target https://staging.example.com --level full
 python3 $R claim "Signup shows a confirmation on every viewport" --provider frontend
-cp ~/.claude/skills/kip-receipts/playwright/example.spec.ts "$(python3 $R path)/specs/c1.spec.ts"  # edit it
-python3 ~/.claude/skills/kip-receipts/playwright/desktest.py c1 https://staging.example.com \
+cp ~/.kip/skills/kip-receipts/playwright/example.spec.ts "$(python3 $R path)/specs/c1.spec.ts"  # edit it
+python3 ~/.kip/skills/kip-receipts/playwright/desktest.py c1 https://staging.example.com \
   "$(python3 $R path)/specs/c1.spec.ts"
 ```
 
@@ -129,13 +129,18 @@ export was removed"). They are never sufficient for claims about behavior
 ## Providers
 
 How evidence gets produced depends on what a claim touches. A **provider**
-knows how to produce evidence for one surface. Providers live next to this
-file in [`providers/`](providers/) and follow the contract in
-[`providers/CONTRACT.md`](providers/CONTRACT.md).
+knows how to produce evidence for one surface. Providers are the `evidence`
+surfaces in Kip's config: each names its `doc` (a procedure following
+[`providers/CONTRACT.md`](providers/CONTRACT.md)), what it `requires`, and
+the `fallback` to use when that's missing. Run `python3 ~/.kip/kip/kip.py
+doctor` to see which are ready here; a surface marked agent-confirm runs
+through one of your own tools (a browser pane, an MCP server), so check that
+tool is connected before using it.
 
 | Provider | Handles |
 |---|---|
-| [frontend](providers/frontend.md) | UI renders, interactions, layout, accessibility |
+| [frontend](providers/frontend.md) | UI renders, interactions, layout, accessibility, via Playwright at the configured viewports |
+| browser | The same, through the agent's own browser tool (`observe` + screenshots); frontend's fallback |
 | [api](providers/api.md) | HTTP endpoints: status, body, auth, validation |
 | [generic](providers/generic.md) | Anything else: tests, scripts, commands. Always available. |
 
@@ -143,18 +148,19 @@ For each claim, cascade:
 
 1. **Classify** the surfaces it touches: UI, API, data, CLI, library, infra.
 2. **Pick the most specific provider** per surface, first match wins:
-   1. **Project provider**: `.kip/receipts.md` in the repo being worked on,
-      if present. It knows this repo's commands, ports, and fixtures, and
-      overrides or extends Kip providers for the surfaces it declares.
-   2. **Kip provider**: the matching file in `providers/`.
+   1. **Project provider**: an `evidence` entry in the repo's
+      `.kip/config.json`, whose `doc` knows this repo's commands, ports,
+      and fixtures. It overrides or extends Kip's entry of the same name.
+   2. **User or Kip provider**: the same surface from `~/.kip/config.json`
+      or Kip's defaults.
    3. **generic**.
    4. **None**: the claim is ⚠️, naming the missing provider.
 3. **Compose** when a claim spans surfaces. "The signup form creates the
    user" needs frontend AND api. The claim is ✅ only if every required
    provider's evidence confirms it.
 4. **Fall through** when a provider's requirements aren't met (no dev server,
-   no browser tool, no running API). Drop to the next provider in the cascade
-   and note the downgrade in the ledger. Downgraded evidence must still meet
+   no browser tool, no running API). Follow the surface's `fallback` (frontend
+   → browser → generic) and note the downgrade in the ledger. Downgraded evidence must still meet
    the thoroughness level, or the claim is ⚠️.
 
 Read a provider's file before using it. Add a provider when a real claim needs
@@ -163,13 +169,13 @@ one; don't scaffold providers for surfaces nobody has claimed anything about.
 ## Recording
 
 Evidence is recorded by [`receipt.py`](receipt.py) in this skill's folder
-(`~/.claude/skills/kip-receipts/receipt.py` or `~/.cursor/skills/kip-receipts/receipt.py`
-once installed), never typed up by hand. The script runs each check itself,
+(`~/.kip/skills/kip-receipts/receipt.py` once installed, whatever the host),
+never typed up by hand. The script runs each check itself,
 so exit codes and output come from the run, not from your summary of it.
 
 ```bash
-R=~/.claude/skills/kip-receipts/receipt.py               # or ~/.cursor/...
-python3 $R sinks                                     # what's available and configured
+R=~/.kip/skills/kip-receipts/receipt.py
+python3 $R sinks                                     # configured destinations, ready or not
 python3 $R init --level full                         # local only (the default)
 #  or: init --sink linear --issue ENG-123 --level full  # if the user opted into a sink
 python3 $R claim "POST /invoices accepts null due" --provider api --level ultra
@@ -250,16 +256,16 @@ publishes nowhere. Uploading to Linear, Jira, or another sink is opt-in.
 recording anything.** Run `receipt.py sinks`, then ask the user (with the
 question tool, if available):
 
-- Where should this session's evidence go? **Local only** is the first,
-  recommended option. Then local plus each configured sink (Linear, Jira, or
-  a project sink). Leave out sinks whose environment variables are missing,
-  and say which ones they are.
+- Where should this session's evidence go? The destination `sinks` marks
+  (recommended) is the first option: **local only** unless a user or
+  project config sets `default_destination`. Then local plus each other
+  destination that's ready or agent-confirm. Leave out the ones `sinks`
+  reports missing, and say what they're missing.
 - For each cloud sink picked, which issue? Suggest the key from the branch
   name or recent commits, and let the user correct it.
 
-A project's `.kip/receipts.md` may name a different preferred destination;
-offer it as the recommended option instead, but still ask. `init` requires
-`--issue` for any cloud sink.
+A recommended destination is a default, not consent: still ask. `init`
+requires `--issue` for any cloud sink.
 
 The user can also opt in later: if a run was local only, offer once, after
 the ledger, to upload it. On a yes, `receipt.py publish --sink <name>
@@ -271,14 +277,18 @@ stays tied to one issue, so a different issue means a new run.
 
 ## Sinks
 
-A sink publishes the record somewhere other than the local folder. `local` is
-built in and always on; every other sink is one Python module with two
-functions (`upload` a file, `publish` a comment) described in
-[`sinks/CONTRACT.md`](sinks/CONTRACT.md). Adding a destination means adding
-one module: Kip's live in [`sinks/`](sinks/), and a repo can add or override
-its own in `<repo>/.kip/sinks/`.
+A sink publishes the record somewhere other than the local folder: one of
+the `destinations` in Kip's config. `local` is built in and always on. Every
+other destination is either **script-backed**, a Python module with two
+functions (`upload` a file, `publish` a comment) that `receipt.py` calls
+with the destination's settings, or **agent-backed** (`via` a connector such
+as an MCP server), which you post yourself. Both are described in
+[`sinks/CONTRACT.md`](sinks/CONTRACT.md). Kip's modules live in
+[`sinks/`](sinks/), and a repo can add or override its own in
+`<repo>/.kip/sinks/`. One module can back several destinations (two Jira
+sites), each with its own settings.
 
-| Sink | Publishes | Requires |
+| Sink | Publishes | Default settings |
 |---|---|---|
 | local | `receipt.json` + files under `~/.kip/receipts/<repo>/<run-id>/` | nothing |
 | [linear](sinks/linear.py) | Issue comment with the ledger; images embedded, videos and logs linked | `LINEAR_API_KEY` |
@@ -287,9 +297,14 @@ its own in `<repo>/.kip/sinks/`.
 `receipt.py publish` is the same for every sink: upload each file once, post
 `render` output verbatim (never a rewrite), and update the run's existing
 comment instead of adding a second one. Preview what a sink will post with
-`receipt.py render --sink <name>`. If a sink's variables aren't set but its
-MCP server is connected, you may post `render --sink <name>` output through
-the MCP server instead; say that files weren't uploaded.
+`receipt.py render --sink <name>`.
+
+For an agent-backed destination, `publish` prints what to do instead of
+posting: post `render --sink <name>` output verbatim through that connector
+(updating the comment it names, if any), then record what you got back with
+`receipt.py record --sink <name> --url URL --comment-id ID`, so the next
+publish updates the same comment. Files aren't uploaded through a connector;
+the ledger says so.
 
 ## Output
 

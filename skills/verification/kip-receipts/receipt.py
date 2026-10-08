@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic receipts: record claims and evidence, publish them to sinks.
 
-  receipt.py sinks                                          list sinks and whether each is configured
+  receipt.py sinks                                          list destinations and whether each is ready
   receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra]
                                                             start a run (local only by default), print its dir
   receipt.py claim "TEXT" [--provider NAME] [--level L]     add a claim, print its id
@@ -13,11 +13,13 @@
   receipt.py render [--sink NAME]                           print the ledger as that sink would post it
   receipt.py publish [--sink NAME --issue KEY]              upload files and upsert the comment on each sink,
                                                             optionally opting the run into another sink first
+  receipt.py record --sink NAME --url URL [--comment-id ID] record a comment the agent posted (agent-backed sinks)
   receipt.py path                                           print the run dir
 
 Every command takes --run DIR; default is the latest run for the current repo.
 Runs live in $KIP_RECEIPTS_DIR (default ~/.kip/receipts)/<repo>/<run-id>/.
-Sinks are modules in <repo>/.kip/sinks/ or this script's sinks/ (see sinks/CONTRACT.md).
+Sinks are the `destinations` in Kip's config (kip.py config); script-backed ones are modules
+in <repo>/.kip/sinks/ or this script's sinks/ (see sinks/CONTRACT.md).
 Standard library only, Python 3.8+.
 """
 import argparse
@@ -35,8 +37,10 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / "kip.py").is_file())))
+import kip  # noqa: E402
+
 ROOT = Path(os.environ.get("KIP_RECEIPTS_DIR", Path.home() / ".kip" / "receipts"))
-SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 EXCERPT_LINES = 15
 FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image",
               ".mp4": "video", ".webm": "video", ".mov": "video", ".zip": "trace"}
@@ -53,24 +57,29 @@ def sink_dirs():
     return ([Path(top) / ".kip" / "sinks"] if top else []) + [Path(__file__).resolve().parent / "sinks"]
 
 
+def destinations():
+    """Configured destinations, plus one per project sink module the config doesn't name."""
+    cfg = kip.load()
+    top = git("rev-parse", "--show-toplevel")
+    found = {p.stem: {"type": p.stem} for p in (Path(top, ".kip", "sinks").glob("*.py") if top else [])
+             if not p.stem.startswith("_")}
+    return {"local": {"type": "local"}, **found, **cfg["destinations"]}, cfg
+
+
 def sink_names():
-    names = {p.stem for d in sink_dirs() if d.is_dir() for p in d.glob("*.py") if not p.stem.startswith("_")}
-    return ["local"] + sorted(names - {"local"})
+    return list(destinations()[0])
 
 
 def load_sink(name):
+    module = destinations()[0].get(name, {}).get("type", name)
     for d in sink_dirs():
-        p = d / f"{name}.py"
+        p = d / f"{module}.py"
         if p.exists():
-            spec = importlib.util.spec_from_file_location(f"kip_sink_{name}", p)
+            spec = importlib.util.spec_from_file_location(f"kip_sink_{module}", p)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             return mod
-    sys.exit(f"unknown sink {name}; available: {', '.join(sink_names())}")
-
-
-def missing_env(mod):
-    return [v for v in getattr(mod, "REQUIRES", []) if not os.environ.get(v)]
+    sys.exit(f"no sink module {module} for {name}; available: {', '.join(sink_names())}")
 
 
 def repo_name():
@@ -88,7 +97,7 @@ def sha256(path):
 
 def redact(text):
     for k, v in os.environ.items():
-        if SECRET_ENV.search(k) and len(v) >= 8:
+        if kip.SECRET_ENV.search(k) and len(v) >= 8:
             text = text.replace(v, f"[{k}]")
     return text
 
@@ -168,9 +177,10 @@ def attach_file(d, c, src, kind=None, name=None):
 
 
 def cmd_sinks(a):
-    for name in sink_names():
-        missing = [] if name == "local" else missing_env(load_sink(name))
-        print(f"{name:10} {'always on' if name == 'local' else 'missing ' + ', '.join(missing) if missing else 'ready'}")
+    dests, cfg = destinations()
+    for name, entry in dests.items():
+        s = "always on" if name == "local" else kip.status(cfg, entry)
+        print(f"{name:10} {s}" + (" (recommended)" if name == cfg.get("default_destination", "local") else ""))
 
 
 def check_sinks(sinks, issue):
@@ -390,8 +400,17 @@ def render_jira(rec, sink=None):
 RENDERERS = {"markdown": render_markdown, "jira": render_jira}
 
 
+def sink_format(name):
+    entry = destinations()[0].get(name, {})
+    if name == "local" or entry.get("format") or entry.get("via"):
+        return entry.get("format", "markdown")
+    return getattr(load_sink(name), "FORMAT", "markdown")
+
+
 def render(rec, sink=None):
-    fmt = getattr(load_sink(sink), "FORMAT", "markdown") if sink and sink != "local" else "markdown"
+    fmt = sink_format(sink) if sink else "markdown"
+    if fmt not in RENDERERS:
+        sys.exit(f"{sink}: unknown format {fmt}; formats: {', '.join(RENDERERS)}")
     return RENDERERS[fmt](rec, sink)
 
 
@@ -413,22 +432,34 @@ def cmd_publish(a):
         rec["issue"] = rec["issue"] or a.issue
         rec["sinks"] = check_sinks(rec["sinks"] + a.sink, rec["issue"])
         save(d, rec)
+    dests = destinations()[0]
     failed = []
     for name in [s for s in rec["sinks"] if s != "local"]:
-        mod = load_sink(name)
-        missing = missing_env(mod)
+        entry = dests.get(name)
+        if entry is None:
+            print(f"{name}: skipped, no longer configured")
+            failed.append(name)
+            continue
+        prior = rec["published"].get(name, {}).get("comment_id")
+        if entry.get("via"):  # the agent posts through its own connector, then records the result
+            target = f"update comment {prior} on" if prior else "post a new comment on"
+            print(f"{name}: agent-backed via {entry['via']}: {target} {rec['issue']} with "
+                  f"`receipt.py render --sink {name}` verbatim, then "
+                  f"`receipt.py record --sink {name} --url URL --comment-id ID`")
+            continue
+        missing = kip.missing(entry)
         if missing:
             print(f"{name}: skipped, missing {', '.join(missing)}")
             failed.append(name)
             continue
+        mod, conf = load_sink(name), kip.settings(entry)
         try:
             for f in (f for c in rec["claims"] for f in c["files"] if name not in f["uploads"]):
                 path = d / f["path"]
-                f["uploads"][name] = mod.upload(rec["issue"], path,
+                f["uploads"][name] = mod.upload(conf, rec["issue"], path,
                                                 mimetypes.guess_type(path.name)[0] or "application/octet-stream")
                 save(d, rec)
-            prior = rec["published"].get(name, {}).get("comment_id")
-            comment_id, url = mod.publish(rec["issue"], render(rec, name), prior)
+            comment_id, url = mod.publish(conf, rec["issue"], render(rec, name), prior)
         except Exception as err:  # one sink failing shouldn't stop the others
             print(f"{name}: failed: {redact(str(err))}")
             failed.append(name)
@@ -440,6 +471,17 @@ def cmd_publish(a):
         print(f"local only: {d}")
     if failed:
         sys.exit(1)
+
+
+def cmd_record(a):
+    d = run_dir(a)
+    rec = load(d)
+    if a.sink not in rec["sinks"]:
+        sys.exit(f"{a.sink} isn't one of this run's sinks: {', '.join(rec['sinks'])}")
+    prior = rec["published"].get(a.sink, {}).get("comment_id")
+    rec["published"][a.sink] = {"comment_id": a.comment_id or prior or a.url, "url": a.url}
+    save(d, rec)
+    print(f"{a.sink}: recorded {a.url}")
 
 
 def cmd_path(a):
@@ -504,6 +546,12 @@ def main():
     s.add_argument("--sink", action="append", default=[], help="opt this run into another sink first")
     s.add_argument("--issue", help="issue for newly added sinks, if the run has none")
     s.set_defaults(fn=cmd_publish)
+
+    s = sub.add_parser("record", parents=[common])
+    s.add_argument("--sink", required=True)
+    s.add_argument("--url", required=True)
+    s.add_argument("--comment-id", help="the comment's id, so the next publish updates it (default: the url)")
+    s.set_defaults(fn=cmd_record)
 
     s = sub.add_parser("path", parents=[common])
     s.set_defaults(fn=cmd_path)

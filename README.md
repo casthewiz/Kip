@@ -23,59 +23,79 @@ install step flattens them, so skill names must be unique across categories.
 
 ## Install
 
-Clone the repo:
-
 ```bash
 git clone https://github.com/casthewiz/Kip.git ~/Documents/GitHub/Kip
+python3 ~/Documents/GitHub/Kip/kip.py install
 ```
 
-Symlink every skill into each tool's user skills folder. Both tools only
-discover skills one level deep, so this links each folder that contains a
-`SKILL.md`, wherever it's nested. Symlinks mean a `git pull` updates both
-tools at once; re-run the loop after adding or moving a skill:
+`install` links every skill (any folder with a `SKILL.md`, however deeply
+nested; names must be unique) into each **host** it detects, wires up the always-on
+[rules](rules/user-rules.md) (lazy senior developer, claims and evidence,
+implementation workflow), and links the repo at `~/.kip/kip`. Links mean
+a `git pull` updates every host; re-run `install` after adding or moving a
+skill (links to moved skills are pruned). Options:
 
-```bash
-for dir in ~/.claude/skills ~/.cursor/skills; do
-  mkdir -p "$dir"
-  find ~/Documents/GitHub/Kip/skills -name SKILL.md | while read -r f; do
-    s=$(dirname "$f")
-    ln -sfn "$s" "$dir/$(basename "$s")"
-  done
-done
+- `--host cursor`: install for one host, even if it isn't detected.
+- `--project`: link into this repo's `.claude/skills/`, `.cursor/skills/`
+  instead of your user folders.
+
+Skills are always also linked into `~/.kip/skills/`, a host-neutral path
+that skills use to call their own scripts. Claude Code gets the rules as an
+`@` import in `~/.claude/CLAUDE.md`; Cursor keeps user rules in settings, so
+`install` prints what to paste.
+
+## Surfaces
+
+Everything Kip plugs into is a **surface**, declared in one layered config.
+Later layers win:
+
+1. [`defaults.json`](defaults.json) in this repo
+2. `~/.kip/config.json` (or `$KIP_HOME/config.json`): yours, across repos
+3. `<repo>/.kip/config.json`: one project's
+
+Dicts merge, other values replace, and `null` deletes. `python3 kip.py
+config` prints the merged result; `python3 kip.py doctor` shows what each
+surface needs and whether it's here.
+
+| Kind | What it is | Defaults |
+| --- | --- | --- |
+| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, or `manual` instructions) | kip, claude-code, cursor |
+| `connectors` | The agent's own tools a surface can run through: `kind` is `mcp` or `tool` | browser |
+| `evidence` | [Receipts providers](skills/verification/kip-receipts/providers/CONTRACT.md): a `doc` procedure, plus a `fallback` | frontend (Playwright `viewports`), browser, api, generic |
+| `destinations` | [Receipts sinks](skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira |
+
+Every surface can declare `requires` (`env`, `cmd`, `file`), which doctor
+checks and `install` uses to detect hosts. A surface with `via` runs through
+a connector, i.e. through the agent rather than a script. A script can't see
+the agent's tools, so doctor reports those as **agent-confirm** and the
+agent checks the tool is connected before using it.
+
+A user config that adds a second Jira site, posts Linear comments through
+Linear's MCP server, and only desk-tests mobile:
+
+```json
+{
+  "connectors": {"linear-mcp": {"kind": "mcp"}},
+  "destinations": {
+    "jira-oss": {"type": "jira", "requires": {"env": ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]},
+                 "settings": {"JIRA_BASE_URL": "https://oss.atlassian.net"},
+                 "env": {"JIRA_API_TOKEN": "JIRA_OSS_TOKEN"}},
+    "linear": {"via": "linear-mcp"}
+  },
+  "evidence": {"frontend": {"viewports": {"tablet": null, "desktop": null}}}
+}
 ```
-
-Drop either folder from the loop if you only use one tool. To scope skills to
-a single project instead, symlink into that repo's `.claude/skills/` or
-`.cursor/skills/`.
 
 ### Receipts storage
 
 `kip-receipts` records evidence with `python3` (standard library only) under
 `~/.kip/receipts/`. Local is the default; each session asks whether to also
-upload to a tracker, and a local run can be uploaded later. To make a
-tracker available, export its credentials in your shell profile:
+publish to another destination, and a local run can be published later.
+Script-backed destinations read their settings from config or the
+environment (secrets only ever from the environment):
 
 - Linear: `LINEAR_API_KEY`
 - Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
-
-New destinations are one Python module each; see
-[skills/verification/kip-receipts/sinks/CONTRACT.md](skills/verification/kip-receipts/sinks/CONTRACT.md).
-
-## Rules
-
-[rules/user-rules.md](rules/user-rules.md) holds the always-on rules (lazy
-senior developer, claims and evidence, implementation workflow).
-
-**Claude Code** — import the file from your global `~/.claude/CLAUDE.md` so it
-stays in sync with the repo:
-
-```bash
-echo '@~/Documents/GitHub/Kip/rules/user-rules.md' >> ~/.claude/CLAUDE.md
-```
-
-**Cursor** — user rules live in settings, not on disk. Copy the file's
-contents into **Cursor Settings → Rules → User Rules**, and re-paste after
-pulling changes.
 
 ## Verify
 
