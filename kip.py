@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -171,6 +172,10 @@ def link(dest, found):
 
 
 def install_rules(rules):
+    if "sqlite" in rules:
+        db = next((p for p in (Path(os.path.expandvars(d)).expanduser() for d in rules["sqlite"]) if p.exists()), None)
+        if db:
+            return install_rules_sqlite(db, rules["key"])
     if "manual" in rules:
         print("  rules: " + rules["manual"].format(rules=RULES))
         return
@@ -182,6 +187,19 @@ def install_rules(rules):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines + [rules["line"].format(rules=RULES)]) + "\n")
     print(f"  rules: imported in {target}")
+
+
+def install_rules_sqlite(db, key):
+    """Replace Kip's block in a rules value kept in an app's key-value store; keep the user's own rules."""
+    begin, end = f"<!-- kip rules: {RULES} -->", "<!-- /kip rules -->"
+    with sqlite3.connect(db) as con:
+        row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
+        mine = re.sub(r"<!-- kip rules: .*?<!-- /kip rules -->\n?", "", row[0] if row else "", flags=re.S).strip()
+        value = "\n\n".join(filter(None, [mine, f"{begin}\n{RULES.read_text().strip()}\n{end}"])) + "\n"
+        if row and row[0] == value:
+            return print(f"  rules: already in {db}")
+        con.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (key, value))
+    print(f"  rules: written to {db} (restart the app to load them; re-run install after pulling)")
 
 
 def is_kip(group):

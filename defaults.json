@@ -19,7 +19,13 @@
       "requires": {"file": ["~/.cursor"]},
       "skills": "~/.cursor/skills",
       "project_skills": ".cursor/skills",
-      "rules": {"manual": "Paste {rules} into Cursor Settings → Rules → User Rules (re-paste after pulling)."}
+      "rules": {
+        "sqlite": ["~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+                   "~/.config/Cursor/User/globalStorage/state.vscdb",
+                   "$APPDATA/Cursor/User/globalStorage/state.vscdb"],
+        "key": "aicontext.personalContext",
+        "manual": "Paste {rules} into Cursor Settings → Rules → User Rules (re-paste after pulling)."
+      }
     }
   },
   "connectors": {

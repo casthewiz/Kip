@@ -56,8 +56,11 @@ end a turn with unaddressed claims or open a PR with refuted ones.
 
 Skills are always also linked into `~/.kip/skills/`, a host-neutral path
 that skills use to call their own scripts. Claude Code gets the rules as an
-`@` import in `~/.claude/CLAUDE.md`; Cursor keeps user rules in settings, so
-`install` prints what to paste.
+`@` import in `~/.claude/CLAUDE.md`. Cursor keeps User Rules in its state
+database, so `install` writes them there between `kip rules` markers,
+keeping your own rules, and you restart Cursor to load them. Cursor holds a
+copy rather than an import, so re-run `install` after pulling. If the
+database isn't found, `install` prints what to paste.
 
 ## Surfaces
 
@@ -74,7 +77,7 @@ surface needs and whether it's here.
 
 | Kind | What it is | Defaults |
 | --- | --- | --- |
-| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, or `manual` instructions), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (Stop and PR gates), cursor |
+| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, `sqlite` databases with a `key` to write the rules into, or `manual` instructions as the fallback), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (Stop and PR gates), cursor |
 | `connectors` | The agent's own tools a surface can run through: `kind` is `mcp` or `tool` | browser |
 | `evidence` | [Receipts providers](skills/verification/kip-receipts/providers/CONTRACT.md): a `doc` procedure, plus a `fallback` | frontend (Playwright `viewports`), browser, api, generic |
 | `destinations` | [Receipts sinks](skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira |

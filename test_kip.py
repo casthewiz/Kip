@@ -2,6 +2,7 @@
 """Self-check for kip.py (config layers, doctor, install): python3 test_kip.py"""
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,18 @@ def main():
         # --host forces an undetected host; --project links into the repo instead.
         out = kip("install", "--host", "cursor")
         assert "rules: Paste" in out and len(list((home / ".cursor" / "skills").iterdir())) == len(skills), out
+        # With Cursor's state DB present, rules go into its User Rules value, once, beside the user's own.
+        db = home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+        db.parent.mkdir(parents=True)
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+            con.execute("INSERT INTO ItemTable VALUES ('aicontext.personalContext', 'my own rule')")
+        assert "rules: written to" in kip("install", "--host", "cursor")
+        assert "rules: already in" in kip("install", "--host", "cursor")
+        with sqlite3.connect(db) as con:
+            value = con.execute("SELECT value FROM ItemTable WHERE key = 'aicontext.personalContext'").fetchone()[0]
+        assert value.startswith("my own rule\n\n<!-- kip rules: ") and value.count("<!-- /kip rules -->") == 1, value
+        assert RULES.read_text().strip() in value
         kip("install", "--project")
         assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills
