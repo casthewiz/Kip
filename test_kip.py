@@ -18,7 +18,7 @@ def main():
         home, repo = Path(tmp, "home"), Path(tmp, "repo")
         (home / ".claude").mkdir(parents=True)
         (repo / ".kip").mkdir(parents=True)
-        env = {k: v for k, v in os.environ.items() if k not in ("KIP_HOME", "LINEAR_API_KEY")}
+        env = {k: v for k, v in os.environ.items() if k not in ("KIP_HOME", "LINEAR_API_KEY", "KIP_RECEIPTS_DIR")}
         env["HOME"] = str(home)
 
         def kip(*args, ok=True, **extra):
@@ -75,7 +75,16 @@ def main():
         stale = {"hooks": [{"type": "command", "command": "python3 /old/skills/verification/kip-receipts/receipt.py check --hook stop"}]}
         write(settings, {"model": "x", "hooks": {"Stop": [mine, stale]}})
         assert "claude-code    ready · hooks not installed" in kip("doctor")
+        # Receipts: install creates kip.db and imports the JSON store from before it; doctor reports it.
+        kipdb = home / ".kip" / "receipts" / "kip.db"
+        assert f"receipts\n  {kipdb} · not created yet" in kip("doctor")
+        old_run = home / ".kip" / "receipts" / "demo" / "20250101-000000-abcd"
+        write(old_run / "receipt.json", {"id": old_run.name, "repo": "demo", "branch": "main", "level": "full",
+                                         "created_at": "2025-01-01T00:00:00+00:00", "claims": []})
         out = kip("install")
+        assert f"receipts\n  imported 1 runs and 0 session starts from the JSON store\n  {kipdb} · schema v1 of 1 · 1 runs" \
+            in out, out
+        assert f"receipts\n  {kipdb} · schema v1 of 1 · 1 runs" in kip("doctor")
         first = settings.read_text()
         assert "cursor: skipped, missing ~/.cursor" in out, out
         for d in (home / ".kip" / "skills", home / ".claude" / "skills"):
@@ -176,6 +185,8 @@ def main():
         kip("install", "--host", "claude-code", "--host", "cursor", HOME=str(home))
         assert snapshot() != before and (home / ".cursor" / "hooks.json").exists()
         out = kip("uninstall", HOME=str(home))
+        kept = home / ".kip" / "receipts" / "kip.db"
+        assert f"receipts\n  kept: {kept} · schema v1 of 1 · 0 runs" in out and kept.exists(), out
         assert json.loads(snapshot()[1][0]) == json.loads(before[1][0]) and snapshot()[1][1:] == before[1][1:], snapshot()
         assert snapshot()[0] == before[0], snapshot()
         assert not [p for p in home.rglob("*") if p.is_symlink() and os.readlink(p).startswith(str(ROOT))], out

@@ -3,9 +3,11 @@
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().with_name("receipt.py")  # 3.8 leaves __file__ relative
@@ -83,6 +85,13 @@ def main():
         def rc(*args, **kw):
             return sh(sys.executable, str(SCRIPT), *args, **kw)
 
+        def run_json(run):
+            return json.loads(rc("json", "--run", str(run)))
+
+        def kipdb(sql, *params):
+            with sqlite3.connect(Path(tmp, "store", "kip.db")) as con:
+                return con.execute(sql, params).fetchall()
+
         (repo / "app.py").write_text('print("hi")\n')
         (repo / ".kip" / "sinks").mkdir(parents=True)
         (repo / ".kip" / "sinks" / "fake.py").write_text(FAKE_SINK)
@@ -98,10 +107,10 @@ def main():
         assert "local" in sinks and "fake       ready" in sinks and "linear     missing LINEAR_API_KEY" in sinks, sinks
         assert "fake-a     ready (recommended)" in sinks and "tracker    agent-confirm via tracker-mcp (mcp)" in sinks, sinks
         opted = Path(rc("init", "--sink", "fake", "--issue", "ENG-9"))
-        assert json.loads((opted / "receipt.json").read_text())["sinks"] == ["local", "fake"]
+        assert run_json(opted)["sinks"] == ["local", "fake"]
 
         run = Path(rc("init", "--level", "full"))
-        rec = json.loads((run / "receipt.json").read_text())
+        rec = run_json(run)
         assert rec["sinks"] == ["local"] and rec["issue"] is None, rec
         assert rc("claim", "app prints hi") == "c1"
         rc("claim", "secret is redacted")
@@ -149,7 +158,7 @@ def main():
         assert f"local only: {run}" in rc("publish")
         assert not sink_log.exists(), "local-only publish touched a sink"
         assert "--issue is required" in rc("publish", "--sink", "fake", ok=False)
-        assert json.loads((run / "receipt.json").read_text())["sinks"] == ["local"], "failed opt-in was saved"
+        assert run_json(run)["sinks"] == ["local"], "failed opt-in was saved"
 
         # Opt in after the fact: fake posts, linear is skipped for missing env, so the command fails overall.
         out = rc("publish", "--sink", "fake", "--sink", "linear", "--issue", "ENG-1", ok=False)
@@ -162,7 +171,7 @@ def main():
         assert events[0][1:] == ["ENG-1", "c1f1-shot.png", "image/png"], events
         assert "![c1f1-shot.png](https://fake.test/c1f1-shot.png)" in events[1][2], events[1][2]
         assert events[1][2] == rc("render", "--sink", "fake"), "posted body differs from render output"
-        rec = json.loads((run / "receipt.json").read_text())
+        rec = run_json(run)
         assert rec["published"]["fake"] == {"comment_id": "cm1", "url": "https://fake.test/ENG-1#cm1"}, rec
 
         # Two instances of one module publish with their own settings (a literal, an aliased env var).
@@ -173,13 +182,13 @@ def main():
         # Agent-backed: nothing is recorded until the agent posts and records it; then publish updates it.
         out = rc("publish", "--sink", "tracker", ok=False)
         assert "tracker: agent-backed via tracker-mcp: post a new comment on ENG-1" in out, out
-        assert "tracker" not in json.loads((run / "receipt.json").read_text())["published"]
+        assert "tracker" not in run_json(run)["published"]
         assert "isn't one of this run's sinks" in rc("record", "--sink", "nope", "--url", "u", ok=False)
         rc("record", "--sink", "tracker", "--url", "https://t.test/ENG-1#c9", "--comment-id", "c9")
         assert "tracker: agent-backed via tracker-mcp: update comment c9 on ENG-1" in rc("publish", ok=False)
         assert rc("render", "--sink", "tracker") == rc("render"), "agent-backed render differs from markdown"
         assert "unknown format rtf" in rc("render", "--sink", "weird", ok=False)
-        rec = json.loads((run / "receipt.json").read_text())
+        rec = run_json(run)
         assert "linear" not in rec["published"] and rec["sinks"][:3] == ["local", "fake", "linear"], rec
         assert rec["issue"] == "ENG-1", rec
 
@@ -202,7 +211,7 @@ def main():
         assert "mobile   c1e5: exit 1 (expected failure) -> pass" in sh(
             sys.executable, str(DESKTEST), "c1", "https://broken.example.test", str(spec), "--red",
             "--viewports", "mobile", extra_env={"KIP_PLAYWRIGHT": str(pw)})
-        rec = json.loads((remote / "receipt.json").read_text())
+        rec = run_json(remote)
         ev, files = rec["claims"][0]["evidence"], rec["claims"][0]["files"]
         assert [(e["phase"], e["passed"]) for e in ev] == \
             [("green", False), ("green", True), ("green", True), ("green", True), ("red", True)], ev
@@ -228,7 +237,7 @@ def main():
         dt = sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(spec),
                 extra_env={"KIP_PLAYWRIGHT": str(pw)})
         assert dt.startswith("mobile ") and len(dt.splitlines()) == 1, dt
-        cmd = json.loads((remote / "receipt.json").read_text())["claims"][0]["evidence"][-1]["command"]
+        cmd = run_json(remote)["claims"][0]["evidence"][-1]["command"]
         assert any(c.startswith('KIP_VIEWPORTS={"mobile":{"browserName":"chromium"') for c in cmd), cmd
         assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
@@ -246,7 +255,7 @@ def main():
         plan = Path(rc("init", "--level", "full"))
         assert rc("claim", "app prints hi!", "--unit", "1") == "c1"
         rc("claim", "app runs on the device", "--unit", "2", "--provider", "api")
-        assert json.loads((plan / "receipt.json").read_text())["claims"][1]["unit"] == "2"
+        assert run_json(plan)["claims"][1]["unit"] == "2"
         md = rc("render")
         assert "| # | Unit | Claim | Provider | Evidence | Verdict |" in md and "| c2 | 2 | app runs on the device |" in md, md
         assert "||#||Unit||Claim||" in rc("render", "--sink", "jira")
@@ -395,7 +404,7 @@ def main():
         (repo / ".kip" / "config.json").write_text(json.dumps(
             {**PROJECT_CONFIG, "workflow": {"stages": [], "checks": {"tests": "grep -q ok app.py"}}}))
         run = Path(rc("init"))
-        assert json.loads((run / "receipt.json").read_text())["claims"][0]["command"] == ["sh", "-c", "grep -q ok app.py"]
+        assert run_json(run)["claims"][0]["command"] == ["sh", "-c", "grep -q ok app.py"]
         assert rc("claim", "app says ok") == "c2"
         assert "required `tests` check" in rc("run", "c1", "--", "true", ok=False)
         assert "required `tests` check" in rc("observe", "c1", "--passed", "ran it", ok=False)
@@ -411,7 +420,7 @@ def main():
         rc("run", "c1")
         rc("run", "c2", "--", "true")
         assert check("--hook", "stop", event={})[0] == 0 and check("--hook", "pr", event=gh_create)[0] == 0
-        assert len({e["cwd"] for e in json.loads((run / "receipt.json").read_text())["claims"][0]["evidence"]}) == 1
+        assert len({e["cwd"] for e in run_json(run)["claims"][0]["evidence"]}) == 1
         # Another checkout's code says nothing about this run's evidence.
         (repo / "app.py").write_text('print("changed")\n')
         assert "stale" in rc("render") and "stale" not in rc("render", "--run", str(run), cwd=tmp)
@@ -419,13 +428,14 @@ def main():
         (repo / "app.py").write_text('print("ok")\n')
         # A remote desk test doesn't inherit this checkout's required checks.
         remote_run = Path(rc("init", "--target", "https://staging.example.test"))
-        assert json.loads((remote_run / "receipt.json").read_text())["claims"] == []
+        assert run_json(remote_run)["claims"] == []
         shutil.rmtree(remote_run)
-        (remote_run.parent / "LATEST").write_text(run.name + "\n")
+        for table in ("runs", "claims"):
+            kipdb(f"DELETE FROM {table} WHERE {'id' if table == 'runs' else 'run'} = ?", remote_run.name)
 
         # A gate that crashes blocks (once per turn) instead of silently letting everything through.
-        good = (run / "receipt.json").read_text()
-        (run / "receipt.json").write_text("{")
+        good = kipdb("SELECT data FROM runs WHERE id = ?", run.name)[0][0]
+        kipdb("UPDATE runs SET data = '{' WHERE id = ?", run.name)
         code, out = check("--hook", "stop", event={})
         assert code == 2 and "the gate crashed (JSONDecodeError" in out, out
         assert check("--hook", "pr", event=gh_create)[0] == 2
@@ -435,7 +445,7 @@ def main():
         assert code == 0 and "the gate crashed" in out, out
         code, out = check("--hook", "stop", event=cursor, cwd=tmp)
         assert code == 0 and "the gate crashed" in json.loads(out)["followup_message"], out
-        (run / "receipt.json").write_text(good)
+        kipdb("UPDATE runs SET data = ? WHERE id = ?", good, run.name)
         sh("git", "checkout", "-q", "--", ".")
         sh("git", "checkout", "-q", home_branch)
         (repo / ".kip" / "config.json").write_text(json.dumps({**PROJECT_CONFIG, "workflow": {"stages": []}}))
@@ -579,6 +589,70 @@ def main():
             f.write("tampered\n")
         assert "hash mismatch" in rc("render", "--run", str(run), ok=False)
         assert "hash mismatch" in rc("publish", "--run", str(run), ok=False)
+
+        # kip.db: made at the current schema on first use, an older one upgraded in place with its rows kept,
+        # and concurrent writers queue instead of overwriting each other.
+        fresh = {"KIP_RECEIPTS_DIR": str(Path(tmp, "fresh dir #1?"))}  # a path a hand-built file: URI would break on
+        assert rc("db", extra_env=fresh) == f"{Path(tmp, 'fresh dir #1?', 'kip.db')} · not created yet"
+        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v1 of 1 · 0 runs")
+        upgrade = f"""import sys
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import receipt
+receipt.db().execute("INSERT INTO runs VALUES ('r1', 'demo', 'main', '2026-01-01T00:00:00+00:00', '{{}}')")
+receipt._db = None
+receipt.SCHEMA.append("ALTER TABLE runs ADD COLUMN note TEXT")
+con = receipt.db()
+print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, note FROM runs").fetchall())"""
+        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "2 [('r1', None)]"
+        conc = Path(rc("init"))
+        rc("claim", "written by 20 processes at once", "--run", conc.name)
+        writers = [subprocess.Popen([sys.executable, str(SCRIPT), "observe", "c1", "--passed", f"w{i}", "--run", str(conc)],
+                                    cwd=repo, env=env, stderr=subprocess.PIPE, text=True) for i in range(20)]
+        assert all(w.wait() == 0 for w in writers), [w.stderr.read() for w in writers if w.returncode]
+        ev = run_json(conc)["claims"][0]["evidence"]
+        assert sorted(e["observation"] for e in ev) == sorted(f"w{i}" for i in range(20)), "lost a concurrent write"
+        assert sorted(e["id"] for e in ev) == sorted(f"c1e{i}" for i in range(1, 21)), ev
+        assert rc("path", "--run", conc.name) == rc("path", "--run", str(conc)) == str(conc)
+        assert "no receipt run nope" in rc("path", "--run", "nope", ok=False)
+        store = Path(tmp, "store")
+        assert not [p for p in store.rglob("*") if p.name in ("receipt.json", "LATEST") or p.name == "sessions"], \
+            "wrote the old JSON store"
+
+        # The JSON store before kip.db is imported once, the first time kip.db opens or on `db --migrate`:
+        # runs render as they did, session starts carry over, and the gate finds the branch's run.
+        legacy = Path(tmp, "legacy")
+        for r in (plan, conc):
+            shutil.copytree(r, legacy / "demo" / r.name)
+            (legacy / "demo" / r.name / "receipt.json").write_text(json.dumps(run_json(r), indent=2))
+        (legacy / "demo" / "sessions").mkdir()
+        (legacy / "demo" / "sessions" / "m1").write_text(kipdb("SELECT state FROM sessions LIMIT 1")[0][0] + "\n")
+        old = {"KIP_RECEIPTS_DIR": str(legacy)}
+        assert rc("db", "--migrate", extra_env=old).startswith("imported 2 runs and 1 session starts"), "import"
+        assert rc("db", "--migrate", extra_env=old).startswith("imported 0 runs and 0 session starts"), "re-import"
+        for r in (plan, conc):
+            assert rc("render", "--run", r.name, extra_env=old) == rc("render", "--run", r.name), f"{r.name} renders differently"
+        # Opening an up-to-date kip.db takes no write lock, so hooks don't queue behind a writer.
+        with sqlite3.connect(Path(tmp, "store", "kip.db"), isolation_level=None) as held:
+            held.execute("BEGIN IMMEDIATE")
+            began = time.time()
+            check("--hook", "stop", event={})  # reads this branch's run from kip.db
+            assert time.time() - began < 5, "a hook waited on another process's write lock"
+            held.execute("ROLLBACK")
+        # Sessions opening a new kip.db at once all see the import, which happens once; and a run from an
+        # older Kip without created_at or branch still comes across.
+        racy = Path(tmp, "racy")
+        shutil.copytree(legacy, racy, ignore=shutil.ignore_patterns("kip.db*"))
+        bare = racy / "demo" / "20250101-000000-beef"
+        bare.mkdir()
+        (bare / "receipt.json").write_text(json.dumps({"id": bare.name, "repo": "demo", "level": "full", "claims": []}))
+        openers = [subprocess.Popen([sys.executable, str(SCRIPT), "path"], cwd=repo, stdout=subprocess.PIPE, text=True,
+                                    env={**env, "KIP_RECEIPTS_DIR": str(racy)}) for _ in range(8)]
+        assert {o.communicate()[0].strip() for o in openers} == {str(racy / "demo" / conc.name)}, "an opener missed the import"
+        assert rc("db", extra_env={"KIP_RECEIPTS_DIR": str(racy)}).endswith("· 3 runs")
+        lazy = Path(tmp, "lazy")
+        shutil.copytree(legacy, lazy, ignore=shutil.ignore_patterns("kip.db*"))
+        assert rc("path", extra_env={"KIP_RECEIPTS_DIR": str(lazy)}) == str(lazy / "demo" / conc.name), \
+            "the first open didn't import, or the gate's branch lookup misses the imported run"
     print("receipt.py: all checks passed")
 
 

@@ -159,6 +159,7 @@ def cmd_doctor(a):
             if kind == "hosts" and rules_db(entry.get("rules", {})):
                 s += " · rules " + rules_copy_status(entry["rules"])
             print(f"  {name:14} {s}")
+    print_receipts()
 
 
 def skills():
@@ -297,6 +298,14 @@ def where(entry, key, top):
     return top / entry[f"project_{key}"] if top else Path(entry[key]).expanduser()
 
 
+def print_receipts(*args, prefix=""):
+    """kip.db's status from receipt.py, which owns it: its path, schema version, and run count."""
+    r = subprocess.run([sys.executable, str(RECEIPT), "db", *args], capture_output=True, text=True)
+    print("receipts")
+    for line in r.stdout.strip().splitlines() if r.returncode == 0 else [f"error: {r.stderr.strip()}"]:
+        print(f"  {prefix}{line}")
+
+
 def cmd_install(a):
     selected, top = hosts(a)
     found = skills()
@@ -318,6 +327,7 @@ def cmd_install(a):
             install_rules(h["rules"])
         if h.get("hooks"):
             install_hooks(h["hooks"], where(h["hooks"], "settings", top))
+    print_receipts("--migrate")
 
 
 def uninstall_hooks(hooks, path):
@@ -383,6 +393,7 @@ def cmd_uninstall(a):
             uninstall_hooks(h["hooks"], where(h["hooks"], "settings", top))
     if not a.project and (KIP_HOME / "kip").is_symlink():
         (KIP_HOME / "kip").unlink()
+    print_receipts(prefix="kept: ")
 
 
 def main():

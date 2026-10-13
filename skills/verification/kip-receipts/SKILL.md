@@ -197,9 +197,12 @@ claims to it only for promises the plan missed. A run's destination can be
 added later with `publish --sink`, so a planned run still gets the
 destination question before its first evidence.
 
-Each run is a folder under `~/.kip/receipts/<repo>/<run-id>/` (override with
-`$KIP_RECEIPTS_DIR`): a `receipt.json` and a `files/` folder. What makes it
-deterministic:
+Runs, claims, and evidence live in `~/.kip/receipts/kip.db`, a SQLite
+database (override the folder with `$KIP_RECEIPTS_DIR`); each run's logs,
+patches, specs, and media live beside it in `<repo>/<run-id>/`. Many sessions
+can record at once: every change is one transaction, so none overwrites
+another. `receipt.py json` prints a run; `receipt.py db` says where the
+database is. What makes it deterministic:
 
 - **Pinned code.** Every piece of evidence records the commit it ran against,
   plus a patch of uncommitted changes, so anyone can recreate the exact tree
@@ -212,8 +215,8 @@ deterministic:
   from the recorded results and the claim's thoroughness level.
 - **Tamper check.** `render` refuses to run if any recorded file's hash no
   longer matches.
-- **Same record, same output.** Rendering is a pure function of
-  `receipt.json` and the code it's rendered against (which decides what's
+- **Same record, same output.** Rendering is a pure function of the run's
+  record and the code it's rendered against (which decides what's
   ⚠️ stale).
 
 Prefer `run` over `observe`. An observation is your account of what you saw,
@@ -317,7 +320,7 @@ sites), each with its own settings.
 
 | Sink | Publishes | Default settings |
 |---|---|---|
-| local | `receipt.json` + files under `~/.kip/receipts/<repo>/<run-id>/` | nothing |
+| local | The run in `~/.kip/receipts/kip.db`, files under `~/.kip/receipts/<repo>/<run-id>/` | nothing |
 | [linear](sinks/linear.py) | Issue comment with the ledger; images embedded, videos and logs linked | `LINEAR_API_KEY` |
 | [jira](sinks/jira.py) | Issue comment in Jira markup; files as attachments, images as thumbnails | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
 | [github](sinks/github.py) | A marked block in the pull request's body (the issue is the PR number), with a hidden line CI checks; files listed, not uploaded | `gh` logged in |

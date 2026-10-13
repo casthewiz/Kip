@@ -122,8 +122,10 @@ Linear's MCP server, and only desk-tests mobile:
 
 ### Receipts storage
 
-`kip-receipts` records evidence with `python3` (standard library only) under
-`~/.kip/receipts/`. Local is the default; each session asks whether to also
+`kip-receipts` records evidence with `python3` (standard library only) in
+`~/.kip/receipts/kip.db`, a SQLite database that `install` creates (importing
+any runs from the JSON files that came before it), `doctor` reports on, and
+`uninstall` leaves in place. Local is the default; each session asks whether to also
 publish to another destination, and a local run can be published later.
 Script-backed destinations read their settings from config or the
 environment (secrets only ever from the environment):
