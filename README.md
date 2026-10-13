@@ -56,9 +56,11 @@ rules, and hooks go, and your own settings, rules, and hooks stay.
 [gate](skills/verification/kip-receipts/SKILL.md#gate) to each host's hooks
 (Claude Code's `settings.json`, Cursor's `hooks.json`), leaving your own
 hooks alone: once code changes, the agent can't end a turn with unaddressed
-claims, or open a PR with refuted ones or without its tidy and review
-passes. Cursor can't block a stop, so there the gate asks once, as a
-follow-up message.
+claims or without a receipts run, or open a PR with refuted claims or
+without its tidy and review passes. Each session starts knowing where the
+branch's run stands. Cursor can't block a stop, so there the gate asks once,
+as a follow-up message. Cursor keeps a copy of the rules, so `doctor` says
+when it's stale and `install` needs re-running.
 
 Skills are always also linked into `~/.kip/skills/`, a host-neutral path
 that skills use to call their own scripts. Claude Code gets the rules as an
@@ -129,8 +131,8 @@ environment (secrets only ever from the environment):
 
 To hold every PR in a repo to its receipts, whoever opened it, add Kip's
 action. It fails the PR while the ledger the `github` sink published is
-missing or has claims that aren't done. It checks the published ledger, not
-whether it's current, so republish after pushing new work.
+missing, was published for an older commit than the PR's head, or has
+claims that aren't done. Republish after each push.
 
 ```yaml
 on:

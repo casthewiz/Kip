@@ -356,19 +356,29 @@ before a PR can open:
 ## Gate
 
 `kip.py install` wires `receipt.py check` into each host's hooks (Claude
-Code: `Stop` and `PreToolUse`; Cursor: `stop` and `beforeShellExecution`).
-Once code has changed since the run's `init`, finishing a turn is blocked
-while any claim on this branch's run has neither evidence nor an
-`unverified` reason, and `gh pr create` is blocked while any claim is also
-❌ or a stage has no claim. Cursor can't block a stop, so it gets the same
-list once as a follow-up message. The block message lists the claims;
-address them, don't work around the hook.
+Code: `SessionStart`, `Stop` and `PreToolUse`; Cursor: `sessionStart`,
+`stop` and `beforeShellExecution`). Each branch has its own runs; commands
+default to the latest run on the current branch.
+
+- **Session start**: the session is told where this branch's run stands,
+  and the code as the session found it is remembered.
+- **Stop**: once code has changed since the run's `init`, finishing a turn
+  is blocked while any claim has neither evidence nor an `unverified`
+  reason. With no run on the branch, a session that changed code is blocked
+  until it starts one.
+- **PR**: `gh pr create` is blocked while any claim is unaddressed or ❌, a
+  stage has no claim, or the branch has changes and no run at all.
+
+Cursor can't block a stop, so it gets the same list once as a follow-up
+message. The block message lists the claims; address them, don't work
+around the hook.
 
 **On the PR.** After `gh pr create`, publish the run to it:
-`receipt.py publish --sink github --issue <PR number>`. Repos that add the
-Kip action to CI fail the PR while its ledger is missing or has claims that
-aren't done (`receipt.py check --pr N`), so the gate holds for everyone,
-not just one agent's hooks.
+`receipt.py publish --sink github --issue <PR number>`, and publish again
+after every push. Repos that add the Kip action to CI fail the PR while its
+ledger is missing, is for an older commit than the PR's head, or has claims
+that aren't done (`receipt.py check --pr N`), so the gate holds for
+everyone, not just one agent's hooks.
 
 ## Boundaries
 

@@ -10,6 +10,7 @@
         "settings": "~/.claude/settings.json",
         "project_settings": ".claude/settings.json",
         "events": {
+          "SessionStart": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook start"}]}],
           "Stop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook stop"}]}],
           "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]}]
         }
@@ -31,6 +32,7 @@
         "project_settings": ".cursor/hooks.json",
         "init": {"version": 1},
         "events": {
+          "sessionStart": [{"command": "python3 {receipt} check --hook start"}],
           "stop": [{"command": "python3 {receipt} check --hook stop"}],
           "beforeShellExecution": [{"command": "python3 {receipt} check --hook pr"}]
         }

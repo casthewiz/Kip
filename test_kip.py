@@ -90,6 +90,7 @@ def main():
         assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
         pre = on["hooks"]["PreToolUse"]
         assert len(pre) == 1 and pre[0]["matcher"] == "Bash" and pre[0]["hooks"][0]["command"].endswith("--hook pr"), pre
+        assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
         assert settings.read_text() == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
         assert "cursor         missing ~/.cursor · hooks not installed (run install)" in kip("doctor")
@@ -135,7 +136,14 @@ def main():
         write(cursor_hooks, on)
         kip("install", "--host", "cursor")
         assert json.loads(cursor_hooks.read_text())["hooks"]["stop"] == on["hooks"]["stop"], cursor_hooks.read_text()
-        assert "cursor         ready · hooks installed" in kip("doctor")
+        assert "cursor         ready · hooks installed · rules current" in kip("doctor")
+        assert on["hooks"]["sessionStart"][0]["command"].endswith("check --hook start"), on
+        # Cursor holds a copy of the rules, so doctor says when it's behind rules/user-rules.md.
+        with sqlite3.connect(db) as con:
+            con.execute("UPDATE ItemTable SET value = replace(value, 'Lazy senior developer', 'Old rule')")
+        assert "rules stale (run install)" in kip("doctor")
+        kip("install", "--host", "cursor")
+        assert "rules current" in kip("doctor")
         kip("install", "--project")
         assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills

@@ -16,12 +16,13 @@
                                                             optionally opting the run into another sink first
   receipt.py record --sink NAME --url URL [--comment-id ID] record a comment the agent posted (agent-backed sinks)
   receipt.py path                                           print the run dir
-  receipt.py check [--hook stop|pr]                         exit 2 if this branch's run has open claims
-                                                            and the code changed since init (host hooks)
+  receipt.py check [--hook start|stop|pr]                   exit 2 if this branch's run has open claims
+                                                            and the code changed since init, or there's
+                                                            no run for work that needs one (host hooks)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
 
-Every command takes --run DIR; default is the latest run for the current repo.
+Every command takes --run DIR; default is the latest run on the current branch.
 Runs live in $KIP_RECEIPTS_DIR (default ~/.kip/receipts)/<repo>/<run-id>/.
 Sinks are the `destinations` in Kip's config (kip.py config); script-backed ones are modules
 in <repo>/.kip/sinks/ or this script's sinks/ (see sinks/CONTRACT.md).
@@ -39,6 +40,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -107,13 +109,20 @@ def redact(text):
     return text
 
 
+def branch_run():
+    """This branch's latest run: LATEST when it's this branch's, else the newest run made on it."""
+    here, branch = ROOT / repo_name(), git("branch", "--show-current")
+    runs = sorted((p.parent for p in here.glob("*/receipt.json")), reverse=True)
+    if (here / "LATEST").exists():
+        runs.insert(0, here / (here / "LATEST").read_text().strip())
+    return next((d for d in runs if (d / "receipt.json").exists() and load(d)["branch"] == branch), None)
+
+
 def run_dir(a):
-    if a.run:
-        return Path(a.run)
-    latest = ROOT / repo_name() / "LATEST"
-    if not latest.exists():
-        sys.exit("no receipt run for this repo; start one with `receipt.py init`")
-    return latest.parent / latest.read_text().strip()
+    d = Path(a.run) if a.run else branch_run()
+    if not d:
+        sys.exit("no receipt run for this branch; start one with `receipt.py init`")
+    return d
 
 
 def load(d):
@@ -131,10 +140,22 @@ def find_claim(rec, cid):
     sys.exit(f"unknown claim {cid}; claims: {', '.join(c['id'] for c in rec['claims']) or 'none'}")
 
 
+def worktree_diff():
+    """HEAD to the working tree, new files included, staged through a copy of the index
+    (so unchanged files aren't rehashed) and never touching the real one."""
+    with tempfile.TemporaryDirectory() as t:
+        index, env = Path(t, "index"), {**os.environ, "GIT_INDEX_FILE": str(Path(t, "index"))}
+        real = git("rev-parse", "--git-path", "index")
+        if real and Path(real).exists():
+            shutil.copy2(real, index)
+        subprocess.run(["git", "add", "-A"], env=env, capture_output=True)
+        r = subprocess.run(["git", "diff", "--cached", "--binary", "HEAD"], env=env, capture_output=True)
+    return r.stdout if r.returncode == 0 else b""  # bytes: new files needn't be UTF-8
+
+
 def fingerprint():
-    """Hash of HEAD, the diff, and untracked names: changes once any work lands after init."""
-    state = "\n".join(git(*a) or "" for a in (["rev-parse", "HEAD"], ["diff", "HEAD"], ["status", "--porcelain"]))
-    return hashlib.sha256(state.encode()).hexdigest()
+    """Hash of HEAD and the working tree: changes once any work lands after init."""
+    return hashlib.sha256(f"{git('rev-parse', 'HEAD')}\n".encode() + worktree_diff()).hexdigest()
 
 
 def code_state(d, rec, eid):
@@ -143,11 +164,10 @@ def code_state(d, rec, eid):
     if rec.get("target"):
         return {"commit": None, "patch": None, "remote": True}
     state = {"commit": git("rev-parse", "HEAD"), "patch": None}
-    diff = git("diff", "HEAD")
+    diff = worktree_diff()
     if diff:
-        # ponytail: untracked files aren't in the patch; add `git add -N` capture if that bites.
         p = d / "files" / f"{eid}.patch"
-        p.write_text(diff + "\n")
+        p.write_bytes(diff)
         state["patch"] = {"path": f"files/{p.name}", "sha256": sha256(p)}
     return state
 
@@ -464,7 +484,8 @@ def render_jira(rec, sink=None):
 
 def render_github(rec, sink=None):
     """Markdown plus a hidden line CI reads (`check --pr`): the run and what blocks a PR."""
-    gate = json.dumps({"run": rec["id"], "blocking": blocking(rec, pr=True)}, ensure_ascii=False)
+    gate = json.dumps({"run": rec["id"], "head": rec.get("head"), "blocking": blocking(rec, pr=True)},
+                      ensure_ascii=False)
     return render_markdown(rec, sink) + "\n\n<!-- kip-gate " + gate.replace(">", "\\u003e") + " -->"
 
 
@@ -503,6 +524,8 @@ def cmd_publish(a):
         rec["issue"] = rec["issue"] or a.issue
         rec["sinks"] = check_sinks(rec["sinks"] + a.sink, rec["issue"])
         save(d, rec)
+    rec["head"] = git("rev-parse", "HEAD")  # what CI compares to the PR head (`check --pr`)
+    save(d, rec)
     dests = destinations()[0]
     failed = []
     for name in [s for s in rec["sinks"] if s != "local"]:
@@ -579,13 +602,10 @@ def gate(a, hook):
     command = hook.get("tool_input", {}).get("command") or hook.get("command", "")
     if a.hook == "pr" and not re.search(r"(^|[;&|(\n])\s*gh\s+pr\s+create\b", command):  # as a command, not in text
         return False, "check: not opening a PR"
-    latest = ROOT / repo_name() / "LATEST"
-    if not a.run and not latest.exists():
-        return False, "check: no receipt run for this repo"
-    d = run_dir(a)
+    d = Path(a.run) if a.run else branch_run()
+    if not d:
+        return unplanned(a.hook, hook)
     rec = load(d)
-    if rec["branch"] != git("branch", "--show-current"):
-        return False, f"check: latest run is for {rec['branch']}, not this branch"
     if rec.get("baseline") in (None, fingerprint()):
         return False, "check: no code changed since the run started"
     pr = a.hook == "pr"
@@ -598,15 +618,64 @@ def gate(a, hook):
     return True, f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(open_) + f"\nNext: {todo}."
 
 
+def base_branch():
+    ref = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    return ref or next((b for b in ("main", "master") if git("rev-parse", "--verify", "-q", b)), None)
+
+
+def session_file(hook):
+    sid = hook.get("session_id") or hook.get("conversation_id")
+    return ROOT / repo_name() / "sessions" / re.sub(r"[^\w.-]", "_", sid) if sid else None
+
+
+def unplanned(event, hook):
+    """No run on this branch. Block only work that needed one: a PR from a branch that changed
+    something, or a session that changed code since it started."""
+    base = base_branch()
+    ahead = base and git("rev-list", "--count", f"{base}..HEAD") not in (None, "0")
+    if event == "pr" and (ahead or git("diff", "HEAD")):
+        return True, ("kip-receipts: this branch has changes but no receipts run. Start one (`receipt.py init`), "
+                      "record a claim per promise, and back each with evidence before opening a PR.")
+    start = session_file(hook)
+    if event == "stop" and start and start.exists() and start.read_text().strip() != fingerprint():
+        return True, ("kip-receipts: this session changed code, but there's no receipts run for this branch. "
+                      "Start one (`receipt.py init`), record what you claim to have done, and back each claim "
+                      "with evidence, or say plainly that it's unverified.")
+    return False, "check: no receipt run for this branch"
+
+
+def session_start(hook):
+    """Remember the code as the session found it (once per session), and say where this branch's run stands."""
+    if not git("rev-parse", "--show-toplevel"):
+        return ""
+    start = session_file(hook)
+    if start and not start.exists():
+        start.parent.mkdir(parents=True, exist_ok=True)
+        start.write_text(fingerprint() + "\n")
+    d = branch_run()
+    if not d:
+        return ""
+    rec = load(d)
+    open_ = blocking(rec, pr=True)
+    return (f"kip-receipts: {git('branch', '--show-current')} has run {rec['id']} ({rec['level']}, {d}). "
+            + ("Not done yet:\n  " + "\n  ".join(open_) if open_ else "Every claim is addressed.")
+            + "\nAdd evidence and claims to this run instead of starting a new one.")
+
+
 def check_pr(pr):
-    r = subprocess.run(["gh", "pr", "view", pr, "--json", "body"], capture_output=True, text=True)
+    r = subprocess.run(["gh", "pr", "view", pr, "--json", "body,headRefOid"], capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"gh pr view {pr}: {r.stderr.strip()}")
-    found = re.findall(r"<!-- kip-gate (\{.*?\}) -->", json.loads(r.stdout).get("body") or "")
+    view = json.loads(r.stdout)
+    found = re.findall(r"<!-- kip-gate (\{.*?\}) -->", view.get("body") or "")
     if not found:
         sys.exit(f"kip-receipts: PR {pr} has no receipts ledger; "
                  f"publish one with `receipt.py publish --sink github --issue {pr}`")
     g = json.loads(found[-1])
+    if g.get("head") != view.get("headRefOid"):
+        sys.exit(f"kip-receipts: PR {pr}'s ledger is for {(g.get('head') or 'an unknown commit')[:7]}, but its head "
+                 f"is {(view.get('headRefOid') or '?')[:7]}; verify the new commits and republish "
+                 f"(`receipt.py publish`)")
     if g["blocking"]:
         sys.exit(f"kip-receipts: run {g['run']} has claims that aren't done:\n  " + "\n  ".join(g["blocking"]))
     print(f"check: every claim in {g['run']} is addressed")
@@ -621,6 +690,9 @@ def cmd_check(a):
     cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
     if cwd:
         os.chdir(cwd)
+    if a.hook == "start":
+        msg = session_start(hook)
+        return print(json.dumps({"additional_context": msg} if msg else {}) if "workspace_roots" in hook else msg)
     blocked, msg = gate(a, hook)
     if "workspace_roots" in hook:
         if a.hook == "pr":
@@ -705,7 +777,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["stop", "pr"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "pr"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 

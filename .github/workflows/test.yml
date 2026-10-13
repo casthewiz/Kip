@@ -2,8 +2,14 @@ name: test
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # oldest runner that still has Python 3.8 builds
+    strategy:
+      matrix:
+        python: ["3.8", "3.x"]
     steps:
       - uses: actions/checkout@v4
-      - run: python3 test_kip.py
-      - run: python3 skills/verification/kip-receipts/test_receipt.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python test_kip.py
+      - run: python skills/verification/kip-receipts/test_receipt.py

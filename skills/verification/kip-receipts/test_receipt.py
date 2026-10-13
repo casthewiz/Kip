@@ -42,7 +42,7 @@ def publish(conf, issue, body, comment_id):
 # Stands in for gh: one pull request whose body lives in $FAKE_PR_BODY.
 FAKE_GH = f'''#!/bin/sh
 case "$1 $2" in
-  "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1]}}))' "$3";;
+  "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
   "pr edit") cat > "$FAKE_PR_BODY";;
   *) echo "unexpected: gh $*" >&2; exit 1;;
 esac
@@ -238,7 +238,7 @@ def main():
                                input=None if event is None else json.dumps(event), capture_output=True, text=True)
             return r.returncode, (r.stdout + r.stderr).strip()
 
-        assert check(extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "empty"))}) == (0, "check: no receipt run for this repo")
+        assert check(extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "empty"))}) == (0, "check: no receipt run for this branch")
         plan = Path(rc("init", "--level", "full"))
         assert rc("claim", "app prints hi!", "--unit", "1") == "c1"
         rc("claim", "app runs on the device", "--unit", "2", "--provider", "api")
@@ -252,6 +252,11 @@ def main():
         code, out = check("--hook", "stop", event={"cwd": str(repo)}, cwd=tmp)
         assert code == 2 and "c1 ⚠️ unverified: app prints hi!" in out and "c2 ⚠️ unverified" in out, out
         assert check("--hook", "stop", event={"stop_hook_active": True})[0] == 0, "stop hook could loop"
+        # A session starts knowing where this branch's run stands.
+        code, out = check("--hook", "start", event={"session_id": "s0", "cwd": str(repo)}, cwd=tmp)
+        assert code == 0 and "has run" in out and "c1 ⚠️ unverified: app prints hi!" in out, out
+        code, out = check("--hook", "start", event={"session_id": "s0c", "workspace_roots": [str(repo)]}, cwd=tmp)
+        assert "c1 ⚠️ unverified" in json.loads(out)["additional_context"], out
         # Cursor's events carry workspace_roots: same gate, answered in JSON. Stop asks for one follow-up.
         cursor = {"workspace_roots": [str(repo)], "loop_count": 0}
         code, out = check("--hook", "stop", event=cursor, cwd=tmp)
@@ -263,8 +268,25 @@ def main():
         pr_cmd = "gh pr " + "create"  # spelled apart so this file's own edits don't trip the gate
         assert check("--hook", "pr", event={"tool_input": {"command": f"git push &&\n  {pr_cmd} --fill"}})[0] == 2
         assert check("--hook", "pr", event={"tool_input": {"command": f"echo '{pr_cmd}'"}})[0] == 0, "text isn't a PR"
+        # No run on this branch: another branch's run is never used, a PR is blocked once the branch
+        # changed something, and a session that changed code since it started is nudged at stop.
         sh("git", "checkout", "-q", "-b", "elsewhere")
-        assert "not this branch" in check("--hook", "stop", event={})[1]
+        assert "no receipt run for this branch" in rc("claim", "x", ok=False)
+        assert check("--hook", "stop", event={}) == (0, "check: no receipt run for this branch")
+        code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}})
+        assert code == 2 and "this branch has changes but no receipts run" in out, out
+        sh("git", "stash", "-q")
+        assert check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}})[0] == 0, "clean branch blocked"
+        sh("git", "stash", "pop", "-q")
+        session = {"session_id": "s1", "cwd": str(repo)}
+        assert check("--hook", "start", event=session) == (0, "")
+        assert check("--hook", "stop", event=session)[0] == 0, "an unchanged session was nudged"
+        (repo / "new.txt").write_text("new\n")  # a new, untracked file is a change too
+        code, out = check("--hook", "stop", event=session)
+        assert code == 2 and "this session changed code" in out, out
+        check("--hook", "start", event=session)  # a resumed session keeps its first baseline
+        assert check("--hook", "stop", event=session)[0] == 2
+        (repo / "new.txt").unlink()
         sh("git", "checkout", "-q", "-")
 
         rc("run", "c1", "--", "false")
@@ -300,7 +322,8 @@ def main():
         (bin_ / "gh").chmod(0o755)
         body = Path(tmp, "pr-body.md")
         body.write_text("My description")
-        ghenv = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}", "FAKE_PR_BODY": str(body)}
+        ghenv = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}", "FAKE_PR_BODY": str(body),
+                 "FAKE_PR_HEAD": sh("git", "rev-parse", "HEAD")}
         out = rc("check", "--pr", "7", ok=False, extra_env=ghenv)
         assert "PR 7 has no receipts ledger" in out, out
         assert "<!-- kip-gate {" in rc("render", "--sink", "github")
@@ -320,6 +343,8 @@ def main():
         assert check("--hook", "pr", event=gh_create)[0] == 0
         rc("publish", "--sink", "github", "--issue", "7", extra_env=ghenv)
         assert rc("check", "--pr", "7", extra_env=ghenv).startswith("check: every claim in"), body.read_text()
+        out = rc("check", "--pr", "7", ok=False, extra_env={**ghenv, "FAKE_PR_HEAD": "f" * 40})
+        assert "ledger is for" in out and "but its head is fffffff" in out, out
 
         # Re-runs: the latest run of each check decides it. A failure clears only when the same, unchanged
         # check passes on changed code, and that red-then-green also shows the check can fail.
@@ -360,6 +385,12 @@ def main():
         rc("run", "c7", "--red", "--", *has_flag)
         rc("run", "c7", "--", "true")
         assert verdicts()["c7"] == "✅ verified", verdicts()
+        rc("claim", "fix that adds a file", "--level", "full")
+        rc("run", "c8", "--", "test", "-f", "added.txt")
+        (repo / "added.txt").write_text("new\n")  # untracked, so only the worktree diff sees it
+        rc("run", "c8", "--", "test", "-f", "added.txt")
+        (repo / "added.txt").unlink()
+        assert verdicts()["c8"] == "✅ verified", verdicts()
         v = verdicts()
         assert v["c1"] == "✅ verified", v
         assert v["c2"] == "⚠️ flaky: failed and passed on the same code", v

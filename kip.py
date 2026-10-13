@@ -149,6 +149,8 @@ def cmd_doctor(a):
                 s += " · hooks " + ("installed" if hooks_installed(entry["hooks"]) else "not installed (run install)")
             elif kind == "hosts" and entry.get("rules"):
                 s += " · rules only, no hooks"
+            if kind == "hosts" and rules_db(entry.get("rules", {})):
+                s += " · rules " + rules_copy_status(entry["rules"])
             print(f"  {name:14} {s}")
 
 
@@ -207,6 +209,16 @@ def user_rules(con, key):
     """The rules value with Kip's block taken out: (row, the user's own rules)."""
     row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
     return row, re.sub(r"<!-- kip rules: .*?<!-- /kip rules -->\n?", "", row[0] if row else "", flags=re.S).strip()
+
+
+def rules_copy_status(rules):
+    """A host holding a copy of the rules (not an import) goes stale when they change."""
+    with sqlite3.connect(rules_db(rules)) as con:
+        row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (rules["key"],)).fetchone()
+    block = re.search(r"<!-- kip rules: .*? -->\n(.*?)\n<!-- /kip rules -->", row[0] if row else "", flags=re.S)
+    if not block:
+        return "not installed (run install)"
+    return "current" if block.group(1) == RULES.read_text().strip() else "stale (run install)"
 
 
 def install_rules_sqlite(db, key):
