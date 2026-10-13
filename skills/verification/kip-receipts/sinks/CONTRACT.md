@@ -10,8 +10,8 @@ in Kip's config (`kip.py config`), and each is either:
 - **agent-backed**: `via` a connector (an MCP server or agent tool). There's
   no module; the agent posts and records the result.
 
-`local` is built in and always on: the run folder under `~/.kip/receipts` is
-the source of truth every other sink publishes from.
+`local` is built in and always on: the run in `~/.kip/receipts/kip.db`, with
+its files beside it, is the source of truth every other sink publishes from.
 
 ## Configuring a destination
 
@@ -78,7 +78,7 @@ def publish(conf, issue, body, comment_id):
 `receipt.py publish` does the rest, identically for every sink: checks the
 destination's settings are all set, uploads each file not yet uploaded to this sink, renders the
 comment with this sink's `FORMAT` and upload references, creates or updates
-the run's single comment, and records the result in `receipt.json`. A sink
+the run's single comment, and records the result on the run in `kip.db`. A sink
 never builds the comment body itself, so every sink shows the same ledger.
 
 ## Adding a sink

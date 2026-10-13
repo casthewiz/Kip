@@ -16,20 +16,25 @@
   receipt.py publish [--sink NAME --issue KEY]              upload files and upsert the comment on each sink,
                                                             optionally opting the run into another sink first
   receipt.py record --sink NAME --url URL [--comment-id ID] record a comment the agent posted (agent-backed sinks)
-  receipt.py path                                           print the run dir
+  receipt.py path                                           print the run dir (its logs, patches, specs)
+  receipt.py json                                           print the run, its claims and evidence, as JSON
+  receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
+                                                            --migrate creates or upgrades it and imports JSON runs
   receipt.py check [--hook start|stop|pr]                   exit 2 if this branch's run has open claims
                                                             and the code changed since init, or there's
                                                             no run for work that needs one (host hooks)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
 
-Every command takes --run DIR; default is the latest run on the current branch.
-Runs live in $KIP_RECEIPTS_DIR (default ~/.kip/receipts)/<repo>/<run-id>/.
+Every command takes --run ID (or the run's folder path); default is the latest run on the current branch.
+Runs, claims, and evidence live in $KIP_RECEIPTS_DIR (default ~/.kip/receipts)/kip.db, a SQLite database;
+each run's logs, patches, specs, and media live in <repo>/<run-id>/ beside it.
 Sinks are the `destinations` in Kip's config (kip.py config); script-backed ones are modules
 in <repo>/.kip/sinks/ or this script's sinks/ (see sinks/CONTRACT.md).
 Standard library only, Python 3.8+.
 """
 import argparse
+import contextlib
 import datetime
 import functools
 import hashlib
@@ -40,6 +45,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -111,28 +117,149 @@ def redact(text):
     return text
 
 
+DB = ROOT / "kip.db"
+SCHEMA = [  # one entry per version: append a new one, never edit a shipped one
+    """CREATE TABLE runs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, branch TEXT, created_at TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX runs_by_branch ON runs (repo, branch);
+    CREATE TABLE claims (run TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (run, id));
+    CREATE TABLE evidence (run TEXT NOT NULL, claim TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL,
+                           PRIMARY KEY (run, claim, seq));
+    CREATE TABLE files (run TEXT NOT NULL, claim TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL,
+                        PRIMARY KEY (run, claim, seq));
+    CREATE TABLE sessions (repo TEXT NOT NULL, id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (repo, id));""",
+]
+_db, _imported = None, (0, 0)
+
+
+def db():
+    """kip.db, upgraded to the current schema on first open; creating it imports the JSON store that came
+    before it in the same transaction, so that happens exactly once. Write-ahead logging lets hooks in many
+    sessions read while one writes, and an up-to-date database is opened without taking the write lock."""
+    global _db, _imported
+    if _db is None:
+        DB.parent.mkdir(parents=True, exist_ok=True)
+        _db = sqlite3.connect(DB, timeout=30, isolation_level=None, check_same_thread=False)
+        try:
+            _db.execute("PRAGMA journal_mode=WAL")
+            if _db.execute("PRAGMA user_version").fetchone()[0] < len(SCHEMA):
+                with tx():  # re-read under the lock: another process may have just upgraded it
+                    version = _db.execute("PRAGMA user_version").fetchone()[0]
+                    for v, script in enumerate(SCHEMA[version:], version + 1):
+                        for statement in script.split(";"):
+                            _db.execute(statement)
+                        _db.execute(f"PRAGMA user_version = {v}")
+                    if version == 0:
+                        _imported = import_json()
+        except BaseException:
+            _db = None
+            raise
+    return _db
+
+
+@contextlib.contextmanager
+def tx(mode="IMMEDIATE"):
+    """A transaction (IMMEDIATE takes the write lock up front, so writers queue instead of failing midway),
+    or the one already open."""
+    con = db()
+    if con.in_transaction:
+        yield con
+        return
+    con.execute(f"BEGIN {mode}")
+    try:
+        yield con
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
+def dumps(x):
+    return json.dumps(x, ensure_ascii=False)
+
+
 def branch_run():
-    """This branch's latest run: LATEST when it's this branch's, else the newest run made on it."""
-    here, branch = ROOT / repo_name(), git("branch", "--show-current")
-    runs = sorted((p.parent for p in here.glob("*/receipt.json")), reverse=True)
-    if (here / "LATEST").exists():
-        runs.insert(0, here / (here / "LATEST").read_text().strip())
-    return next((d for d in runs if (d / "receipt.json").exists() and load(d)["branch"] == branch), None)
+    """This branch's newest run: the last one started on it (rowid order; saving a run never moves it)."""
+    row = db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
+                       (repo_name(), git("branch", "--show-current"))).fetchone()
+    return ROOT / row[0] / row[1] if row else None
+
+
+def run_path(run):
+    """A run's folder (its logs, patches, specs), from its id or that folder's path."""
+    rid = Path(run).name
+    row = db().execute("SELECT repo FROM runs WHERE id = ?", (rid,)).fetchone()
+    if not row:
+        sys.exit(f"no receipt run {rid}")
+    return ROOT / row[0] / rid
 
 
 def run_dir(a):
-    d = Path(a.run) if a.run else branch_run()
+    d = run_path(a.run) if a.run else branch_run()
     if not d:
         sys.exit("no receipt run for this branch; start one with `receipt.py init`")
     return d
 
 
 def load(d):
-    return json.loads((d / "receipt.json").read_text())
+    """A run as one dict, its claims with their evidence and files, read from one snapshot."""
+    rid = Path(d).name
+    with tx("DEFERRED") as con:
+        row = con.execute("SELECT data FROM runs WHERE id = ?", (rid,)).fetchone()
+        if not row:
+            sys.exit(f"no receipt run {rid}")
+        claims = {cid: {**json.loads(data), "evidence": [], "files": []} for cid, data in
+                  con.execute("SELECT id, data FROM claims WHERE run = ? ORDER BY seq", (rid,))}
+        for table in ("evidence", "files"):
+            for cid, data in con.execute(f"SELECT claim, data FROM {table} WHERE run = ? ORDER BY seq", (rid,)):
+                claims[cid][table].append(json.loads(data))
+    return {**json.loads(row[0]), "claims": list(claims.values())}
 
 
 def save(d, rec):
-    (d / "receipt.json").write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+    rid = Path(d).name
+    with tx() as con:
+        con.execute("INSERT INTO runs VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET data = excluded.data",
+                    (rid, rec["repo"], rec.get("branch"), rec.get("created_at") or rid,  # runs from older Kips may lack them
+                     dumps({k: v for k, v in rec.items() if k != "claims"})))
+        for table in ("claims", "evidence", "files"):
+            con.execute(f"DELETE FROM {table} WHERE run = ?", (rid,))
+        for i, c in enumerate(rec["claims"]):
+            con.execute("INSERT INTO claims VALUES (?, ?, ?, ?)",
+                        (rid, c["id"], i, dumps({k: v for k, v in c.items() if k not in ("evidence", "files")})))
+            for table in ("evidence", "files"):
+                con.executemany(f"INSERT INTO {table} VALUES (?, ?, ?, ?)",
+                                [(rid, c["id"], j, dumps(x)) for j, x in enumerate(c[table])])
+
+
+@contextlib.contextmanager
+def mutate(d):
+    """Load, change and save a run in one write transaction, so concurrent writers queue instead of
+    overwriting each other's claims and evidence."""
+    with tx():
+        rec = load(d)
+        yield rec
+        save(d, rec)
+
+
+def import_json():
+    """Bring in runs and session starts from the JSON store kip.db replaced; their files stay where they are.
+    A run already in kip.db is left alone, so this is safe to repeat. Returns (runs, sessions) imported."""
+    runs = sessions = 0
+    for p in sorted(ROOT.glob("*/*/receipt.json")):
+        with tx() as con:
+            if con.execute("SELECT 1 FROM runs WHERE id = ?", (p.parent.name,)).fetchone():
+                continue
+            try:
+                save(p.parent, json.loads(p.read_text()))
+            except (ValueError, KeyError) as err:
+                print(f"kip-receipts: skipped {p}: {err}", file=sys.stderr)
+                continue
+            runs += 1
+    for p in ROOT.glob("*/sessions/*"):
+        with tx() as con:
+            sessions += con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)",
+                                    (p.parent.parent.name, p.name, p.read_text().strip())).rowcount
+    return runs, sessions
 
 
 def find_claim(rec, cid):
@@ -259,18 +386,15 @@ def cmd_init(a):
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
              "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "stages": workflow.get("stages", []), "claims": checks})
-    (d.parent / "LATEST").write_text(rid + "\n")
     print(d)
 
 
 def cmd_claim(a):
-    d = run_dir(a)
-    rec = load(d)
-    if rec.get("finished"):
-        sys.exit(f"run {rec['id']} is finished (its work is on the base branch); start a new one with `receipt.py init`")
-    cid = f"c{len(rec['claims']) + 1}"
-    rec["claims"].append(new_claim(cid, a.text, unit=a.unit, provider=a.provider, level=a.level, stage=a.stage))
-    save(d, rec)
+    with mutate(run_dir(a)) as rec:
+        if rec.get("finished"):
+            sys.exit(f"run {rec['id']} is finished (its work is on the base branch); start a new one with `receipt.py init`")
+        cid = f"c{len(rec['claims']) + 1}"
+        rec["claims"].append(new_claim(cid, a.text, unit=a.unit, provider=a.provider, level=a.level, stage=a.stage))
     print(cid)
 
 
@@ -288,8 +412,7 @@ def not_a_check(c, how):
 
 def cmd_run(a):
     d = run_dir(a)
-    rec = load(d)
-    c = find_claim(rec, a.claim)
+    c = find_claim(load(d), a.claim)
     cmd = a.cmd or c.get("command")
     if not cmd:
         sys.exit("usage: receipt.py run CLAIM [--red] [--static] -- CMD ...")
@@ -302,21 +425,22 @@ def cmd_run(a):
     except OSError as err:
         code, out = 127, f"{cmd[0]}: {err.strerror}\n"
     passed = code != 0 if a.red else code == 0
-    e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
-                     label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code, passed=passed,
-                     excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
-    log = d / "files" / f"{e['id']}.log"
-    log.write_text(out)
-    e["log"] = {"path": f"files/{log.name}", "sha256": sha256(log)}
     collected = []
-    if a.collect and Path(a.collect).is_dir():
-        root = Path(a.collect)
-        for p in sorted(root.rglob("*")):
-            kind = FILE_TYPES.get(p.suffix.lower())
-            if p.is_file() and kind:
-                name = f"{e['id']}-" + "-".join(p.relative_to(root).parts)
-                collected.append(attach_file(d, c, p, kind, name).name)
-    save(d, rec)
+    with mutate(d) as rec:  # after the command, so a long check never holds the write lock
+        c = find_claim(rec, a.claim)
+        e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
+                         label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
+                         passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
+        log = d / "files" / f"{e['id']}.log"
+        log.write_text(out)
+        e["log"] = {"path": f"files/{log.name}", "sha256": sha256(log)}
+        if a.collect and Path(a.collect).is_dir():
+            root = Path(a.collect)
+            for p in sorted(root.rglob("*")):
+                kind = FILE_TYPES.get(p.suffix.lower())
+                if p.is_file() and kind:
+                    name = f"{e['id']}-" + "-".join(p.relative_to(root).parts)
+                    collected.append(attach_file(d, c, p, kind, name).name)
     expected = "expected failure" if a.red else "expected success"
     print(f"{e['id']}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
           + (f", collected {len(collected)} file(s)" if a.collect else ""))
@@ -324,12 +448,10 @@ def cmd_run(a):
 
 def cmd_observe(a):
     d = run_dir(a)
-    rec = load(d)
-    c = find_claim(rec, a.claim)
-    not_a_check(c, "observed")
-    e = new_evidence(d, rec, c, kind="observed", phase="green",
-                     observation=a.text, passed=a.passed)
-    save(d, rec)
+    with mutate(d) as rec:
+        c = find_claim(rec, a.claim)
+        not_a_check(c, "observed")
+        e = new_evidence(d, rec, c, kind="observed", phase="green", observation=a.text, passed=a.passed)
     print(e["id"])
 
 
@@ -338,19 +460,16 @@ def cmd_attach(a):
     if not src.is_file():
         sys.exit(f"no such file: {src}")
     d = run_dir(a)
-    rec = load(d)
-    dest = attach_file(d, find_claim(rec, a.claim), src, a.type)
-    save(d, rec)
+    with mutate(d) as rec:
+        dest = attach_file(d, find_claim(rec, a.claim), src, a.type)
     print(dest)
 
 
 def cmd_unverified(a):
-    d = run_dir(a)
-    rec = load(d)
-    c = find_claim(rec, a.claim)
-    not_a_check(c, "marked unverified")
-    c["unverified"] = a.reason
-    save(d, rec)
+    with mutate(run_dir(a)) as rec:
+        c = find_claim(rec, a.claim)
+        not_a_check(c, "marked unverified")
+        c["unverified"] = a.reason
 
 
 def check_key(e):
@@ -568,9 +687,9 @@ def cmd_publish(a):
             sys.exit(f"run is for {rec['issue']}, not {a.issue}; start a new run for a different issue")
         rec["issue"] = rec["issue"] or a.issue
         rec["sinks"] = check_sinks(rec["sinks"] + a.sink, rec["issue"])
-        save(d, rec)
     rec["head"] = git("rev-parse", "HEAD")  # what CI compares to the PR head (`check --pr`)
-    save(d, rec)
+    with mutate(d) as fresh:  # only what publish owns; claims and evidence recorded meanwhile stay
+        fresh.update(issue=rec["issue"], sinks=rec["sinks"], head=rec["head"])
     dests = destinations()[0]
     failed = []
     for name in [s for s in rec["sinks"] if s != "local"]:
@@ -597,14 +716,16 @@ def cmd_publish(a):
                 path = d / f["path"]
                 f["uploads"][name] = mod.upload(conf, rec["issue"], path,
                                                 mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-                save(d, rec)
+                with mutate(d) as fresh:
+                    next(x for c in fresh["claims"] for x in c["files"] if x["path"] == f["path"])["uploads"][name] = \
+                        f["uploads"][name]
             comment_id, url = mod.publish(conf, rec["issue"], render(rec, name), prior)
         except Exception as err:  # one sink failing shouldn't stop the others
             print(f"{name}: failed: {redact(str(err))}")
             failed.append(name)
             continue
-        rec["published"][name] = {"comment_id": comment_id, "url": url}
-        save(d, rec)
+        with mutate(d) as fresh:
+            fresh["published"][name] = rec["published"][name] = {"comment_id": comment_id, "url": url}
         print(f"{name}: {'updated' if prior else 'posted'} {url}")
     if not [s for s in rec["sinks"] if s != "local"]:
         print(f"local only: {d}")
@@ -613,18 +734,35 @@ def cmd_publish(a):
 
 
 def cmd_record(a):
-    d = run_dir(a)
-    rec = load(d)
-    if a.sink not in rec["sinks"]:
-        sys.exit(f"{a.sink} isn't one of this run's sinks: {', '.join(rec['sinks'])}")
-    prior = rec["published"].get(a.sink, {}).get("comment_id")
-    rec["published"][a.sink] = {"comment_id": a.comment_id or prior or a.url, "url": a.url}
-    save(d, rec)
+    with mutate(run_dir(a)) as rec:
+        if a.sink not in rec["sinks"]:
+            sys.exit(f"{a.sink} isn't one of this run's sinks: {', '.join(rec['sinks'])}")
+        prior = rec["published"].get(a.sink, {}).get("comment_id")
+        rec["published"][a.sink] = {"comment_id": a.comment_id or prior or a.url, "url": a.url}
     print(f"{a.sink}: recorded {a.url}")
 
 
 def cmd_path(a):
     print(run_dir(a))
+
+
+def cmd_json(a):
+    print(json.dumps(load(run_dir(a)), indent=2, ensure_ascii=False))
+
+
+def cmd_db(a):
+    """Where kip.db is, its schema version and how many runs it holds. --migrate creates or upgrades it and
+    imports the JSON store first; without it, this only reads."""
+    if a.migrate:
+        db()  # creates or upgrades it; a new one imports as it opens
+        runs, sessions = map(sum, zip(import_json(), _imported))
+        print(f"imported {runs} runs and {sessions} session starts from the JSON store")
+    if not DB.exists():
+        return print(f"{DB} · not created yet")
+    con = sqlite3.connect(DB.as_uri() + "?mode=ro", uri=True)
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    runs = con.execute("SELECT count(*) FROM runs").fetchone()[0] if version else 0
+    print(f"{DB} · schema v{version} of {len(SCHEMA)} · {runs} runs")
 
 
 def blocking(rec, pr=False):
@@ -667,7 +805,7 @@ def gate(a, hook):
         return False, f"check: turn {hook['status']}"
     if a.hook == "pr" and not opens_pr(hook):
         return False, "check: not opening a PR"
-    d = Path(a.run) if a.run else branch_run()
+    d = run_path(a.run) if a.run else branch_run()
     rec = load(d) if d else None
     if rec and (rec.get("finished") or finish_if_done(d, rec)):
         if rec["finished"]["fingerprint"] == fingerprint():
@@ -694,9 +832,16 @@ def base_branch():
     return ref or next((b for b in ("main", "master") if git("rev-parse", "--verify", "-q", b)), None)
 
 
-def session_file(hook):
+def session_id(hook):
     sid = hook.get("session_id") or hook.get("conversation_id")
-    return ROOT / repo_name() / "sessions" / re.sub(r"[^\w.-]", "_", sid) if sid else None
+    return str(sid) if sid else None
+
+
+def session_start_state(hook):
+    """The code as this session found it (session_state), or None for a session Kip didn't see start."""
+    sid = session_id(hook)
+    row = sid and db().execute("SELECT state FROM sessions WHERE repo = ? AND id = ?", (repo_name(), sid)).fetchone()
+    return row[0] if row else None
 
 
 def finish_if_done(d, rec):
@@ -708,7 +853,8 @@ def finish_if_done(d, rec):
         return False
     rec["finished"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                        "head": head, "fingerprint": fingerprint()}
-    save(d, rec)
+    with mutate(d) as fresh:
+        fresh["finished"] = rec["finished"]
     return True
 
 
@@ -728,10 +874,10 @@ def session_state():
 def session_changed(hook):
     """This session changed code: its uncommitted diff differs from how it found it, or HEAD has
     commits it made (not merges) that its starting HEAD lacks."""
-    start = session_file(hook)
-    if not (start and start.exists()):
+    start = session_start_state(hook)
+    if not start:
         return False
-    parts = start.read_text().split()
+    parts = start.split()
     if len(parts) == 1:  # a session started before HEAD and diff were kept apart
         return parts[0] != fingerprint()
     head, diff, since = parts
@@ -759,10 +905,10 @@ def session_start(hook):
     """Remember the code as the session found it (once per session), and say where this branch's run stands."""
     if not git("rev-parse", "--show-toplevel"):
         return ""
-    start = session_file(hook)
-    if start and not start.exists():
-        start.parent.mkdir(parents=True, exist_ok=True)
-        start.write_text(session_state() + "\n")
+    if session_id(hook) and not session_start_state(hook):
+        state = session_state()  # git runs outside the write lock
+        with tx() as con:  # a resumed session keeps the state it first started from
+            con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)", (repo_name(), session_id(hook), state))
     d = branch_run()
     rec = load(d) if d else None
     if not rec or rec.get("finished") or finish_if_done(d, rec):
@@ -827,7 +973,7 @@ def cmd_check(a):
 
 def main():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--run", help="run dir (default: latest run for this repo)")
+    common.add_argument("--run", help="run id or its folder (default: this branch's latest run)")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -894,6 +1040,13 @@ def main():
 
     s = sub.add_parser("path", parents=[common])
     s.set_defaults(fn=cmd_path)
+
+    s = sub.add_parser("json", parents=[common])
+    s.set_defaults(fn=cmd_json)
+
+    s = sub.add_parser("db", parents=[common])
+    s.add_argument("--migrate", action="store_true", help="create or upgrade kip.db and import the JSON store")
+    s.set_defaults(fn=cmd_db)
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()

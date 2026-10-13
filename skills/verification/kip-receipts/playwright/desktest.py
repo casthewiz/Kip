@@ -3,7 +3,7 @@
 recorded as its own receipts evidence with screenshots (plus video and trace
 at ultra).
 
-  desktest.py CLAIM URL SPEC [--red] [--viewports NAME,...] [--run DIR]
+  desktest.py CLAIM URL SPEC [--red] [--viewports NAME,...] [--run ID]
 
 Viewports come from Kip's config (evidence.frontend.viewports, see kip.py
 config): mobile, tablet and desktop unless a user or project config changes
@@ -82,9 +82,8 @@ def main():
         sys.exit(f"no such spec: {spec}")
 
     run_args = ["--run", a.run] if a.run else []
-    run = Path(subprocess.run([sys.executable, str(RECEIPT), "path", *run_args],
-                              capture_output=True, text=True, check=True).stdout.strip())
-    rec = json.loads((run / "receipt.json").read_text())
+    rec = json.loads(subprocess.run([sys.executable, str(RECEIPT), "json", *run_args],
+                                    capture_output=True, text=True, check=True).stdout)
     claim = next((c for c in rec["claims"] if c["id"] == a.claim), None)
     if not claim:
         sys.exit(f"unknown claim {a.claim}")
