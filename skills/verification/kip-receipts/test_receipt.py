@@ -74,8 +74,8 @@ def main():
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
             env.pop(v, None)
 
-        def sh(*args, ok=True, extra_env=None):
-            r = subprocess.run(args, cwd=repo, env={**env, **(extra_env or {})}, capture_output=True, text=True)
+        def sh(*args, ok=True, extra_env=None, cwd=repo):
+            r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
             assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
             return (r.stdout + r.stderr).strip()
 
@@ -406,6 +406,53 @@ def main():
         flag.write_text("")
         rc("run", "c1", "--", *has_flag)
         assert verdicts(("--run", remote))["c1"] == "⚠️ passed after failing, code not pinned"
+
+        # Finished runs: once a run's commits are on the base branch and nothing changed since, the
+        # session stops hearing about it and its old claims stop covering new work.
+        fin = Path(tmp, "fin")
+        fin.mkdir()
+
+        def fsh(*args, **kw):
+            return sh(*args, cwd=fin, **kw)
+
+        def frc(*args, **kw):
+            return fsh(sys.executable, str(SCRIPT), *args, **kw)
+
+        fsh("git", "init", "-q")
+        (fin / "a.txt").write_text("1\n")
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "one")
+        base = fsh("git", "branch", "--show-current")
+        session, pr_event = {"session_id": "f1", "cwd": str(fin)}, {"tool_input": {"command": "gh pr create"}}
+        check("--hook", "start", event=session, cwd=fin)
+        frc("init")
+        frc("claim", "a is 2")
+        (fin / "a.txt").write_text("2\n")
+        frc("run", "c1", "--", "grep", "-q", "2", "a.txt")
+        assert "has run" in check("--hook", "start", event={"session_id": "f0", "cwd": str(fin)}, cwd=fin)[1]
+        fsh("git", "commit", "-qam", "two")  # committed on the base branch: landed
+        code, out = check("--hook", "stop", event=session, cwd=fin)
+        assert code == 0 and "is finished" in out, out
+        assert check("--hook", "start", event={"session_id": "f2", "cwd": str(fin)}, cwd=fin) == (0, "")
+        assert "is finished" in frc("claim", "more", ok=False)
+        assert "pass" in frc("run", "c1", "--", "true"), "late evidence (CI after a push) can't be recorded"
+        (fin / "a.txt").write_text("3\n")
+        code, out = check("--hook", "stop", event=session, cwd=fin)
+        assert code == 2 and "this session changed code" in out, out
+        fsh("git", "checkout", "-q", "--", "a.txt")
+        # A feature branch's run isn't finished by committing; its PR gate holds until it's merged.
+        fsh("git", "checkout", "-q", "-b", "feature")
+        frc("init")
+        frc("claim", "a is 4")
+        (fin / "a.txt").write_text("4\n")
+        frc("run", "c1", "--", "false")
+        fsh("git", "commit", "-qam", "four")
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "c1 ❌ refuted" in out, out
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--ff-only", "feature")
+        fsh("git", "checkout", "-q", "feature")
+        assert "is finished" in check("--hook", "pr", event=pr_event, cwd=fin)[1]
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

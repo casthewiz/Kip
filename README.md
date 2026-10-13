@@ -58,7 +58,8 @@ rules, and hooks go, and your own settings, rules, and hooks stay.
 hooks alone: once code changes, the agent can't end a turn with unaddressed
 claims or without a receipts run, or open a PR with refuted claims or
 without its tidy and review passes. Each session starts knowing where the
-branch's run stands. Cursor can't block a stop, so there the gate asks once,
+branch's run stands; a run whose work has landed on the base branch is
+finished and drops out. Cursor can't block a stop, so there the gate asks once,
 as a follow-up message. Cursor keeps a copy of the rules, so `doctor` says
 when it's stale and `install` needs re-running.
 

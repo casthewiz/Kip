@@ -369,6 +369,14 @@ default to the latest run on the current branch.
 - **PR**: `gh pr create` is blocked while any claim is unaddressed or ❌, a
   stage has no claim, or the branch has changes and no run at all.
 
+A run is **finished** once commits made since its `init` are on the base
+branch (`origin`'s default branch: pushed, or the feature branch merged and
+fetched; the local `main` in a repo with no remote) and nothing has changed
+since. The hooks mark it then: sessions stop hearing
+about it, its old claims stop covering new work, and new claims are refused
+(start a new run), though late evidence, like a CI result, can still be
+recorded on it.
+
 Cursor can't block a stop, so it gets the same list once as a follow-up
 message. The block message lists the claims; address them, don't work
 around the hook.

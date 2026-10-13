@@ -246,6 +246,8 @@ def cmd_init(a):
 def cmd_claim(a):
     d = run_dir(a)
     rec = load(d)
+    if rec.get("finished"):
+        sys.exit(f"run {rec['id']} is finished (its work is on the base branch); start a new one with `receipt.py init`")
     cid = f"c{len(rec['claims']) + 1}"
     rec["claims"].append({"id": cid, "text": a.text, "unit": a.unit, "provider": a.provider, "level": a.level,
                           "stage": a.stage, "evidence": [], "files": [], "unverified": None})
@@ -603,9 +605,13 @@ def gate(a, hook):
     if a.hook == "pr" and not re.search(r"(^|[;&|(\n])\s*gh\s+pr\s+create\b", command):  # as a command, not in text
         return False, "check: not opening a PR"
     d = Path(a.run) if a.run else branch_run()
-    if not d:
+    rec = load(d) if d else None
+    if rec and (rec.get("finished") or finish_if_done(d, rec)):
+        if rec["finished"]["fingerprint"] == fingerprint():
+            return False, f"check: run {rec['id']} is finished: its work is on the base branch, nothing changed since"
+        rec = None  # new work after a finished run is unplanned work
+    if not rec:
         return unplanned(a.hook, hook)
-    rec = load(d)
     if rec.get("baseline") in (None, fingerprint()):
         return False, "check: no code changed since the run started"
     pr = a.hook == "pr"
@@ -626,6 +632,19 @@ def base_branch():
 def session_file(hook):
     sid = hook.get("session_id") or hook.get("conversation_id")
     return ROOT / repo_name() / "sessions" / re.sub(r"[^\w.-]", "_", sid) if sid else None
+
+
+def finish_if_done(d, rec):
+    """Mark a run finished once commits made since its init are on the base branch and nothing
+    changed since, so its old claims stop speaking for new work. True if it just finished."""
+    head, base = git("rev-parse", "HEAD"), base_branch()
+    if head == rec["commit"] or not base or git("merge-base", "--is-ancestor", "HEAD", base) is None \
+            or worktree_diff():
+        return False
+    rec["finished"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                       "head": head, "fingerprint": fingerprint()}
+    save(d, rec)
+    return True
 
 
 def unplanned(event, hook):
@@ -653,9 +672,9 @@ def session_start(hook):
         start.parent.mkdir(parents=True, exist_ok=True)
         start.write_text(fingerprint() + "\n")
     d = branch_run()
-    if not d:
+    rec = load(d) if d else None
+    if not rec or rec.get("finished") or finish_if_done(d, rec):
         return ""
-    rec = load(d)
     open_ = blocking(rec, pr=True)
     return (f"kip-receipts: {git('branch', '--show-current')} has run {rec['id']} ({rec['level']}, {d}). "
             + ("Not done yet:\n  " + "\n  ".join(open_) if open_ else "Every claim is addressed.")
