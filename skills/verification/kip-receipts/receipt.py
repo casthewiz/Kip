@@ -718,10 +718,28 @@ def branch_changed():
     return bool(base and git("rev-list", "--count", f"{base}..HEAD") not in (None, "0") or git("diff", "HEAD"))
 
 
+def session_state():
+    """HEAD, the uncommitted diff, and now: switching or pulling moves HEAD, but only the session's
+    own diff and commits are its changes."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    return f"{git('rev-parse', 'HEAD')} {hashlib.sha256(worktree_diff()).hexdigest()} {now}"
+
+
 def session_changed(hook):
-    """The code differs from how this session found it."""
+    """This session changed code: its uncommitted diff differs from how it found it, or HEAD has
+    commits it made (not merges) that its starting HEAD lacks."""
     start = session_file(hook)
-    return bool(start and start.exists() and start.read_text().strip() != fingerprint())
+    if not (start and start.exists()):
+        return False
+    parts = start.read_text().split()
+    if len(parts) == 1:  # a session started before HEAD and diff were kept apart
+        return parts[0] != fingerprint()
+    head, diff, since = parts
+    if diff != session_state().split()[1]:
+        return True
+    me = re.search(r"<(.*)>", git("var", "GIT_COMMITTER_IDENT") or "")
+    return bool(me and git("rev-list", "--no-merges", f"--since={since}", "-F", f"--committer=<{me[1]}>",
+                           "HEAD", f"^{head}"))
 
 
 def unplanned(event, hook):
@@ -744,7 +762,7 @@ def session_start(hook):
     start = session_file(hook)
     if start and not start.exists():
         start.parent.mkdir(parents=True, exist_ok=True)
-        start.write_text(fingerprint() + "\n")
+        start.write_text(session_state() + "\n")
     d = branch_run()
     rec = load(d) if d else None
     if not rec or rec.get("finished") or finish_if_done(d, rec):
