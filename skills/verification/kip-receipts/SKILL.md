@@ -231,6 +231,20 @@ with no command equivalent, and attach the screenshot.
 - ⚠️ **unverified**: no evidence, or marked `unverified` with a reason (needs
   prod credentials, needs hardware, no test harness) and what would verify it.
 - ⚠️ **falsifiability not shown**: the claim is at ultra and has no `--red` run.
+- ⚠️ **flaky**: the same check failed and passed on the same code. Find out
+  why before claiming anything.
+- ⚠️ **check changed after failing**: the check's own files (a spec in the
+  run, a script outside the repo) changed between failing and passing. Show
+  the new check fails without the fix (`--red`), or say why it changed.
+- ⚠️ **passed after failing, code not pinned**: a remote target passed a
+  check it had failed, but nothing records whether its code changed.
+
+**Re-runs.** Runs of the same command in the same directory are one check,
+and its latest run decides it. A failure clears only when that same check,
+unchanged, passes on code that changed since it failed. That is a fix, and
+red-then-green also shows the check can fail, so it counts as falsifiability
+at ultra. Adding a different passing check never clears a failing one. Every
+earlier run stays in the record. New evidence replaces an `unverified` note.
 
 An unverified claim is never reported as done. "Should work" is ⚠️.
 

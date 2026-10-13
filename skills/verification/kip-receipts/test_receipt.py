@@ -321,6 +321,61 @@ def main():
         rc("publish", "--sink", "github", "--issue", "7", extra_env=ghenv)
         assert rc("check", "--pr", "7", extra_env=ghenv).startswith("check: every claim in"), body.read_text()
 
+        # Re-runs: the latest run of each check decides it. A failure clears only when the same, unchanged
+        # check passes on changed code, and that red-then-green also shows the check can fail.
+        def verdicts(run_args=()):
+            return {line.split(" | ")[0][2:]: line.split(" | ")[-1].rstrip(" |")
+                    for line in rc("render", *run_args).splitlines() if line.startswith("| c")}
+
+        flag, check_sh = Path(tmp, "flag"), Path(tmp, "check.sh")
+        rc("init", "--level", "ultra")
+        for text in ("fixed", "flaky", "changed check", "gamed", "regressed"):
+            rc("claim", text)
+        rc("claim", "can't verify yet", "--level", "full")
+        rc("run", "c1", "--", "grep", "-q", "fixed", "app.py")
+        (repo / "app.py").write_text('print("fixed")\n')
+        rc("run", "c1", "--", "grep", "-q", "fixed", "app.py")
+        has_flag = ["sh", "-c", f"test -f {flag}"]
+        rc("run", "c2", "--", *has_flag)
+        flag.write_text("")
+        rc("run", "c2", "--", *has_flag)  # flag is outside the repo: same code, different result
+        (repo / "app.py").write_text('print("fixed again")\n')
+        rc("run", "c2", "--", *has_flag)
+        check_sh.write_text("grep -q nope app.py\n")
+        rc("run", "c3", "--", "sh", str(check_sh))
+        check_sh.write_text("grep -q again app.py\n")
+        rc("run", "c3", "--", "sh", str(check_sh))
+        rc("run", "c4", "--", "false")
+        rc("run", "c4", "--", "true")
+        rc("run", "c5", "--", *has_flag)
+        flag.unlink()
+        rc("run", "c5", "--", *has_flag)
+        rc("unverified", "c6", "needs CI")
+        rc("run", "c6", "--", "true")
+        rc("claim", "red re-run", "--level", "full")
+        flag.write_text("")
+        rc("run", "c7", "--red", "--", *has_flag)  # flag exists, so this "red" run passes: can't fail
+        assert verdicts()["c7"] == "❌ check can't fail", verdicts()
+        flag.unlink()
+        rc("run", "c7", "--red", "--", *has_flag)
+        rc("run", "c7", "--", "true")
+        assert verdicts()["c7"] == "✅ verified", verdicts()
+        v = verdicts()
+        assert v["c1"] == "✅ verified", v
+        assert v["c2"] == "⚠️ flaky: failed and passed on the same code", v
+        assert v["c3"].startswith("⚠️ check changed after failing"), v
+        assert v["c4"] == "❌ refuted" and v["c5"] == "❌ refuted" and v["c6"] == "✅ verified", v
+        (repo / "app.py").write_text('print("fixed")\n')  # the changed check fails without the fix
+        rc("run", "c3", "--red", "--", "sh", str(check_sh))
+        (repo / "app.py").write_text('print("fixed again")\n')
+        assert verdicts()["c3"] == "✅ verified", verdicts()
+        remote = rc("init", "--target", "https://staging.example.test")
+        rc("claim", "staging fixed")
+        rc("run", "c1", "--", *has_flag)
+        flag.write_text("")
+        rc("run", "c1", "--", *has_flag)
+        assert verdicts(("--run", remote))["c1"] == "⚠️ passed after failing, code not pinned"
+
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")
         assert "hash mismatch" in rc("render", "--run", str(run), ok=False)

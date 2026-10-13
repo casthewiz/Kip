@@ -156,6 +156,7 @@ def new_evidence(d, rec, c, **fields):
     eid = f"{c['id']}e{len(c['evidence']) + 1}"
     e = {"id": eid, **fields, **code_state(d, rec, eid)}
     c["evidence"].append(e)
+    c["unverified"] = None  # evidence supersedes an earlier "can't verify"
     return e
 
 
@@ -168,14 +169,16 @@ def rel_to(path, d):
 
 def command_inputs(cmd, d):
     """Hash every file a command names (specs, configs, scripts), so a rerun can tell
-    whether it's running the same inputs. Files inside the run dir are tamper-checked."""
+    whether it's running the same inputs. Files inside the run dir are tamper-checked; files in the
+    repo are code under test, already pinned with the commit and patch."""
+    top = git("rev-parse", "--show-toplevel")
     inputs = []
     for arg in cmd:
         p = Path(arg)
         if p.is_file():
             inside = rel_to(p, d)
             inputs.append({"path": str(inside) if inside else str(p.resolve()), "inside_run": bool(inside),
-                           "sha256": sha256(p)})
+                           "in_repo": not inside and bool(top and rel_to(p, Path(top))), "sha256": sha256(p)})
     return inputs
 
 
@@ -290,16 +293,56 @@ def cmd_unverified(a):
     save(d, rec)
 
 
+def check_key(e):
+    """Runs of the same command in the same dir are one check; observations are one check."""
+    return (tuple(e["command"]), e.get("cwd")) if e.get("command") else ("observed",)
+
+
+def code_key(e):
+    return e.get("commit"), (e.get("patch") or {}).get("sha256")
+
+
+def inputs_key(e):
+    """The check's own files (specs, scripts outside the repo), not the code it tests."""
+    return sorted((i["path"], i["sha256"]) for i in e.get("inputs", []) if not i.get("in_repo"))
+
+
+def rerun_note(fails, passes, last, reds):
+    """Why a check that failed and later passed still isn't verified, or None when the pass is a fix:
+    the same check, unchanged, passing on code that changed since it failed."""
+    if last.get("remote"):
+        return "passed after failing, code not pinned"
+    if any(code_key(f) == code_key(p) and inputs_key(f) == inputs_key(p) for f in fails for p in passes):
+        return "flaky: failed and passed on the same code"
+    if any(inputs_key(f) != inputs_key(last) for f in fails) and \
+            not any(inputs_key(r) == inputs_key(last) and r["passed"] for r in reds):
+        return "check changed after failing; show the new check fails without the fix (--red)"
+    return None
+
+
 def verdict(c, level):
+    """The latest run of each check decides it. A failure clears only when the same check passes on
+    changed code, which also shows the check can fail."""
     level = c.get("level") or level
     ev = c["evidence"]
-    if any(not e["passed"] for e in ev if e["phase"] == "green"):
+    runs = {}
+    for e in ev:
+        runs.setdefault(check_key(e), {"green": [], "red": []})[e["phase"]].append(e)
+    if any(r["green"] and not r["green"][-1]["passed"] for r in runs.values()):
         return "❌ refuted"
-    if any(not e["passed"] for e in ev if e["phase"] == "red"):
+    if any(r["red"] and not r["red"][-1]["passed"] for r in runs.values()):
         return "❌ check can't fail"
+    shown = any(e["phase"] == "red" for e in ev)
+    for r in runs.values():
+        fails = [e for e in r["green"] if not e["passed"]]
+        if fails:
+            note = rerun_note(fails, [e for e in r["green"] if e["passed"]], r["green"][-1], r["red"])
+            if note:
+                return f"⚠️ {note}"
+            shown = True
     if c["unverified"] or not ev:
         return "⚠️ unverified"
-    if level == "ultra" and not any(e["phase"] == "red" for e in ev):
+    if level == "ultra" and not shown:
         return "⚠️ falsifiability not shown"
     return "✅ verified"
 
