@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Self-check for receipt.py and the sink interface: python3 test_receipt.py"""
+import datetime
 import json
 import os
+import queue
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().with_name("receipt.py")  # 3.8 leaves __file__ relative
@@ -73,7 +79,7 @@ def main():
         env = {**os.environ, "KIP_RECEIPTS_DIR": str(Path(tmp, "store")), "KIP_HOME": str(Path(tmp, "home")),
                "FAKE_B_URL": "https://b.test", "FAKE_API_TOKEN": "supersecret123",
                "FAKE_SINK_LOG": str(sink_log), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "KIP_DASHBOARD": "0"}
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
             env.pop(v, None)
 
@@ -310,6 +316,7 @@ def main():
         (repo / "new.txt").write_text("new\n")  # a new, untracked file is a change too
         code, out = check("--hook", "stop", event=session)
         assert code == 2 and "this session changed code" in out, out
+        assert check("--hook", "stop", event={**session, "stop_hook_active": True})[0] == 0
         check("--hook", "start", event=session)  # a resumed session keeps its first baseline
         assert check("--hook", "stop", event=session)[0] == 2
         (repo / "new.txt").unlink()
@@ -325,6 +332,169 @@ def main():
         assert code == 0 and json.loads(out)["permission"] == "deny", out
         assert "c1 ❌ refuted" in json.loads(out)["agent_message"], out
         assert check("--hook", "pr", event={**cursor, "command": "git status"}) == (0, '{"permission": "allow"}')
+
+        # Hooks log to the event log: gate decisions with where they happened, and every tool call (no git,
+        # never blocking, redacted and cut short). Claude Code's PR hook on a plain shell call leaves that
+        # to its tool hook; Cursor's is its only view of the call.
+        events = Path(tmp, "store", "events")
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        lines = lambda: [x for p in sorted(events.glob("*.jsonl")) for x in p.read_text().splitlines()]
+        last = lambda: json.loads(lines()[-1])
+        dash = {"session_id": "d1", "cwd": str(repo)}
+        for hook, event in (("start", dash), ("stop", dash)):
+            n = len(lines())
+            assert check("--hook", hook, event=event)[0] == 0 and len(lines()) == n + 1, f"{hook} wasn't logged"
+        assert {k: last()[k] for k in ("session", "host", "repo", "branch", "hook", "blocked")} == \
+            {"session": "d1", "host": "claude", "repo": "demo", "branch": sh("git", "branch", "--show-current"),
+             "hook": "stop", "blocked": False} and last()["run"] and last()["at"], last()
+        tools = [("Skill", {"skill": "kip-decompose"}), ("Edit", {"file_path": "app.py"}),
+                 ("Skill", {"skill": "kip-marie-kondo"}), ("Bash", {"command": "python3 receipt.py run c1 -- true"})]
+        for name, tool_input in tools:
+            assert check("--hook", "tool", event={**dash, "tool_name": name, "tool_input": tool_input},
+                         extra_env={"PATH": ""}) == (0, ""), "the tool hook spoke, blocked, or needed git"
+        assert {k: last()[k] for k in ("session", "hook", "tool", "input")} == \
+            {"session": "d1", "hook": "tool", "tool": "Bash", "input": "python3 receipt.py run c1 -- true"}, last()
+        check("--hook", "tool", event={**dash, "tool_name": "Bash", "tool_input": {"command": "echo supersecret123 " + "x" * 300}})
+        assert last()["input"].startswith("echo [FAKE_API_TOKEN] x") and len(last()["input"]) == 200, last()
+        n = len(lines())
+        check("--hook", "pr", event={**dash, "tool_input": {"command": "ls"}})
+        check("--hook", "pr", event={**cursor, "conversation_id": "k1", "command": "git status"})
+        assert len(lines()) == n, "a shell call was logged by the PR hook as well as the tool hook"
+        blocked = [json.loads(x) for x in lines() if '"s1"' in x and '"stop"' in x][-1]
+        assert blocked["blocked"] and "this session changed code" in blocked["message"], blocked
+        rc("claim", "handles the no claim case ❌")  # its text never decides its kind
+        with open(events / f"{today}.jsonl", "a") as f:  # lines it can't use are skipped, not fatal
+            f.write('not json\n{"session": "old"}\n[1]\n{"session": 7, "at": "2026-01-01T00:00:00+00:00"}\n')
+        assert not Path(tmp, "dashboard.html").exists(), "a hook wrote a static page"
+
+        # The dashboard server: the page, sessions with their stage, one session's events, and a stream
+        # that pushes each new event to open pages; it exits once idle with no page open.
+        def free_port():
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                return s.getsockname()[1]
+
+        def get(port, path):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+                return r.read().decode()
+
+        def wait_until(ok, seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                if ok():
+                    return True
+                time.sleep(0.1)
+            return False
+
+        def listening(port):
+            with socket.socket() as s:
+                return s.connect_ex(("127.0.0.1", port)) == 0
+
+        day = lambda n: events / f"{today - datetime.timedelta(days=n)}.jsonl"
+        day(20).write_text(json.dumps({"session": "ancient", "at": "2000-01-01T00:00:00+00:00"}) + "\n")
+        day(1).write_text(json.dumps({"session": "yesterday", "at": f"{today}T00:00:00+00:00", "repo": "old"}) + "\n")
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "2"],
+                                  env=env, stdout=subprocess.PIPE, text=True)
+        assert server.stdout.readline().strip() == f"kip dashboard: http://127.0.0.1:{port}"
+        assert "EventSource" in get(port, "/") and "/stream" in get(port, "/")
+        rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
+        d1 = rows["d1"]
+        assert d1["stage"] == "receipts" and d1["reached"] == ["decompose", "implement", "tidy", "receipts"], d1
+        assert d1["skills"] == ["kip-decompose", "kip-marie-kondo"] and d1["tool"].startswith("Bash: echo"), d1
+        assert {k: len(v) for k, v in d1["open"].items()} == \
+            {"failing check": 1, "missing stage": 2, "unaddressed": 1} and d1["active"], d1["open"]
+        assert rows["s1"]["blocked"] == 2 and "7" in rows and "old" not in rows, rows
+        assert "yesterday" in rows and "ancient" not in rows and not day(20).exists() and day(1).exists(), \
+            "kept the wrong days"
+        assert [e["hook"] for e in json.loads(get(port, "/api/sessions/d1"))][:2] == ["start", "stop"]
+        assert json.loads(get(port, "/api/sessions/nobody")) == []
+        answers = []  # bursts of requests: they share the server's kip.db connection and its listen backlog
+        for _ in range(5):
+            pages = [threading.Thread(target=lambda: answers.append(get(port, "/api/sessions"))) for _ in range(50)]
+            for t in pages:
+                t.start()
+            for t in pages:
+                t.join()
+        assert len(answers) == 250 and len(set(answers)) == 1, f"{250 - len(answers)} of 250 requests failed or disagreed"
+        rebound = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions", headers={"Host": "evil.test"})
+        try:
+            urllib.request.urlopen(rebound, timeout=5)
+            raise AssertionError("served sessions to another host name")
+        except urllib.error.HTTPError as err:
+            assert err.code == 403, err
+        stream, got = urllib.request.urlopen(f"http://127.0.0.1:{port}/stream", timeout=5), queue.Queue()
+        def read_stream():
+            try:
+                for x in stream:
+                    got.put((time.time(), x))
+            except OSError:  # closed below
+                pass
+        threading.Thread(target=read_stream, daemon=True).start()
+        time.sleep(0.5)
+        sent = time.time()
+        check("--hook", "tool", event={**dash, "tool_name": "Read", "tool_input": {"file_path": "streamed.py"}})
+        at, line = got.get(timeout=5)
+        assert line.startswith(b"data: ") and json.loads(line[6:])["input"] == "streamed.py", line
+        assert at - sent < 1, f"streamed after {at - sent:.2f}s"
+        time.sleep(3)
+        assert server.poll() is None, "exited while a page was open"
+        stream.close()
+        assert wait_until(lambda: server.poll() is not None, 15), "an idle server kept running"
+
+        # A start hook launches the server when nothing listens, once, and not at all with KIP_DASHBOARD=0.
+        port = free_port()
+        auto = {"KIP_DASHBOARD": "1", "KIP_DASHBOARD_PORT": str(port), "KIP_DASHBOARD_IDLE": "2"}
+        check("--hook", "start", event=dash, extra_env={**auto, "KIP_DASHBOARD": "0"})
+        assert not wait_until(lambda: listening(port), 2), "started with KIP_DASHBOARD=0"
+        check("--hook", "start", event=dash, extra_env=auto)
+        assert wait_until(lambda: listening(port), 10), "the start hook didn't launch the server"
+        check("--hook", "start", event=dash, extra_env=auto)
+        time.sleep(1)
+        servers = subprocess.run(["pgrep", "-f", f"serve --port {port}"], capture_output=True, text=True).stdout.split()
+        assert len(servers) == 1, servers
+        assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
+        # A log that can't be written changes nothing about what the gate says.
+        gate_pr = {"tool_input": {"command": "gh pr create"}}
+        before = check("--hook", "pr", event=gate_pr)
+        events.rename(events.with_suffix(".bak"))
+        events.write_text("a file where the log's folder should be\n")
+        assert check("--hook", "pr", event=gate_pr) == before and before[0] == 2, before
+        events.unlink()
+        events.with_suffix(".bak").rename(events)
+
+        # Skills with no skill hook: a prompt's `/name` (when a skill folder has it, or it's a stage's skill) or
+        # attached SKILL.md, and a tool reading a SKILL.md, count as using that skill. Editing one doesn't.
+        # Cursor gets JSON answers and one session id across its events; the prompt itself is never kept.
+        home = {"HOME": str(Path(tmp, "nohome"))}
+        (repo / ".claude" / "skills" / "my-skill").mkdir(parents=True)
+        (repo / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text("---\nname: my-skill\n---\n")
+        prompt = {"session_id": "p1", "cwd": str(repo),
+                  "prompt": "/kip-decompose this, see /help, then /my-skill; not /code-review/notes.md"}
+        assert check("--hook", "prompt", event=prompt, extra_env=home) == (0, "")
+        assert [(e["session"], e["tool"], e["input"]) for e in map(json.loads, lines()[-2:])] == \
+            [("p1", "Skill", "kip-decompose"), ("p1", "Skill", "my-skill")], lines()[-2:]
+        assert "/help" not in "".join(lines()), "a prompt was kept"
+        assert "code-review" not in "".join(lines()[-2:]), "a path in the prompt counted as a skill"
+        check("--hook", "tool", event={"session_id": "p1", "tool_name": "Edit",
+                                       "tool_input": {"file_path": str(repo / ".claude/skills/my-skill/SKILL.md")}})
+        k2 = {**cursor, "conversation_id": "k2"}
+        assert check("--hook", "start", event={**k2, "session_id": "cursor-session"})[0] == 0
+        assert check("--hook", "prompt", event={**k2, "prompt": "/nothing-here", "attachments": [
+            {"type": "file", "file_path": "/u/.cursor/skills/kip-marie-kondo/SKILL.md"}]}, extra_env=home) == \
+            (0, '{"continue": true}')
+        assert check("--hook", "tool", event={**k2, "hook_event_name": "preToolUse", "tool_name": "Read",
+                                              "tool_input": {"file_path": "/u/.cursor/skills/kip-receipts/SKILL.md"}}) == (0, "{}")
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env=env,
+                                  stdout=subprocess.PIPE, text=True)
+        server.stdout.readline()
+        rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
+        server.terminate()
+        assert rows["p1"]["skills"] == ["kip-decompose", "my-skill"] and rows["p1"]["stage"] == "implement", rows["p1"]
+        assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo" and "cursor-session" not in rows, rows
+        assert rows["k2"]["skills"] == ["kip-marie-kondo", "kip-receipts"] and rows["k2"]["stage"] == "receipts", rows["k2"]
+        assert rows["k2"]["tool"] == "Read: /u/.cursor/skills/kip-receipts/SKILL.md", rows["k2"]
 
         # A PR passes once every stage has an addressed claim; a review finding is a claim, so a refuted one blocks.
         gh_create = {"tool_input": {"command": "gh pr create"}}
@@ -412,7 +582,7 @@ def main():
         (repo / "app.py").write_text('print("nope")\n')
         rc("run", "c2", "--", "true")
         code, out = check("--hook", "stop", event={})
-        assert code == 2 and "c1 ⚠️ unverified: `tests` passes" in out and "c2" not in out, out
+        assert code == 2 and "c1 ⚠️ unverified: `tests` passes" in out and "  c2 " not in out, out
         assert "FAIL" in rc("run", "c1", cwd=repo / ".kip")  # from a subdirectory, still the same check at the root
         code, out = check("--hook", "stop", event={})
         assert code == 2 and "c1 ❌ refuted" in out, out

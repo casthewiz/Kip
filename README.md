@@ -64,6 +64,18 @@ finished and drops out. Cursor can't block a stop, so there the gate asks once,
 as a follow-up message. Cursor keeps a copy of the rules, so `doctor` says
 when it's stale and `install` needs re-running.
 
+The hooks also keep a session log, one file per day in `~/.kip/receipts/events/`
+(the dashboard keeps 14 days): every
+gate decision and every tool call, redacted and cut short. Neither host has a
+hook for skills, so a skill counts as used when a prompt names it (`/name`) or
+attaches it, or a tool reads its `SKILL.md`; prompts themselves aren't kept. A session's start launches a live
+dashboard at <http://127.0.0.1:7377> (`KIP_DASHBOARD_PORT` to move it,
+`KIP_DASHBOARD=0` to never start it), which exits after 30 idle minutes. It
+lists sessions with the stage each is in (decompose, implement, tidy, review,
+receipts), how many stops in a row the gate blocked, and its run's open
+reasons, and streams each session's timeline as it happens. Run it yourself
+with `receipt.py serve`.
+
 Skills are always also linked into `~/.kip/skills/`, a host-neutral path
 that skills use to call their own scripts. Claude Code gets the rules as an
 `@` import in `~/.claude/CLAUDE.md`. Cursor keeps User Rules in its state

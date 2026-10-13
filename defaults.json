@@ -13,7 +13,9 @@
           "SessionStart": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook start"}]}],
           "Stop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook stop"}]}],
           "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]},
-                         {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]}]
+                         {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]},
+                         {"matcher": "*", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook tool"}]}],
+          "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook prompt"}]}]
         }
       }
     },
@@ -36,7 +38,10 @@
           "sessionStart": [{"command": "python3 {receipt} check --hook start"}],
           "stop": [{"command": "python3 {receipt} check --hook stop"}],
           "beforeShellExecution": [{"command": "python3 {receipt} check --hook pr"}],
-          "beforeMCPExecution": [{"command": "python3 {receipt} check --hook pr"}]
+          "beforeMCPExecution": [{"command": "python3 {receipt} check --hook pr"}],
+          "afterFileEdit": [{"command": "python3 {receipt} check --hook tool"}],
+          "preToolUse": [{"command": "python3 {receipt} check --hook tool"}],
+          "beforeSubmitPrompt": [{"command": "python3 {receipt} check --hook prompt"}]
         }
       }
     }
