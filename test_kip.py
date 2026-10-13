@@ -100,11 +100,16 @@ def main():
         assert on["model"] == "x" and on["hooks"]["Stop"][0] == mine and len(on["hooks"]["Stop"]) == 2, on
         assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
         pre = on["hooks"]["PreToolUse"]
-        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)"], pre
-        assert all(g["hooks"][0]["command"].endswith("--hook pr") for g in pre), pre
+        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "*"], pre
+        assert [g["hooks"][0]["command"].split()[-1] for g in pre] == ["pr", "pr", "tool"], pre
         assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
+        assert on["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].endswith("check --hook prompt"), on
         assert settings.read_text() == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
+        write(settings, {**on, "hooks": {**on["hooks"], "PreToolUse": pre[:2]}})  # installed before the tool hook
+        assert "claude-code    ready · hooks not installed" in kip("doctor")
+        kip("install", "--host", "claude-code")
+        assert settings.read_text() == first, "install didn't add the missing hook"
         assert "cursor         missing ~/.cursor · hooks not installed (run install)" in kip("doctor")
         settings.write_text("{not json")
         assert "fix it before installing hooks" in kip("install", "--host", "claude-code", ok=False)
@@ -145,6 +150,9 @@ def main():
         assert on["version"] == 1 and on["hooks"]["stop"] == [{"command": f"python3 {RECEIPT} check --hook stop"}], on
         assert on["hooks"]["beforeShellExecution"][0]["command"].endswith("check --hook pr"), on
         assert on["hooks"]["beforeMCPExecution"][0]["command"].endswith("check --hook pr"), on
+        assert on["hooks"]["afterFileEdit"][0]["command"].endswith("check --hook tool"), on
+        assert on["hooks"]["preToolUse"] == [{"command": f"python3 {RECEIPT} check --hook tool"}], on
+        assert on["hooks"]["beforeSubmitPrompt"][0]["command"].endswith("check --hook prompt"), on
         on["hooks"]["stop"].insert(0, {"command": "say hi"})
         write(cursor_hooks, on)
         kip("install", "--host", "cursor")

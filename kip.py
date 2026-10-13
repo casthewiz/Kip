@@ -267,7 +267,7 @@ def read_settings(path):
 
 def hooks_installed(hooks):
     on = read_settings(Path(hooks["settings"]).expanduser()).get("hooks", {})
-    return all(any(is_kip(g) for g in on.get(event, [])) for event in hooks["events"])
+    return all([g for g in on.get(event, []) if is_kip(g)] == groups for event, groups in hook_groups(hooks).items())
 
 
 def install_hooks(hooks, path):

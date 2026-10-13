@@ -20,9 +20,10 @@
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
                                                             --migrate creates or upgrades it and imports JSON runs
-  receipt.py check [--hook start|stop|pr]                   exit 2 if this branch's run has open claims
+  receipt.py check [--hook start|stop|pr|tool|prompt]       exit 2 if this branch's run has open claims
                                                             and the code changed since init, or there's
                                                             no run for work that needs one (host hooks)
+  receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (a start hook launches it)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
 
@@ -44,7 +45,9 @@ import mimetypes
 import os
 import re
 import shlex
+import select
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -97,6 +100,7 @@ def load_sink(name):
     sys.exit(f"no sink module {module} for {name}; available: {', '.join(sink_names())}")
 
 
+@functools.lru_cache(maxsize=None)
 def repo_name():
     top = git("rev-parse", "--show-toplevel")
     return Path(top).name if top else Path.cwd().name
@@ -797,10 +801,13 @@ def opens_pr(hook):
     return False
 
 
+NUDGED = "check: already nudged this turn"
+
+
 def gate(a, hook):
     """(blocked, message) for this branch's run; anything that isn't this branch's changed work passes."""
     if hook.get("stop_hook_active") or hook.get("loop_count"):  # already nudged once this turn; never loop
-        return False, "check: already nudged this turn"
+        return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
     if a.hook == "pr" and not opens_pr(hook):
@@ -938,11 +945,276 @@ def check_pr(pr):
     print(f"check: every claim in {g['run']} is addressed")
 
 
+EVENTS = ROOT / "events"  # one <UTC date>.jsonl per day, so old days can be dropped without rewriting a file hooks append to
+KEEP_DAYS = 14
+ACTIVE = datetime.timedelta(minutes=30)
+PORT = int(os.environ.get("KIP_DASHBOARD_PORT", 7377))
+STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
+SKILL_STAGES = {"kip-decompose": "decompose", "kip-ponytail": "implement", "kip-marie-kondo": "tidy",
+                "code-review": "review", "kip-receipts": "receipts"}
+EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
+SKILL_FILE = re.compile(r"/skills/(?:\S*/)?([\w.-]+)/SKILL\.md$")  # reading one is using that skill (Cursor has no skill hook)
+
+
+def append_event(payload, **fields):
+    """One line in the event log for a host hook's payload; a failure here never touches the gate or the tool call."""
+    try:
+        e = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+             "session": payload.get("conversation_id") or payload.get("session_id"),  # Cursor: one id across its events
+             "host": "cursor" if "workspace_roots" in payload else "claude", **fields}
+        EVENTS.mkdir(parents=True, exist_ok=True)
+        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def log_tool(hook):
+    """A tool call: its name and a short, redacted line of what it was asked to do. No git: this runs on every call."""
+    ti = hook.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
+                 if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
+        (json.dumps(ti, ensure_ascii=False) if ti else "")
+    append_event(hook, hook="tool", tool=hook.get("tool_name") or hook.get("hook_event_name") or "tool",
+                 input=redact(str(what))[:200])
+
+
+def log_prompt(hook):
+    """The skills a prompt invokes, by `/name` or by attaching its SKILL.md, logged as Skill calls; neither host
+    has a hook for that. The prompt itself isn't kept. A `/name` counts when a skill folder has it, or it's a
+    stage's skill (built-ins like code-review have no folder)."""
+    roots = [Path.home() / d for d in (".kip/skills", ".claude/skills", ".cursor/skills")] + \
+        [Path(w) / d for w in (hook.get("workspace_roots") or [hook.get("cwd")]) if w
+         for d in (".claude/skills", ".cursor/skills")]
+    attached = [m[1] for a in (hook.get("attachments") or []) if isinstance(a, dict)
+                for m in [SKILL_FILE.search(str(a.get("file_path") or ""))] if m]
+    named = [n for n in re.findall(r"(?:^|\s)/([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
+             if n in SKILL_STAGES or any((r / n / "SKILL.md").exists() for r in roots)]
+    for name in dict.fromkeys(named + attached):
+        append_event(hook, hook="tool", tool="Skill", input=name)
+
+
+def log_gate(event, hook, blocked, msg):
+    try:
+        d = branch_run()
+        append_event(hook, hook=event, repo=repo_name(), branch=git("branch", "--show-current"),
+                     run=str(d) if d else None, blocked=blocked, message=msg)
+    except Exception:
+        pass
+
+
+def ensure_server():
+    """Start the dashboard server unless one is listening (or KIP_DASHBOARD=0); it exits on its own when idle."""
+    if os.environ.get("KIP_DASHBOARD") == "0":
+        return
+    with socket.socket() as s:
+        if s.connect_ex(("127.0.0.1", PORT)) == 0:
+            return
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def reason_kind(line):
+    """A blocking() line's kind, read from its verdict (claim lines start with their id), never its text."""
+    v = re.match(r"c\d+ (.*)", line)
+    return ("missing stage" if not v else "stale" if v[1].startswith("⚠️ stale") else
+            "failing check" if v[1].startswith("❌") else "unaddressed")
+
+
+def fold(rows, e):
+    """Add one event to its session's row; the session's id, or None for a line that isn't an event."""
+    if not (isinstance(e, dict) and e.get("session") and e.get("at")):
+        return None
+    sid = str(e["session"])
+    r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "branch": None, "run": None,
+                              "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None})
+    r.update({k: e[k] for k in ("host", "repo", "branch", "run") if e.get(k)}, last=e["at"])
+    if e.get("hook") == "tool":
+        tool, what = str(e.get("tool")), str(e.get("input") or "")
+        r["tool"] = f"{tool}: {what}" if what else tool
+        skill_file = tool not in EDITS and SKILL_FILE.search(what)  # editing a skill isn't using it
+        if skill_file:
+            tool, what = "Skill", skill_file[1]
+        stage = SKILL_STAGES.get(what) if tool == "Skill" else "implement" if tool in EDITS else \
+            "receipts" if re.search(r"receipt\.py (run|render|publish)\b", what) else None
+        if tool == "Skill" and what not in r["skills"]:
+            r["skills"].append(what)
+        if stage:
+            r["stage"] = stage
+            r["reached"] = sorted(set(r["reached"]) | {stage}, key=STAGES.index)
+    if e.get("hook") == "stop" and e.get("message") != NUDGED:  # the stop it let through after a block isn't a pass
+        r["blocked"] = r["blocked"] + 1 if e.get("blocked") else 0
+    return sid
+
+
+def finish(rows):
+    """The rows as the dashboard shows them, newest first: whether each is active, and its run's open
+    reasons by kind and the stages it has claims for."""
+    now, out = datetime.datetime.now(datetime.timezone.utc), []
+    for r in rows.values():
+        d = Path(r["run"]) if r["run"] else None
+        rec = load(d) if d and db().execute("SELECT 1 FROM runs WHERE id = ?", (d.name,)).fetchone() else None
+        open_ = {}
+        for line in (blocking(rec, pr=True) if rec and not rec.get("finished") else []):
+            open_.setdefault(reason_kind(line), []).append(line)
+        claimed = {c.get("stage") for c in rec["claims"]} & set(STAGES) if rec else set()
+        out.append({**r, "active": now - datetime.datetime.fromisoformat(r["last"]) < ACTIVE, "open": open_,
+                    "reached": sorted(set(r["reached"]) | claimed, key=STAGES.index)})
+    return sorted(out, key=lambda r: r["last"], reverse=True)
+
+
+def cmd_serve(a):
+    """The live dashboard: the page, its JSON, and /stream. One thread follows the event log, folding each new
+    line into memory and pushing it to open pages, so a request costs the same however long the log gets."""
+    from collections import deque
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import queue
+    import threading
+    import time
+    page = Path(__file__).resolve().with_name("dashboard.html").read_text()
+    EVENTS.mkdir(parents=True, exist_ok=True)
+    os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
+    rows, timelines, streams, lock = {}, {}, set(), threading.Lock()
+    reading = threading.Lock()  # request threads share one kip.db connection; one read transaction at a time
+    offsets, partial, live = {}, {}, {"busy": time.time()}
+
+    def sweep():
+        cutoff = str(datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=KEEP_DAYS))
+        for p in EVENTS.glob("*.jsonl"):
+            if p.stem < cutoff:
+                p.unlink()
+                offsets.pop(p, None)
+                partial.pop(p, None)
+
+    def poll():
+        for p in sorted(EVENTS.glob("*.jsonl")):
+            size = p.stat().st_size
+            if size <= offsets.get(p, 0):
+                continue
+            with open(p, "rb") as f:
+                f.seek(offsets.get(p, 0))
+                *lines, partial[p] = (partial.get(p, b"") + f.read(size - offsets.get(p, 0))).split(b"\n")
+            offsets[p] = size
+            for line in lines:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                with lock:
+                    sid = fold(rows, e)
+                    if sid:
+                        timelines.setdefault(sid, deque(maxlen=500)).append(e)
+                if sid:
+                    for q in list(streams):
+                        q.put(line)
+                    live["busy"] = time.time()
+
+    def follow():
+        swept = time.time()
+        while True:
+            time.sleep(0.25)
+            if time.time() - swept > 3600:
+                sweep()
+                swept = time.time()
+            poll()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def send(self, body, ctype="application/json", code=200):
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if (self.headers.get("Host") or "").rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
+                return self.send('{"error": "wrong host"}', code=403)  # a rebound DNS name; not this machine's page
+            path = self.path.split("?")[0]
+            one = re.fullmatch(r"/api/sessions/([\w.-]+)", path)
+            if path == "/":
+                self.send(page, "text/html")
+            elif path == "/api/sessions":
+                with lock:
+                    snapshot = {sid: {**r, "skills": list(r["skills"]), "reached": list(r["reached"])}
+                                for sid, r in rows.items()}
+                with reading:
+                    body = json.dumps(finish(snapshot), ensure_ascii=False)
+                self.send(body)
+            elif one:
+                with lock:
+                    events = list(timelines.get(one[1], ()))
+                self.send(json.dumps(events, ensure_ascii=False))
+            elif path == "/stream":
+                self.stream()
+            else:
+                self.send('{"error": "not found"}', code=404)
+
+        def stream(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            q, beat = queue.Queue(), time.time()
+            streams.add(q)
+            try:
+                while True:
+                    try:
+                        self.wfile.write(b"data: " + q.get(timeout=0.25) + b"\n\n")
+                    except queue.Empty:
+                        if select.select([self.connection], [], [], 0)[0] and not self.connection.recv(1):
+                            break  # the page closed
+                        if time.time() - beat < 15:
+                            continue
+                        self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    beat = time.time()
+            except OSError:
+                pass
+            finally:
+                streams.discard(q)
+                live["busy"] = time.time()
+
+    try:
+        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True})(
+            ("127.0.0.1", a.port), Handler)  # the default backlog of 5 refuses a page's burst of requests
+    except OSError as err:
+        sys.exit(f"kip dashboard: can't listen on 127.0.0.1:{a.port} ({err.strerror}); is it already running?")
+    sweep()
+    poll()
+    threading.Thread(target=follow, daemon=True).start()
+
+    def idle_exit():
+        while True:
+            time.sleep(min(5, a.idle))
+            if not streams and time.time() - live["busy"] > a.idle:
+                return server.shutdown()
+
+    threading.Thread(target=idle_exit, daemon=True).start()
+    print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
+    server.serve_forever()
+
+
 def cmd_check(a):
     """The gate host hooks and CI call. Claude Code: exit 2 blocks, reasons on stderr. Cursor (its
     events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
     if a.pr:
         return check_pr(a.pr)
+    if a.hook in ("tool", "prompt"):  # only logged: never blocks, never adds to the agent's context
+        hook = {}
+        try:
+            hook = json.loads(sys.stdin.read() or "{}")
+            (log_tool if a.hook == "tool" else log_prompt)(hook)
+        except Exception:
+            pass
+        if isinstance(hook, dict) and "workspace_roots" in hook:  # Cursor reads a JSON answer, even if logging failed
+            print(json.dumps({"continue": True} if a.hook == "prompt" else {}))
+        return
     hook = {}
     try:
         hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
@@ -958,7 +1230,13 @@ def cmd_check(a):
             a.hook == "stop" and not (hook.get("stop_hook_active") or hook.get("loop_count"))
         msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
                "Fix it or tell the user; don't work around it.")
+    if a.hook and (a.hook != "pr" or opens_pr(hook)):  # a plain shell or MCP call is the tool hook's to log
+        log_gate(a.hook, hook, blocked, msg)
     if a.hook == "start":
+        try:
+            ensure_server()
+        except Exception:
+            pass
         return print(json.dumps({"additional_context": msg} if msg else {}) if "workspace_roots" in hook else msg)
     if "workspace_roots" in hook:
         if a.hook == "pr":
@@ -1050,9 +1328,15 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "pr"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("serve", parents=[common])
+    s.add_argument("--port", type=int, default=PORT)
+    s.add_argument("--idle", type=float, default=float(os.environ.get("KIP_DASHBOARD_IDLE", 1800)),
+                   help="seconds with no events and no open pages before it exits")
+    s.set_defaults(fn=cmd_serve)
 
     # Split off the wrapped command ourselves; argparse.REMAINDER swallows run's own flags.
     argv, cmd = sys.argv[1:], []
