@@ -378,14 +378,17 @@ default to the latest run on the current branch.
 
 - **Session start**: the session is told where this branch's run stands,
   and the code as the session found it is remembered.
-- **Stop**: once code has changed since the run's `init`, finishing a turn
-  is blocked while any claim has neither evidence nor an `unverified`
-  reason, has ⚠️ stale evidence, or is a required check that hasn't passed. With no run on the branch, a session that changed code is blocked
-  until it starts one.
+- **Stop**: once code has changed since the run's `init` or since the
+  session started, finishing a turn is blocked while any claim has neither
+  evidence nor an `unverified` reason, has ⚠️ stale evidence, or is a
+  required check that hasn't passed. With no run on the branch, a session
+  that changed code is blocked until it starts one.
 - **PR**: opening a PR (`gh pr create`, a POST to `/pulls` through `gh api`,
   or an MCP `create_pull_request` tool) is blocked while any claim is open as
-  at stop or ❌, a stage has no claim, or the branch has changes and no run at
-  all. A PR opened some other way (the web UI) is caught by CI.
+  at stop or ❌, a stage has no claim, the run has no claims at all, or the
+  branch has changes and no run at all. A branch with commits ahead of the
+  base branch, or uncommitted changes, is judged on them however late its
+  run's `init` came. A PR opened some other way (the web UI) is caught by CI.
 - **Crashes**: a gate that crashes blocks stop and PR with the error, once
   per turn, rather than letting everything through.
 

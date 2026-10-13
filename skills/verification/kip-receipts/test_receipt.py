@@ -544,6 +544,25 @@ def main():
         fsh("git", "merge", "-q", "--ff-only", "feature")
         fsh("git", "checkout", "-q", "feature")
         assert "is finished" in check("--hook", "pr", event=pr_event, cwd=fin)[1]
+        # A run started only after the work was done still judges it: the PR by the branch's changes,
+        # the stop by what the session changed; a session that changed nothing isn't nudged.
+        late = {"session_id": "f3", "cwd": str(fin)}
+        check("--hook", "start", event=late, cwd=fin)
+        fsh("git", "checkout", "-q", "-b", "late")
+        (fin / "a.txt").write_text("5\n")
+        fsh("git", "commit", "-qam", "five")
+        frc("init")
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)  # no stages configured, and no claims yet
+        assert code == 2 and "no claims: record what the branch does" in out, out
+        frc("claim", "a is 5")
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "c1 ⚠️ unverified: a is 5" in out, out
+        code, out = check("--hook", "stop", event=late, cwd=fin)
+        assert code == 2 and "c1 ⚠️ unverified: a is 5" in out, out
+        reader = {"session_id": "f4", "cwd": str(fin)}
+        check("--hook", "start", event=reader, cwd=fin)
+        assert check("--hook", "stop", event=reader, cwd=fin) == (0, "check: no code changed since the run started")
+        assert check("--hook", "stop", event={}, cwd=fin)[0] == 0, "a stop without a session was judged"
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

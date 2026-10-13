@@ -629,8 +629,8 @@ def cmd_path(a):
 
 def blocking(rec, pr=False):
     """What keeps work from being done: claims nobody addressed or whose evidence is stale, required
-    checks that haven't passed and, before a PR, refuted claims and workflow stages (tidy, review)
-    with no claim at all."""
+    checks that haven't passed and, before a PR, refuted claims, workflow stages (tidy, review)
+    with no claim, or no claims at all."""
     def open_(c, v):
         return (not c["evidence"] and not c["unverified"]) or v.startswith("⚠️ stale") or \
             (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
@@ -638,6 +638,8 @@ def blocking(rec, pr=False):
     if pr:
         have = {c.get("stage") for c in rec["claims"]}
         out += [f"{s}: no claim (`receipt.py claim \"…\" --stage {s}`)" for s in rec.get("stages", []) if s not in have]
+        if not rec["claims"]:
+            out.append("no claims: record what the branch does (`receipt.py claim \"…\"`) and back each with evidence")
     return out
 
 
@@ -673,9 +675,11 @@ def gate(a, hook):
         rec = None  # new work after a finished run is unplanned work
     if not rec:
         return unplanned(a.hook, hook)
-    if rec.get("baseline") in (None, fingerprint()):
-        return False, "check: no code changed since the run started"
     pr = a.hook == "pr"
+    # A run started after the work was done still judges it: a PR by the branch's changes,
+    # a stop by what this session changed.
+    if rec.get("baseline") in (None, fingerprint()) and not (branch_changed() if pr else session_changed(hook)):
+        return False, "check: no code changed since the run started"
     open_ = blocking(rec, pr)
     if not open_:
         return False, f"check: every claim in {rec['id']} is addressed"
@@ -708,16 +712,25 @@ def finish_if_done(d, rec):
     return True
 
 
+def branch_changed():
+    """The branch differs from the base branch: commits ahead of it, or uncommitted changes to tracked files."""
+    base = base_branch()
+    return bool(base and git("rev-list", "--count", f"{base}..HEAD") not in (None, "0") or git("diff", "HEAD"))
+
+
+def session_changed(hook):
+    """The code differs from how this session found it."""
+    start = session_file(hook)
+    return bool(start and start.exists() and start.read_text().strip() != fingerprint())
+
+
 def unplanned(event, hook):
     """No run on this branch. Block only work that needed one: a PR from a branch that changed
     something, or a session that changed code since it started."""
-    base = base_branch()
-    ahead = base and git("rev-list", "--count", f"{base}..HEAD") not in (None, "0")
-    if event == "pr" and (ahead or git("diff", "HEAD")):
+    if event == "pr" and branch_changed():
         return True, ("kip-receipts: this branch has changes but no receipts run. Start one (`receipt.py init`), "
                       "record a claim per promise, and back each with evidence before opening a PR.")
-    start = session_file(hook)
-    if event == "stop" and start and start.exists() and start.read_text().strip() != fingerprint():
+    if event == "stop" and session_changed(hook):
         return True, ("kip-receipts: this session changed code, but there's no receipts run for this branch. "
                       "Start one (`receipt.py init`), record what you claim to have done, and back each claim "
                       "with evidence, or say plainly that it's unverified.")
