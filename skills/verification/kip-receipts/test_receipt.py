@@ -563,6 +563,17 @@ def main():
         check("--hook", "start", event=reader, cwd=fin)
         assert check("--hook", "stop", event=reader, cwd=fin) == (0, "check: no code changed since the run started")
         assert check("--hook", "stop", event={}, cwd=fin)[0] == 0, "a stop without a session was judged"
+        # Switching or pulling to another commit isn't the session changing code; committing there is.
+        fsh("git", "switch", "-q", base)
+        fsh("git", "commit", "-q", "--allow-empty", "-m", "pulled", extra_env={"GIT_COMMITTER_EMAIL": "o@o"})
+        fsh("git", "switch", "-qc", "moved")
+        frc("init")
+        frc("claim", "nothing yet")
+        assert check("--hook", "stop", event=reader, cwd=fin) == (0, "check: no code changed since the run started")
+        (fin / "a.txt").write_text("6\n")
+        fsh("git", "commit", "-qam", "six")
+        code, out = check("--hook", "stop", event=reader, cwd=fin)
+        assert code == 2 and "c1 ⚠️ unverified: nothing yet" in out, out
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")
