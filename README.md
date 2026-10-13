@@ -49,10 +49,16 @@ skill (links to moved skills are pruned). Options:
 - `--project`: link into this repo's `.claude/skills/`, `.cursor/skills/`
   instead of your user folders.
 
-Where a host supports hooks (Claude Code), `install` also adds the
-receipts [gate](skills/verification/kip-receipts/SKILL.md#gate) to its
-settings, leaving your own hooks alone: once code changes, the agent can't
-end a turn with unaddressed claims or open a PR with refuted ones.
+`python3 kip.py uninstall` (same options) undoes all of it: Kip's links,
+rules, and hooks go, and your own settings, rules, and hooks stay.
+
+`install` also adds the receipts
+[gate](skills/verification/kip-receipts/SKILL.md#gate) to each host's hooks
+(Claude Code's `settings.json`, Cursor's `hooks.json`), leaving your own
+hooks alone: once code changes, the agent can't end a turn with unaddressed
+claims, or open a PR with refuted ones or without its tidy and review
+passes. Cursor can't block a stop, so there the gate asks once, as a
+follow-up message.
 
 Skills are always also linked into `~/.kip/skills/`, a host-neutral path
 that skills use to call their own scripts. Claude Code gets the rules as an
@@ -80,7 +86,10 @@ surface needs and whether it's here.
 | `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, `sqlite` databases with a `key` to write the rules into, or `manual` instructions as the fallback), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (Stop and PR gates), cursor |
 | `connectors` | The agent's own tools a surface can run through: `kind` is `mcp` or `tool` | browser |
 | `evidence` | [Receipts providers](skills/verification/kip-receipts/providers/CONTRACT.md): a `doc` procedure, plus a `fallback` | frontend (Playwright `viewports`), browser, api, generic |
-| `destinations` | [Receipts sinks](skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira |
+| `destinations` | [Receipts sinks](skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira, github |
+
+Plus `workflow.stages`: the [stages](skills/verification/kip-receipts/SKILL.md#stages)
+a PR needs a claim for (default `["tidy", "review"]`; `[]` turns it off).
 
 Every surface can declare `requires` (`env`, `cmd`, `file`), which doctor
 checks and `install` uses to detect hosts. A surface with `via` runs through
@@ -114,6 +123,25 @@ environment (secrets only ever from the environment):
 
 - Linear: `LINEAR_API_KEY`
 - Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
+- GitHub: the `gh` CLI, logged in; the ledger goes in the PR body
+
+### CI
+
+To hold every PR in a repo to its receipts, whoever opened it, add Kip's
+action. It fails the PR while the ledger the `github` sink published is
+missing or has claims that aren't done. It checks the published ledger, not
+whether it's current, so republish after pushing new work.
+
+```yaml
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+jobs:
+  receipts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: casthewiz/Kip@main
+```
 
 ## Verify
 

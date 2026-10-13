@@ -1,0 +1,9 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 test_kip.py
+      - run: python3 skills/verification/kip-receipts/test_receipt.py

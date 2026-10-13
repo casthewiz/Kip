@@ -39,6 +39,15 @@ def publish(conf, issue, body, comment_id):
     return comment_id or "cm1", conf.get("FAKE_URL", "https://fake.test") + "/" + issue + "#cm1"
 '''
 
+# Stands in for gh: one pull request whose body lives in $FAKE_PR_BODY.
+FAKE_GH = f'''#!/bin/sh
+case "$1 $2" in
+  "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1]}}))' "$3";;
+  "pr edit") cat > "$FAKE_PR_BODY";;
+  *) echo "unexpected: gh $*" >&2; exit 1;;
+esac
+'''
+
 # Two instances of one sink module with their own settings, an agent-backed destination,
 # and a project default destination.
 PROJECT_CONFIG = {
@@ -243,8 +252,17 @@ def main():
         code, out = check("--hook", "stop", event={"cwd": str(repo)}, cwd=tmp)
         assert code == 2 and "c1 ⚠️ unverified: app prints hi!" in out and "c2 ⚠️ unverified" in out, out
         assert check("--hook", "stop", event={"stop_hook_active": True})[0] == 0, "stop hook could loop"
+        # Cursor's events carry workspace_roots: same gate, answered in JSON. Stop asks for one follow-up.
+        cursor = {"workspace_roots": [str(repo)], "loop_count": 0}
+        code, out = check("--hook", "stop", event=cursor, cwd=tmp)
+        assert code == 0 and "c1 ⚠️ unverified" in json.loads(out)["followup_message"], out
+        assert check("--hook", "stop", event={**cursor, "loop_count": 1}) == (0, "{}"), "cursor stop could loop"
+        assert check("--hook", "stop", event={**cursor, "status": "aborted"}) == (0, "{}"), "re-prompted a user's stop"
         assert check("--hook", "pr", event={"tool_input": {"command": "git commit -m x"}})[0] == 0
         assert check("--hook", "pr", event={"tool_input": {"command": "gh pr create --fill"}})[0] == 2
+        pr_cmd = "gh pr " + "create"  # spelled apart so this file's own edits don't trip the gate
+        assert check("--hook", "pr", event={"tool_input": {"command": f"git push &&\n  {pr_cmd} --fill"}})[0] == 2
+        assert check("--hook", "pr", event={"tool_input": {"command": f"echo '{pr_cmd}'"}})[0] == 0, "text isn't a PR"
         sh("git", "checkout", "-q", "-b", "elsewhere")
         assert "not this branch" in check("--hook", "stop", event={})[1]
         sh("git", "checkout", "-q", "-")
@@ -254,6 +272,54 @@ def main():
         assert check("--hook", "stop", event={})[0] == 0, "refuted claims are reported, not blocked, at stop"
         code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}})
         assert code == 2 and "c1 ❌ refuted" in out and "  c2 " not in out, out
+        assert "tidy: no claim" in out and "review: no claim" in out, "workflow stages aren't required"
+        code, out = check("--hook", "pr", event={**cursor, "cwd": str(repo), "command": "gh pr create --fill"}, cwd=tmp)
+        assert code == 0 and json.loads(out)["permission"] == "deny", out
+        assert "c1 ❌ refuted" in json.loads(out)["agent_message"], out
+        assert check("--hook", "pr", event={**cursor, "command": "git status"}) == (0, '{"permission": "allow"}')
+
+        # A PR passes once every stage has an addressed claim; a review finding is a claim, so a refuted one blocks.
+        gh_create = {"tool_input": {"command": "gh pr create"}}
+        rc("init")
+        rc("claim", "tidy pass over the branch diff", "--stage", "tidy")
+        rc("claim", "review: no open correctness findings", "--stage", "review")
+        (repo / "app.py").write_text('print("hi!!!")\n')
+        rc("run", "c1", "--", "true")
+        rc("run", "c2", "--", "true")
+        assert check("--hook", "pr", event=gh_create)[0] == 0
+        rc("claim", "Fixed: app.py crashes on empty input", "--stage", "review")
+        rc("run", "c3", "--", "false")
+        code, out = check("--hook", "pr", event=gh_create)
+        assert code == 2 and "c3 ❌ refuted" in out and "no claim" not in out, out
+
+        # The github sink puts the ledger in a marked block of the PR body, keeping the author's text,
+        # with a hidden gate line that CI reads with `check --pr`.
+        bin_ = Path(tmp, "bin")
+        bin_.mkdir()
+        (bin_ / "gh").write_text(FAKE_GH)
+        (bin_ / "gh").chmod(0o755)
+        body = Path(tmp, "pr-body.md")
+        body.write_text("My description")
+        ghenv = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}", "FAKE_PR_BODY": str(body)}
+        out = rc("check", "--pr", "7", ok=False, extra_env=ghenv)
+        assert "PR 7 has no receipts ledger" in out, out
+        assert "<!-- kip-gate {" in rc("render", "--sink", "github")
+        assert "github: posted https://github.test/pull/7" in rc("publish", "--sink", "github", "--issue", "7", extra_env=ghenv)
+        rc("publish", extra_env=ghenv)
+        pr_body = body.read_text()
+        assert pr_body.startswith("My description\n\n<!-- kip-receipt -->\n### Receipts") and pr_body.count("kip-gate") == 1, pr_body
+        out = rc("check", "--pr", "7", ok=False, extra_env=ghenv)
+        assert "c3 ❌ refuted: Fixed: app.py crashes on empty input" in out, out
+
+        # Stages come from config, fixed into the run at init: a project that drops them doesn't need them.
+        (repo / ".kip" / "config.json").write_text(json.dumps({**PROJECT_CONFIG, "workflow": {"stages": []}}))
+        rc("init")
+        rc("claim", "app prints hi!!!!")
+        (repo / "app.py").write_text('print("hi!!!!")\n')
+        rc("run", "c1", "--", "true")
+        assert check("--hook", "pr", event=gh_create)[0] == 0
+        rc("publish", "--sink", "github", "--issue", "7", extra_env=ghenv)
+        assert rc("check", "--pr", "7", extra_env=ghenv).startswith("check: every claim in"), body.read_text()
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

@@ -4,7 +4,7 @@
   receipt.py sinks                                          list destinations and whether each is ready
   receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra]
                                                             start a run (local only by default), print its dir
-  receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N]
+  receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
   receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] -- CMD ...
                                                             run CMD, record the result, attach media from DIR
@@ -18,6 +18,8 @@
   receipt.py path                                           print the run dir
   receipt.py check [--hook stop|pr]                         exit 2 if this branch's run has open claims
                                                             and the code changed since init (host hooks)
+  receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
+                                                            or has claims that aren't done (CI)
 
 Every command takes --run DIR; default is the latest run for the current repo.
 Runs live in $KIP_RECEIPTS_DIR (default ~/.kip/receipts)/<repo>/<run-id>/.
@@ -213,7 +215,7 @@ def cmd_init(a):
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
              "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
-             "claims": []})
+             "stages": kip.load().get("workflow", {}).get("stages", []), "claims": []})
     (d.parent / "LATEST").write_text(rid + "\n")
     print(d)
 
@@ -223,7 +225,7 @@ def cmd_claim(a):
     rec = load(d)
     cid = f"c{len(rec['claims']) + 1}"
     rec["claims"].append({"id": cid, "text": a.text, "unit": a.unit, "provider": a.provider, "level": a.level,
-                          "evidence": [], "files": [], "unverified": None})
+                          "stage": a.stage, "evidence": [], "files": [], "unverified": None})
     save(d, rec)
     print(cid)
 
@@ -417,7 +419,13 @@ def render_jira(rec, sink=None):
     return "\n".join(out)
 
 
-RENDERERS = {"markdown": render_markdown, "jira": render_jira}
+def render_github(rec, sink=None):
+    """Markdown plus a hidden line CI reads (`check --pr`): the run and what blocks a PR."""
+    gate = json.dumps({"run": rec["id"], "blocking": blocking(rec, pr=True)}, ensure_ascii=False)
+    return render_markdown(rec, sink) + "\n\n<!-- kip-gate " + gate.replace(">", "\\u003e") + " -->"
+
+
+RENDERERS = {"markdown": render_markdown, "jira": render_jira, "github": render_github}
 
 
 def sink_format(name):
@@ -508,36 +516,78 @@ def cmd_path(a):
     print(run_dir(a))
 
 
-def cmd_check(a):
-    """The gate host hooks call. Exit 2 (blocking, reasons on stderr) only when this branch's
-    run has claims nobody addressed and the code changed since init; anything else passes."""
-    hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
-    if hook.get("cwd"):
-        os.chdir(hook["cwd"])
-    if hook.get("stop_hook_active"):  # already nudged once this turn; never loop
-        return
-    if a.hook == "pr" and not re.search(r"\bgh\s+pr\s+create\b", hook.get("tool_input", {}).get("command", "")):
-        return
+def blocking(rec, pr=False):
+    """What keeps work from being done: claims nobody addressed and, before a PR, refuted
+    claims and workflow stages (tidy, review) with no claim at all."""
+    out = [f"{c['id']} {verdict(c, rec['level'])}: {c['text']}" for c in rec["claims"]
+           if (not c["evidence"] and not c["unverified"]) or (pr and verdict(c, rec["level"]).startswith("❌"))]
+    if pr:
+        have = {c.get("stage") for c in rec["claims"]}
+        out += [f"{s}: no claim (`receipt.py claim \"…\" --stage {s}`)" for s in rec.get("stages", []) if s not in have]
+    return out
+
+
+def gate(a, hook):
+    """(blocked, message) for this branch's run; anything that isn't this branch's changed work passes."""
+    if hook.get("stop_hook_active") or hook.get("loop_count"):  # already nudged once this turn; never loop
+        return False, "check: already nudged this turn"
+    if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
+        return False, f"check: turn {hook['status']}"
+    command = hook.get("tool_input", {}).get("command") or hook.get("command", "")
+    if a.hook == "pr" and not re.search(r"(^|[;&|(\n])\s*gh\s+pr\s+create\b", command):  # as a command, not in text
+        return False, "check: not opening a PR"
     latest = ROOT / repo_name() / "LATEST"
     if not a.run and not latest.exists():
-        return print("check: no receipt run for this repo")
+        return False, "check: no receipt run for this repo"
     d = run_dir(a)
     rec = load(d)
     if rec["branch"] != git("branch", "--show-current"):
-        return print(f"check: latest run is for {rec['branch']}, not this branch")
+        return False, f"check: latest run is for {rec['branch']}, not this branch"
     if rec.get("baseline") in (None, fingerprint()):
-        return print("check: no code changed since the run started")
+        return False, "check: no code changed since the run started"
     pr = a.hook == "pr"
-    blocking = [f"{c['id']} {verdict(c, rec['level'])}: {c['text']}" for c in rec["claims"]
-                if (not c["evidence"] and not c["unverified"]) or (pr and verdict(c, rec["level"]).startswith("❌"))]
-    if not blocking:
-        return print(f"check: every claim in {rec['id']} is addressed")
+    open_ = blocking(rec, pr)
+    if not open_:
+        return False, f"check: every claim in {rec['id']} is addressed"
     todo = ("fix them, or re-run their checks, before opening a PR" if pr else
             "record evidence (`receipt.py run`) or why it can't be verified (`receipt.py unverified`), "
             "then end with `receipt.py render`")
-    print(f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(blocking) + f"\nNext: {todo}.",
-          file=sys.stderr)
-    sys.exit(2)
+    return True, f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(open_) + f"\nNext: {todo}."
+
+
+def check_pr(pr):
+    r = subprocess.run(["gh", "pr", "view", pr, "--json", "body"], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"gh pr view {pr}: {r.stderr.strip()}")
+    found = re.findall(r"<!-- kip-gate (\{.*?\}) -->", json.loads(r.stdout).get("body") or "")
+    if not found:
+        sys.exit(f"kip-receipts: PR {pr} has no receipts ledger; "
+                 f"publish one with `receipt.py publish --sink github --issue {pr}`")
+    g = json.loads(found[-1])
+    if g["blocking"]:
+        sys.exit(f"kip-receipts: run {g['run']} has claims that aren't done:\n  " + "\n  ".join(g["blocking"]))
+    print(f"check: every claim in {g['run']} is addressed")
+
+
+def cmd_check(a):
+    """The gate host hooks and CI call. Claude Code: exit 2 blocks, reasons on stderr. Cursor (its
+    events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
+    if a.pr:
+        return check_pr(a.pr)
+    hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
+    cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+    if cwd:
+        os.chdir(cwd)
+    blocked, msg = gate(a, hook)
+    if "workspace_roots" in hook:
+        if a.hook == "pr":
+            out = {"permission": "deny", "user_message": msg, "agent_message": msg} if blocked else {"permission": "allow"}
+        else:
+            out = {"followup_message": msg} if blocked else {}
+        return print(json.dumps(out))
+    print(msg, file=sys.stderr if blocked else sys.stdout)
+    if blocked:
+        sys.exit(2)
 
 
 def main():
@@ -562,6 +612,7 @@ def main():
     s.add_argument("--provider")
     s.add_argument("--level", choices=["lite", "full", "ultra"], help="override the run's level (e.g. ultra floor)")
     s.add_argument("--unit", help="the kip-decompose unit this claim belongs to")
+    s.add_argument("--stage", help="the workflow stage this claim covers (tidy, review); a PR needs one per stage")
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("run", parents=[common])
@@ -610,7 +661,9 @@ def main():
     s.set_defaults(fn=cmd_path)
 
     s = sub.add_parser("check", parents=[common])
-    s.add_argument("--hook", choices=["stop", "pr"], help="read a host hook's JSON event from stdin")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--hook", choices=["stop", "pr"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 
     # Split off the wrapped command ourselves; argparse.REMAINDER swallows run's own flags.

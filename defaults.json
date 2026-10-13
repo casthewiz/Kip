@@ -25,6 +25,15 @@
                    "$APPDATA/Cursor/User/globalStorage/state.vscdb"],
         "key": "aicontext.personalContext",
         "manual": "Paste {rules} into Cursor Settings → Rules → User Rules (re-paste after pulling)."
+      },
+      "hooks": {
+        "settings": "~/.cursor/hooks.json",
+        "project_settings": ".cursor/hooks.json",
+        "init": {"version": 1},
+        "events": {
+          "stop": [{"command": "python3 {receipt} check --hook stop"}],
+          "beforeShellExecution": [{"command": "python3 {receipt} check --hook pr"}]
+        }
       }
     }
   },
@@ -49,7 +58,9 @@
   "destinations": {
     "local": {"type": "local"},
     "linear": {"type": "linear", "requires": {"env": ["LINEAR_API_KEY"]}},
-    "jira": {"type": "jira", "requires": {"env": ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]}}
+    "jira": {"type": "jira", "requires": {"env": ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]}},
+    "github": {"type": "github", "requires": {"cmd": ["gh"]}}
   },
-  "default_destination": "local"
+  "default_destination": "local",
+  "workflow": {"stages": ["tidy", "review"]}
 }

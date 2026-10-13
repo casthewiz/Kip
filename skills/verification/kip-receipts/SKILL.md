@@ -300,6 +300,7 @@ sites), each with its own settings.
 | local | `receipt.json` + files under `~/.kip/receipts/<repo>/<run-id>/` | nothing |
 | [linear](sinks/linear.py) | Issue comment with the ledger; images embedded, videos and logs linked | `LINEAR_API_KEY` |
 | [jira](sinks/jira.py) | Issue comment in Jira markup; files as attachments, images as thumbnails | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
+| [github](sinks/github.py) | A marked block in the pull request's body (the issue is the PR number), with a hidden line CI checks; files listed, not uploaded | `gh` logged in |
 
 `receipt.py publish` is the same for every sink: upload each file once, post
 `render` output verbatim (never a rewrite), and update the run's existing
@@ -324,15 +325,36 @@ still complete.
 If `receipt.py` can't run (no Python 3), write the ledger by hand in the same
 shape, and mark every claim ⚠️ that you can't back with quoted output.
 
+## Stages
+
+A run carries the workflow `stages` from Kip's config when it starts
+(default `tidy`, `review`). Each needs at least one claim tagged with it
+before a PR can open:
+
+- **tidy**: the `kip-marie-kondo` pass, which records itself.
+- **review**: a correctness pass over the branch diff (the host's
+  `/code-review` if it has one). With nothing to fix, record
+  `claim "Review: no open correctness findings" --stage review` with the
+  review's output as evidence. Each finding you fix is its own
+  `--stage review` claim ("Fixed: …") with a check that shows the fix, so an
+  unfixed finding stays open and blocks the PR.
+
 ## Gate
 
-`kip.py install` wires `receipt.py check` into hosts that support hooks
-(Claude Code: `Stop` and `PreToolUse`). Once code has changed since the
-run's `init`, finishing a turn is blocked while any claim on this branch's
-run has neither evidence nor an `unverified` reason, and `gh pr create` is
-blocked while any claim is also ❌. The block message lists the claims;
-address them, don't work around the hook. A host without hooks (Cursor)
-relies on these rules alone.
+`kip.py install` wires `receipt.py check` into each host's hooks (Claude
+Code: `Stop` and `PreToolUse`; Cursor: `stop` and `beforeShellExecution`).
+Once code has changed since the run's `init`, finishing a turn is blocked
+while any claim on this branch's run has neither evidence nor an
+`unverified` reason, and `gh pr create` is blocked while any claim is also
+❌ or a stage has no claim. Cursor can't block a stop, so it gets the same
+list once as a follow-up message. The block message lists the claims;
+address them, don't work around the hook.
+
+**On the PR.** After `gh pr create`, publish the run to it:
+`receipt.py publish --sink github --issue <PR number>`. Repos that add the
+Kip action to CI fail the PR while its ledger is missing or has claims that
+aren't done (`receipt.py check --pr N`), so the gate holds for everyone,
+not just one agent's hooks.
 
 ## Boundaries
 

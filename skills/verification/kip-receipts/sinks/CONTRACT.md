@@ -60,7 +60,7 @@ Requires <ENV_VARS and where to get them>.
 Issue key: <what a target looks like, e.g. ENG-123>.
 """
 
-FORMAT = "markdown"        # renderer for the comment: "markdown" or "jira"
+FORMAT = "markdown"        # renderer for the comment: "markdown", "jira", or "github" (markdown + CI gate line)
 
 
 def upload(conf, issue, path, content_type):

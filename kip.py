@@ -6,12 +6,15 @@
   kip.py install [--host NAME] [--project]
                                         link skills (and rules, and hooks) into each host,
                                         and this repo at ~/.kip/kip; idempotent
+  kip.py uninstall [--host NAME] [--project]
+                                        undo install: Kip's links, rules, and hooks; the user's own stay
 
 Config layers, later wins: defaults.json next to this file, then
 $KIP_HOME/config.json (default ~/.kip), then <repo>/.kip/config.json. Dicts
 merge, anything else replaces, null deletes. A `doc` path is relative to the
 file that sets it. Surface kinds are hosts, connectors, evidence and
-destinations; see the README for the schema.
+destinations, plus `workflow` (stages a PR needs claims for); see the README
+for the schema.
 
 Standard library only, Python 3.8+.
 """
@@ -66,7 +69,7 @@ def load():
             layer = json.loads(path.read_text())
         except ValueError as err:
             sys.exit(f"{path}: {err}")
-        unknown = set(layer) - set(SURFACES) - {"default_destination"}
+        unknown = set(layer) - set(SURFACES) - {"default_destination", "workflow"}
         if unknown:
             sys.exit(f"{path}: unknown surface kind {', '.join(sorted(unknown))}; valid: {', '.join(SURFACES)}")
         for entry in (layer.get("evidence") or {}).values():
@@ -94,6 +97,9 @@ def validate(cfg):
     for name, e in cfg["evidence"].items():
         if e.get("fallback") and e["fallback"] not in cfg["evidence"]:
             sys.exit(f"evidence.{name}: fallback {e['fallback']} isn't an evidence surface")
+    stages = cfg.get("workflow", {}).get("stages", [])
+    if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
+        sys.exit("workflow.stages must be a list of stage names")
     if cfg.get("default_destination", "local") not in cfg["destinations"]:
         sys.exit(f"default_destination {cfg['default_destination']} isn't a destination")
 
@@ -172,16 +178,15 @@ def link(dest, found):
 
 
 def install_rules(rules):
-    if "sqlite" in rules:
-        db = next((p for p in (Path(os.path.expandvars(d)).expanduser() for d in rules["sqlite"]) if p.exists()), None)
-        if db:
-            return install_rules_sqlite(db, rules["key"])
+    db = rules_db(rules)
+    if db:
+        return install_rules_sqlite(db, rules["key"])
     if "manual" in rules:
         print("  rules: " + rules["manual"].format(rules=RULES))
         return
     target = Path(rules["append"]).expanduser()
     lines = target.read_text().splitlines() if target.exists() else []
-    if any(l.startswith("@") and Path(l[1:].strip()).expanduser().resolve() == RULES for l in lines):
+    if any(is_import(l) for l in lines):
         print(f"  rules: already imported in {target}")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -189,12 +194,26 @@ def install_rules(rules):
     print(f"  rules: imported in {target}")
 
 
+def rules_db(rules):
+    return next((p for p in (Path(os.path.expandvars(d)).expanduser() for d in rules.get("sqlite", [])) if p.exists()),
+                None)
+
+
+def is_import(line):
+    return line.startswith("@") and Path(line[1:].strip()).expanduser().resolve() == RULES
+
+
+def user_rules(con, key):
+    """The rules value with Kip's block taken out: (row, the user's own rules)."""
+    row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
+    return row, re.sub(r"<!-- kip rules: .*?<!-- /kip rules -->\n?", "", row[0] if row else "", flags=re.S).strip()
+
+
 def install_rules_sqlite(db, key):
     """Replace Kip's block in a rules value kept in an app's key-value store; keep the user's own rules."""
     begin, end = f"<!-- kip rules: {RULES} -->", "<!-- /kip rules -->"
     with sqlite3.connect(db) as con:
-        row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
-        mine = re.sub(r"<!-- kip rules: .*?<!-- /kip rules -->\n?", "", row[0] if row else "", flags=re.S).strip()
+        row, mine = user_rules(con, key)
         value = "\n\n".join(filter(None, [mine, f"{begin}\n{RULES.read_text().strip()}\n{end}"])) + "\n"
         if row and row[0] == value:
             return print(f"  rules: already in {db}")
@@ -203,15 +222,20 @@ def install_rules_sqlite(db, key):
 
 
 def is_kip(group):
-    """Kip's hook groups are the ones calling receipt.py check, wherever the repo lived when installed."""
-    return any("kip-receipts/receipt.py check" in h.get("command", "") for h in group.get("hooks", []))
+    """Kip's hook groups are the ones calling receipt.py check, wherever the repo lived when installed.
+    A group nests its commands under `hooks` (Claude Code) or is one command itself (Cursor)."""
+    return any("kip-receipts/receipt.py check" in h.get("command", "") for h in group.get("hooks", [group]))
+
+
+def fill(group):
+    if "hooks" in group:
+        return {**group, "hooks": [fill(h) for h in group["hooks"]]}
+    return {**group, "command": group["command"].format(receipt=shlex.quote(str(RECEIPT)))}
 
 
 def hook_groups(hooks):
     """The host's hook events with {receipt} filled in, as the host's settings expect them."""
-    cmd = shlex.quote(str(RECEIPT))
-    return {event: [{**g, "hooks": [{**h, "command": h["command"].format(receipt=cmd)} for h in g["hooks"]]}
-                    for g in groups] for event, groups in hooks["events"].items()}
+    return {event: [fill(g) for g in groups] for event, groups in hooks["events"].items()}
 
 
 def read_settings(path):
@@ -228,7 +252,7 @@ def hooks_installed(hooks):
 
 def install_hooks(hooks, path):
     """Replace Kip's own hook groups in the host's settings; leave every other hook alone."""
-    settings = read_settings(path)
+    settings = {**hooks.get("init", {}), **read_settings(path)}
     on = settings.setdefault("hooks", {})
     for event, groups in hook_groups(hooks).items():
         on[event] = [g for g in on.get(event, []) if not is_kip(g)] + groups
@@ -237,24 +261,32 @@ def install_hooks(hooks, path):
     print(f"  hooks: {', '.join(hooks['events'])} in {path}")
 
 
-def cmd_install(a):
+def hosts(a):
+    """The hosts named with --host (all of them by default), and the repo root with --project."""
     cfg = load()
-    hosts = cfg["hosts"]
-    unknown = set(a.host) - set(hosts)
+    unknown = set(a.host) - set(cfg["hosts"])
     if unknown:
-        sys.exit(f"unknown host {', '.join(sorted(unknown))}; hosts: {', '.join(hosts)}")
+        sys.exit(f"unknown host {', '.join(sorted(unknown))}; hosts: {', '.join(cfg['hosts'])}")
     top = toplevel() if a.project else None
     if a.project and not top:
         sys.exit("--project needs a git repo")
+    return [(n, h) for n, h in cfg["hosts"].items() if not a.host or n in a.host], top
+
+
+def where(entry, key, top):
+    """A host path: the project one under the repo root with --project, else the user one."""
+    return top / entry[f"project_{key}"] if top else Path(entry[key]).expanduser()
+
+
+def cmd_install(a):
+    selected, top = hosts(a)
     found = skills()
     if not a.project:  # a host-neutral path to kip.py for skills to call
         KIP_HOME.mkdir(parents=True, exist_ok=True)
         if (KIP_HOME / "kip").is_symlink():
             (KIP_HOME / "kip").unlink()
         (KIP_HOME / "kip").symlink_to(ROOT)
-    for name, h in hosts.items():
-        if a.host and name not in a.host:
-            continue
+    for name, h in selected:
         if a.project and not h.get("project_skills"):
             continue
         m = missing(h)
@@ -262,12 +294,76 @@ def cmd_install(a):
             print(f"{name}: skipped, missing {', '.join(m)}")
             continue
         print(name)
-        link(top / h["project_skills"] if a.project else Path(h["skills"]).expanduser(), found)
+        link(where(h, "skills", top), found)
         if h.get("rules") and not a.project:
             install_rules(h["rules"])
         if h.get("hooks"):
-            hk = h["hooks"]
-            install_hooks(hk, top / hk["project_settings"] if a.project else Path(hk["settings"]).expanduser())
+            install_hooks(h["hooks"], where(h["hooks"], "settings", top))
+
+
+def uninstall_hooks(hooks, path):
+    """Take Kip's hook groups out; drop what that leaves empty, and the file if install created it."""
+    if not path.exists():
+        return
+    settings = read_settings(path)
+    on = settings.get("hooks", {})
+    for event in list(on):
+        on[event] = [g for g in on[event] if not is_kip(g)]
+        if not on[event]:
+            del on[event]
+    if not on:
+        settings.pop("hooks", None)
+    if settings in ({}, hooks.get("init")):
+        path.unlink()
+    else:
+        path.write_text(json.dumps(settings, indent=2) + "\n")
+    print(f"  hooks: removed from {path}")
+
+
+def uninstall_rules(rules):
+    db = rules_db(rules)
+    if db:
+        with sqlite3.connect(db) as con:
+            row, mine = user_rules(con, rules["key"])
+            if not row or "<!-- kip rules: " not in row[0]:
+                return
+            if mine:
+                con.execute("UPDATE ItemTable SET value = ? WHERE key = ?", (mine, rules["key"]))
+            elif row:
+                con.execute("DELETE FROM ItemTable WHERE key = ?", (rules["key"],))
+        return print(f"  rules: removed from {db}")
+    target = Path(rules["append"]).expanduser() if "append" in rules else None
+    if target and target.exists():
+        lines = [l for l in target.read_text().splitlines() if not is_import(l)]
+        if lines:
+            target.write_text("\n".join(lines) + "\n")
+        else:
+            target.unlink()
+        print(f"  rules: removed from {target}")
+
+
+def unlink_skills(dest):
+    if not dest.is_dir():
+        return
+    gone = [p for p in dest.iterdir() if p.is_symlink() and os.readlink(p).startswith(str(ROOT))]
+    for p in gone:
+        p.unlink()
+    print(f"  {len(gone)} skills unlinked from {dest}")
+
+
+def cmd_uninstall(a):
+    selected, top = hosts(a)
+    for name, h in selected:
+        if a.project and not h.get("project_skills"):
+            continue
+        print(name)
+        unlink_skills(where(h, "skills", top))
+        if h.get("rules") and not a.project:
+            uninstall_rules(h["rules"])
+        if h.get("hooks"):
+            uninstall_hooks(h["hooks"], where(h["hooks"], "settings", top))
+    if not a.project and (KIP_HOME / "kip").is_symlink():
+        (KIP_HOME / "kip").unlink()
 
 
 def main():
@@ -275,10 +371,11 @@ def main():
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("config").set_defaults(fn=cmd_config)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
-    s = sub.add_parser("install")
-    s.add_argument("--host", action="append", default=[], help="only this host, even if it isn't detected")
-    s.add_argument("--project", action="store_true", help="link into this repo's project skills dirs instead")
-    s.set_defaults(fn=cmd_install)
+    for name, fn, verb in (("install", cmd_install, "link into"), ("uninstall", cmd_uninstall, "unlink from")):
+        s = sub.add_parser(name)
+        s.add_argument("--host", action="append", default=[], help="only this host, even if it isn't detected")
+        s.add_argument("--project", action="store_true", help=f"{verb} this repo's project skills dirs instead")
+        s.set_defaults(fn=fn)
     a = p.parse_args()
     a.fn(a)
 

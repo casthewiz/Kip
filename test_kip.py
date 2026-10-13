@@ -60,7 +60,8 @@ def main():
                          ({"connectors": {"x": {"kind": "magic"}}}, "kind must be one of mcp, tool"),
                          ({"destinations": {"x": {"settings": {"X_TOKEN": "s"}}}}, "X_TOKEN looks secret"),
                          ({"evidence": {"x": {"fallback": "nope"}}}, "fallback nope isn't an evidence surface"),
-                         ({"default_destination": "nope"}, "default_destination nope isn't a destination")]:
+                         ({"default_destination": "nope"}, "default_destination nope isn't a destination"),
+                         ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list")]:
             write(repo / ".kip" / "config.json", bad)
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
@@ -91,7 +92,7 @@ def main():
         assert len(pre) == 1 and pre[0]["matcher"] == "Bash" and pre[0]["hooks"][0]["command"].endswith("--hook pr"), pre
         assert settings.read_text() == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
-        assert "cursor         missing ~/.cursor · rules only, no hooks" in kip("doctor")
+        assert "cursor         missing ~/.cursor · hooks not installed (run install)" in kip("doctor")
         settings.write_text("{not json")
         assert "fix it before installing hooks" in kip("install", "--host", "claude-code", ok=False)
         assert settings.read_text() == "{not json"
@@ -125,10 +126,53 @@ def main():
             value = con.execute("SELECT value FROM ItemTable WHERE key = 'aicontext.personalContext'").fetchone()[0]
         assert value.startswith("my own rule\n\n<!-- kip rules: ") and value.count("<!-- /kip rules -->") == 1, value
         assert RULES.read_text().strip() in value
+        # Cursor hooks: flat entries in hooks.json with the version Cursor expects, beside the user's own.
+        cursor_hooks = home / ".cursor" / "hooks.json"
+        on = json.loads(cursor_hooks.read_text())
+        assert on["version"] == 1 and on["hooks"]["stop"] == [{"command": f"python3 {RECEIPT} check --hook stop"}], on
+        assert on["hooks"]["beforeShellExecution"][0]["command"].endswith("check --hook pr"), on
+        on["hooks"]["stop"].insert(0, {"command": "say hi"})
+        write(cursor_hooks, on)
+        kip("install", "--host", "cursor")
+        assert json.loads(cursor_hooks.read_text())["hooks"]["stop"] == on["hooks"]["stop"], cursor_hooks.read_text()
+        assert "cursor         ready · hooks installed" in kip("doctor")
         kip("install", "--project")
         assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills
+        kip("uninstall", "--project")
+        assert not (repo / ".claude" / "settings.json").exists() and not list((repo / ".claude" / "skills").iterdir())
         assert "unknown host nope" in kip("install", "--host", "nope", ok=False)
+
+        # Uninstall undoes install: the user's own settings, rules, and hooks are as they were,
+        # files install created are gone, and nothing links back into Kip.
+        home = Path(tmp, "home2")
+        db = home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+        db.parent.mkdir(parents=True)
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+            con.execute("INSERT INTO ItemTable VALUES ('aicontext.personalContext', 'my own rule')")
+        write(home / ".claude" / "settings.json", {"model": "x", "hooks": {"Stop": [mine]}})
+        (home / ".claude" / "CLAUDE.md").write_text("# mine\n")
+
+        def snapshot():
+            with sqlite3.connect(db) as con:
+                rules = con.execute("SELECT value FROM ItemTable").fetchall()
+            files = [home / ".claude" / "settings.json", home / ".claude" / "CLAUDE.md", home / ".cursor" / "hooks.json"]
+            return rules, [f.read_text() if f.exists() else None for f in files]
+
+        before = snapshot()
+        kip("install", "--host", "claude-code", "--host", "cursor", HOME=str(home))
+        assert snapshot() != before and (home / ".cursor" / "hooks.json").exists()
+        out = kip("uninstall", HOME=str(home))
+        assert json.loads(snapshot()[1][0]) == json.loads(before[1][0]) and snapshot()[1][1:] == before[1][1:], snapshot()
+        assert snapshot()[0] == before[0], snapshot()
+        assert not [p for p in home.rglob("*") if p.is_symlink() and os.readlink(p).startswith(str(ROOT))], out
+        kip("uninstall", HOME=str(home))  # idempotent
+        with sqlite3.connect(db) as con:  # a rules value Kip never wrote to is left byte for byte
+            con.execute("UPDATE ItemTable SET value = '  spaced rule  '")
+        kip("uninstall", HOME=str(home))
+        assert snapshot()[0] == [("  spaced rule  ",)], snapshot()[0]
+        assert json.loads(snapshot()[1][0]) == json.loads(before[1][0])
     print("kip.py: all checks passed")
 
 

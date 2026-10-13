@@ -99,6 +99,14 @@ After edits, run whatever check fits the repo (in priority order, use what's ava
 
 Summarize per file: what was cut/consolidated and why (one line each), plus the net diff-size change (`git diff --stat "$merge_base"` before vs after). Group by category (comments removed, duplication consolidated, dead code removed, verbosity trimmed).
 
+If a `kip-receipts` run is open for this branch, record the pass as its `tidy` stage, with step 4's check as evidence, so the PR gate sees it:
+
+```bash
+R=~/.kip/skills/kip-receipts/receipt.py
+python3 $R claim "Tidy pass over the branch diff keeps behavior" --stage tidy
+python3 $R run cN -- <the step 4 check>
+```
+
 ## Example cuts
 
 **Duplicative comment:**
