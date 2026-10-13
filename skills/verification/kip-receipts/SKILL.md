@@ -213,11 +213,13 @@ deterministic:
 - **Tamper check.** `render` refuses to run if any recorded file's hash no
   longer matches.
 - **Same record, same output.** Rendering is a pure function of
-  `receipt.json`.
+  `receipt.json` and the code it's rendered against (which decides what's
+  ⚠️ stale).
 
 Prefer `run` over `observe`. An observation is your account of what you saw,
 which is weaker; use it only when the check is an agent tool (a browser pane)
-with no command equivalent, and attach the screenshot.
+with no command equivalent, and attach the screenshot. Without an attachment
+it stays ⚠️ self-reported.
 
 ## Verdicts
 
@@ -231,6 +233,10 @@ with no command equivalent, and attach the screenshot.
 - ⚠️ **unverified**: no evidence, or marked `unverified` with a reason (needs
   prod credentials, needs hardware, no test harness) and what would verify it.
 - ⚠️ **falsifiability not shown**: the claim is at ultra and has no `--red` run.
+- ⚠️ **stale**: the code changed since a check last passed (compared by
+  content, so committing the checked code doesn't count). Re-run it.
+- ⚠️ **self-reported**: the only evidence is observations, with no file
+  attached.
 - ⚠️ **flaky**: the same check failed and passed on the same code. Find out
   why before claiming anything.
 - ⚠️ **check changed after failing**: the check's own files (a spec in the
@@ -353,21 +359,35 @@ before a PR can open:
   `--stage review` claim ("Fixed: …") with a check that shows the fix, so an
   unfixed finding stays open and blocks the PR.
 
+## Required checks
+
+`workflow.checks` in Kip's config names commands every change must pass,
+e.g. `{"tests": "npm test && npm run lint", "types": ["npx", "tsc"]}` (a
+string runs through `sh -c`, a list as is). `init` adds one claim per check
+(`` `tests` passes ``) to every local run, and only that command settles it:
+`receipt.py run c1` runs it from the repo root; another command, `observe`,
+or `unverified` is refused. Until it's ✅ on the current code, it blocks stop and PR.
+
 ## Gate
 
 `kip.py install` wires `receipt.py check` into each host's hooks (Claude
-Code: `SessionStart`, `Stop` and `PreToolUse`; Cursor: `sessionStart`,
-`stop` and `beforeShellExecution`). Each branch has its own runs; commands
+Code: `SessionStart`, `Stop` and `PreToolUse` on Bash and PR-opening MCP
+tools; Cursor: `sessionStart`, `stop`, `beforeShellExecution` and
+`beforeMCPExecution`). Each branch has its own runs; commands
 default to the latest run on the current branch.
 
 - **Session start**: the session is told where this branch's run stands,
   and the code as the session found it is remembered.
 - **Stop**: once code has changed since the run's `init`, finishing a turn
   is blocked while any claim has neither evidence nor an `unverified`
-  reason. With no run on the branch, a session that changed code is blocked
+  reason, has ⚠️ stale evidence, or is a required check that hasn't passed. With no run on the branch, a session that changed code is blocked
   until it starts one.
-- **PR**: `gh pr create` is blocked while any claim is unaddressed or ❌, a
-  stage has no claim, or the branch has changes and no run at all.
+- **PR**: opening a PR (`gh pr create`, a POST to `/pulls` through `gh api`,
+  or an MCP `create_pull_request` tool) is blocked while any claim is open as
+  at stop or ❌, a stage has no claim, or the branch has changes and no run at
+  all. A PR opened some other way (the web UI) is caught by CI.
+- **Crashes**: a gate that crashes blocks stop and PR with the error, once
+  per turn, rather than letting everything through.
 
 A run is **finished** once commits made since its `init` are on the base
 branch (`origin`'s default branch: pushed, or the feature branch merged and

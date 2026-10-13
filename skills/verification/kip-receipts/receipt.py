@@ -6,8 +6,9 @@
                                                             start a run (local only by default), print its dir
   receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
-  receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] -- CMD ...
-                                                            run CMD, record the result, attach media from DIR
+  receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
+                                                            run CMD (a required check's own command if omitted),
+                                                            record the result, attach media from DIR
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
@@ -30,6 +31,7 @@ Standard library only, Python 3.8+.
 """
 import argparse
 import datetime
+import functools
 import hashlib
 import importlib.util
 import json
@@ -140,8 +142,8 @@ def find_claim(rec, cid):
     sys.exit(f"unknown claim {cid}; claims: {', '.join(c['id'] for c in rec['claims']) or 'none'}")
 
 
-def worktree_diff():
-    """HEAD to the working tree, new files included, staged through a copy of the index
+def staged(*commands):
+    """Run git commands on the working tree, new files included, staged through a copy of the index
     (so unchanged files aren't rehashed) and never touching the real one."""
     with tempfile.TemporaryDirectory() as t:
         index, env = Path(t, "index"), {**os.environ, "GIT_INDEX_FILE": str(Path(t, "index"))}
@@ -149,8 +151,22 @@ def worktree_diff():
         if real and Path(real).exists():
             shutil.copy2(real, index)
         subprocess.run(["git", "add", "-A"], env=env, capture_output=True)
-        r = subprocess.run(["git", "diff", "--cached", "--binary", "HEAD"], env=env, capture_output=True)
-    return r.stdout if r.returncode == 0 else b""  # bytes: new files needn't be UTF-8
+        runs = [subprocess.run(["git", *args], env=env, capture_output=True) for args in commands]
+    return [r.stdout if r.returncode == 0 else b"" for r in runs]  # bytes: new files needn't be UTF-8
+
+
+DIFF, TREE = ["diff", "--cached", "--binary", "HEAD"], ["write-tree"]  # TREE: same code, same id, committed or not
+
+
+def worktree_diff():
+    """HEAD to the working tree."""
+    return staged(DIFF)[0]
+
+
+@functools.lru_cache(maxsize=None)
+def current_tree():
+    """The code verdicts judge evidence against, once per invocation."""
+    return staged(TREE)[0].decode().strip() or None
 
 
 def fingerprint():
@@ -163,8 +179,8 @@ def code_state(d, rec, eid):
     A remote target isn't this checkout, so there's nothing local to pin."""
     if rec.get("target"):
         return {"commit": None, "patch": None, "remote": True}
-    state = {"commit": git("rev-parse", "HEAD"), "patch": None}
-    diff = worktree_diff()
+    tree, diff = staged(TREE, DIFF)
+    state = {"commit": git("rev-parse", "HEAD"), "patch": None, "tree": tree.decode().strip() or None}
     if diff:
         p = d / "files" / f"{eid}.patch"
         p.write_bytes(diff)
@@ -235,10 +251,14 @@ def cmd_init(a):
     d = ROOT / repo_name() / rid
     (d / "files").mkdir(parents=True)
     (d / "specs").mkdir()  # test code written for this run lives with its evidence
+    workflow = kip.load().get("workflow", {})
+    checks = [] if a.target else [  # required checks are this checkout's, not a remote site's
+        new_claim(f"c{i}", f"`{name}` passes", check=name, command=cmd if isinstance(cmd, list) else ["sh", "-c", cmd])
+        for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
              "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
-             "stages": kip.load().get("workflow", {}).get("stages", []), "claims": []})
+             "stages": workflow.get("stages", []), "claims": checks})
     (d.parent / "LATEST").write_text(rid + "\n")
     print(d)
 
@@ -249,27 +269,41 @@ def cmd_claim(a):
     if rec.get("finished"):
         sys.exit(f"run {rec['id']} is finished (its work is on the base branch); start a new one with `receipt.py init`")
     cid = f"c{len(rec['claims']) + 1}"
-    rec["claims"].append({"id": cid, "text": a.text, "unit": a.unit, "provider": a.provider, "level": a.level,
-                          "stage": a.stage, "evidence": [], "files": [], "unverified": None})
+    rec["claims"].append(new_claim(cid, a.text, unit=a.unit, provider=a.provider, level=a.level, stage=a.stage))
     save(d, rec)
     print(cid)
 
 
+def new_claim(cid, text, **fields):
+    return {"id": cid, "text": text, "unit": None, "provider": None, "level": None, "stage": None,
+            **fields, "evidence": [], "files": [], "unverified": None}
+
+
+def not_a_check(c, how):
+    """A required check (`workflow.checks`) is settled only by running its configured command."""
+    if c.get("check"):
+        sys.exit(f"{c['id']} is the required `{c['check']}` check; it can't be {how}. "
+                 f"Run it: `receipt.py run {c['id']}`")
+
+
 def cmd_run(a):
-    cmd = a.cmd
-    if not cmd:
-        sys.exit("usage: receipt.py run CLAIM [--red] [--static] -- CMD ...")
     d = run_dir(a)
     rec = load(d)
     c = find_claim(rec, a.claim)
+    cmd = a.cmd or c.get("command")
+    if not cmd:
+        sys.exit("usage: receipt.py run CLAIM [--red] [--static] -- CMD ...")
+    if c.get("command") and cmd != c["command"]:
+        not_a_check(c, f"settled by `{shlex.join(cmd)}`")
+    cwd = (c.get("command") and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a required check runs at the root
     try:
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         code, out = r.returncode, redact(r.stdout)
     except OSError as err:
         code, out = 127, f"{cmd[0]}: {err.strerror}\n"
     passed = code != 0 if a.red else code == 0
     e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
-                     label=a.label, command=cmd, cwd=os.getcwd(), inputs=command_inputs(cmd, d), exit_code=code, passed=passed,
+                     label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code, passed=passed,
                      excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
     log = d / "files" / f"{e['id']}.log"
     log.write_text(out)
@@ -291,7 +325,9 @@ def cmd_run(a):
 def cmd_observe(a):
     d = run_dir(a)
     rec = load(d)
-    e = new_evidence(d, rec, find_claim(rec, a.claim), kind="observed", phase="green",
+    c = find_claim(rec, a.claim)
+    not_a_check(c, "observed")
+    e = new_evidence(d, rec, c, kind="observed", phase="green",
                      observation=a.text, passed=a.passed)
     save(d, rec)
     print(e["id"])
@@ -311,7 +347,9 @@ def cmd_attach(a):
 def cmd_unverified(a):
     d = run_dir(a)
     rec = load(d)
-    find_claim(rec, a.claim)["unverified"] = a.reason
+    c = find_claim(rec, a.claim)
+    not_a_check(c, "marked unverified")
+    c["unverified"] = a.reason
     save(d, rec)
 
 
@@ -321,7 +359,7 @@ def check_key(e):
 
 
 def code_key(e):
-    return e.get("commit"), (e.get("patch") or {}).get("sha256")
+    return e.get("tree") or (e.get("commit"), (e.get("patch") or {}).get("sha256"))
 
 
 def inputs_key(e):
@@ -342,10 +380,10 @@ def rerun_note(fails, passes, last, reds):
     return None
 
 
-def verdict(c, level):
+def verdict(c, rec):
     """The latest run of each check decides it. A failure clears only when the same check passes on
     changed code, which also shows the check can fail."""
-    level = c.get("level") or level
+    level = c.get("level") or rec["level"]
     ev = c["evidence"]
     runs = {}
     for e in ev:
@@ -362,8 +400,13 @@ def verdict(c, level):
             if note:
                 return f"⚠️ {note}"
             shown = True
+    now = current_tree() if repo_name() == rec["repo"] else None  # another checkout's code says nothing
+    if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
+        return "⚠️ stale: the code changed since it was checked"
     if c["unverified"] or not ev:
         return "⚠️ unverified"
+    if all(e["kind"] == "observed" for e in ev) and not c["files"]:
+        return "⚠️ self-reported: an observation with nothing attached"
     if level == "ultra" and not shown:
         return "⚠️ falsifiability not shown"
     return "✅ verified"
@@ -422,7 +465,7 @@ def render_markdown(rec, sink=None):
            "| # |" + (" Unit |" if units else "") + " Claim | Provider | Evidence | Verdict |",
            "|---|" + ("---|" if units else "") + "---|---|---|---|"]
     for c in rec["claims"]:
-        v = verdict(c, rec["level"]) + (f": {c['unverified']}" if c["unverified"] else "")
+        v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
         ev = "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
         unit = f" {cell(c.get('unit') or '—')} |" if units else ""
         out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
@@ -462,7 +505,7 @@ def render_jira(rec, sink=None):
     out = [f"h3. Receipts · {subject(rec, code)} · {rec['level']}", "",
            "||#||" + ("Unit||" if units else "") + "Claim||Provider||Evidence||Verdict||"]
     for c in rec["claims"]:
-        v = verdict(c, rec["level"]) + (f": {c['unverified']}" if c["unverified"] else "")
+        v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
         ev = " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
         unit = f"{cell(c.get('unit') or '—')}|" if units else ""
         out.append(f"|{c['id']}|{unit}{cell(c['text'])}|{c['provider'] or 'generic'}|{ev}|{cell(v)}|")
@@ -585,14 +628,33 @@ def cmd_path(a):
 
 
 def blocking(rec, pr=False):
-    """What keeps work from being done: claims nobody addressed and, before a PR, refuted
-    claims and workflow stages (tidy, review) with no claim at all."""
-    out = [f"{c['id']} {verdict(c, rec['level'])}: {c['text']}" for c in rec["claims"]
-           if (not c["evidence"] and not c["unverified"]) or (pr and verdict(c, rec["level"]).startswith("❌"))]
+    """What keeps work from being done: claims nobody addressed or whose evidence is stale, required
+    checks that haven't passed and, before a PR, refuted claims and workflow stages (tidy, review)
+    with no claim at all."""
+    def open_(c, v):
+        return (not c["evidence"] and not c["unverified"]) or v.startswith("⚠️ stale") or \
+            (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
+    out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)] if open_(c, v)]
     if pr:
         have = {c.get("stage") for c in rec["claims"]}
         out += [f"{s}: no claim (`receipt.py claim \"…\" --stage {s}`)" for s in rec.get("stages", []) if s not in have]
     return out
+
+
+def opens_pr(hook):
+    """A PR-opening MCP tool, or a shell command (not text in one) that opens a PR through gh."""
+    if re.search(r"create_pull_request\b|create_pr\b", str(hook.get("tool_name") or "")):
+        return True
+    tool_input = hook.get("tool_input")
+    command = str((tool_input.get("command") if isinstance(tool_input, dict) else None) or hook.get("command") or "")
+    for part in re.split(r"[;&|(\n]", command):
+        part = part.strip()
+        if re.match(r"gh\s+pr\s+create\b", part):
+            return True
+        if re.match(r"gh\s+api\b", part) and ("createPullRequest" in part or re.search(r"/pulls(?![\w/])", part) and
+                re.search(r"\s(-X\s*POST|--method[=\s]+POST|-[fF]|--field|--raw-field|--input)\b", part)):
+            return True
+    return False
 
 
 def gate(a, hook):
@@ -601,8 +663,7 @@ def gate(a, hook):
         return False, "check: already nudged this turn"
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
-    command = hook.get("tool_input", {}).get("command") or hook.get("command", "")
-    if a.hook == "pr" and not re.search(r"(^|[;&|(\n])\s*gh\s+pr\s+create\b", command):  # as a command, not in text
+    if a.hook == "pr" and not opens_pr(hook):
         return False, "check: not opening a PR"
     d = Path(a.run) if a.run else branch_run()
     rec = load(d) if d else None
@@ -705,14 +766,23 @@ def cmd_check(a):
     events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
     if a.pr:
         return check_pr(a.pr)
-    hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
-    cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
-    if cwd:
-        os.chdir(cwd)
+    hook = {}
+    try:
+        hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
+        cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+        if cwd:
+            os.chdir(cwd)
+        blocked, msg = (False, session_start(hook)) if a.hook == "start" else gate(a, hook)
+    except Exception as err:  # hosts let a crashed hook through, so a broken gate blocks instead, once per turn
+        if not a.hook:
+            raise
+        hook = hook if isinstance(hook, dict) else {}
+        blocked = opens_pr(hook) if a.hook == "pr" else \
+            a.hook == "stop" and not (hook.get("stop_hook_active") or hook.get("loop_count"))
+        msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
+               "Fix it or tell the user; don't work around it.")
     if a.hook == "start":
-        msg = session_start(hook)
         return print(json.dumps({"additional_context": msg} if msg else {}) if "workspace_roots" in hook else msg)
-    blocked, msg = gate(a, hook)
     if "workspace_roots" in hook:
         if a.hook == "pr":
             out = {"permission": "deny", "user_message": msg, "agent_message": msg} if blocked else {"permission": "allow"}

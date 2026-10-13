@@ -56,8 +56,9 @@ rules, and hooks go, and your own settings, rules, and hooks stay.
 [gate](skills/verification/kip-receipts/SKILL.md#gate) to each host's hooks
 (Claude Code's `settings.json`, Cursor's `hooks.json`), leaving your own
 hooks alone: once code changes, the agent can't end a turn with unaddressed
-claims or without a receipts run, or open a PR with refuted claims or
-without its tidy and review passes. Each session starts knowing where the
+claims, evidence the code has since outgrown, or failing required checks,
+or without a receipts run, or open a PR with refuted claims or without its
+tidy and review passes. Each session starts knowing where the
 branch's run stands; a run whose work has landed on the base branch is
 finished and drops out. Cursor can't block a stop, so there the gate asks once,
 as a follow-up message. Cursor keeps a copy of the rules, so `doctor` says
@@ -92,7 +93,10 @@ surface needs and whether it's here.
 | `destinations` | [Receipts sinks](skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira, github |
 
 Plus `workflow.stages`: the [stages](skills/verification/kip-receipts/SKILL.md#stages)
-a PR needs a claim for (default `["tidy", "review"]`; `[]` turns it off).
+a PR needs a claim for (default `["tidy", "review"]`; `[]` turns it off), and
+`workflow.checks`: [required checks](skills/verification/kip-receipts/SKILL.md#required-checks),
+commands like `{"tests": "npm test"}` that must pass on the current code
+before a turn can end or a PR open (default none).
 
 Every surface can declare `requires` (`env`, `cmd`, `file`), which doctor
 checks and `install` uses to detect hosts. A surface with `via` runs through

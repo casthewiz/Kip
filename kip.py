@@ -100,6 +100,13 @@ def validate(cfg):
     stages = cfg.get("workflow", {}).get("stages", [])
     if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
         sys.exit("workflow.stages must be a list of stage names")
+    checks = cfg.get("workflow", {}).get("checks", {})
+    if not isinstance(checks, dict):
+        sys.exit("workflow.checks must map check names to commands")
+    for name, cmd in checks.items():
+        if not (isinstance(cmd, str) and cmd.strip() or
+                isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+            sys.exit(f"workflow.checks.{name} must be a command: a string or a list of arguments")
     if cfg.get("default_destination", "local") not in cfg["destinations"]:
         sys.exit(f"default_destination {cfg['default_destination']} isn't a destination")
 

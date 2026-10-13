@@ -12,7 +12,8 @@
         "events": {
           "SessionStart": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook start"}]}],
           "Stop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook stop"}]}],
-          "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]}]
+          "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]},
+                         {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]}]
         }
       }
     },
@@ -34,7 +35,8 @@
         "events": {
           "sessionStart": [{"command": "python3 {receipt} check --hook start"}],
           "stop": [{"command": "python3 {receipt} check --hook stop"}],
-          "beforeShellExecution": [{"command": "python3 {receipt} check --hook pr"}]
+          "beforeShellExecution": [{"command": "python3 {receipt} check --hook pr"}],
+          "beforeMCPExecution": [{"command": "python3 {receipt} check --hook pr"}]
         }
       }
     }
@@ -64,5 +66,5 @@
     "github": {"type": "github", "requires": {"cmd": ["gh"]}}
   },
   "default_destination": "local",
-  "workflow": {"stages": ["tidy", "review"]}
+  "workflow": {"stages": ["tidy", "review"], "checks": {}}
 }
