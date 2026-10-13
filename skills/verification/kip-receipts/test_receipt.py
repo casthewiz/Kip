@@ -2,6 +2,7 @@
 """Self-check for receipt.py and the sink interface: python3 test_receipt.py"""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -119,10 +120,13 @@ def main():
         assert "FAIL" in rc("run", "c5", "--", "no-such-binary-kip")
         rc("run", "c6", "--", "true")
 
-        shot = repo / "shot.png"
+        shot = Path(tmp, "shot.png")
         shot.write_bytes(b"\x89PNG fake")
         rc("attach", "c1", str(shot))
 
+        # Evidence speaks for the code it ran on: app.py changed after c1 passed, so c1 is stale until re-run.
+        assert "| c1 | app prints hi | generic |" in rc("render") and "⚠️ stale" in rc("render")
+        rc("run", "c1", "--", sys.executable, "app.py")
         md = rc("render")
         assert "| c1 | app prints hi | generic |" in md and "✅ verified" in md, md
         assert "⚠️ unverified: needs PDF service" in md, md
@@ -268,6 +272,19 @@ def main():
         pr_cmd = "gh pr " + "create"  # spelled apart so this file's own edits don't trip the gate
         assert check("--hook", "pr", event={"tool_input": {"command": f"git push &&\n  {pr_cmd} --fill"}})[0] == 2
         assert check("--hook", "pr", event={"tool_input": {"command": f"echo '{pr_cmd}'"}})[0] == 0, "text isn't a PR"
+        # Opening a PR without gh pr create: a POST to /pulls through gh api, or an MCP tool.
+        gh_api = "gh " + "api repos/o/r/pulls"
+        assert check("--hook", "pr", event={"tool_input": {"command": f"{gh_api} -f title=x -f head=b"}})[0] == 2
+        assert check("--hook", "pr", event={"tool_input": {"command": f"cd x && {gh_api} --method POST --input b"}})[0] == 2
+        assert check("--hook", "pr", event={"tool_input": {"command": gh_api}})[0] == 0, "listing PRs isn't opening one"
+        assert check("--hook", "pr", event={"tool_input": {"command": f"{gh_api}/7/comments -f body=x"}})[0] == 0
+        assert check("--hook", "pr", event={"tool_name": "mcp__github__create_pull_request", "tool_input": {}})[0] == 2
+        assert check("--hook", "pr", event={"tool_name": "mcp__github__get_pull_request", "tool_input": {}})[0] == 0
+        assert check("--hook", "pr", event={"tool_name": "mcp__github__create_pull_request_review"})[0] == 0
+        gql = "gh " + "api graphql -f query='mutation { createPullRequest(input: {}) { pullRequest { url } } }'"
+        assert check("--hook", "pr", event={"tool_input": {"command": gql}})[0] == 2
+        code, out = check("--hook", "pr", event={**cursor, "tool_name": "create_pull_request", "tool_input": {}}, cwd=tmp)
+        assert code == 0 and json.loads(out)["permission"] == "deny", out
         # No run on this branch: another branch's run is never used, a PR is blocked once the branch
         # changed something, and a session that changed code since it started is nudged at stop.
         sh("git", "checkout", "-q", "-b", "elsewhere")
@@ -346,12 +363,85 @@ def main():
         out = rc("check", "--pr", "7", ok=False, extra_env={**ghenv, "FAKE_PR_HEAD": "f" * 40})
         assert "ledger is for" in out and "but its head is fffffff" in out, out
 
-        # Re-runs: the latest run of each check decides it. A failure clears only when the same, unchanged
-        # check passes on changed code, and that red-then-green also shows the check can fail.
         def verdicts(run_args=()):
             return {line.split(" | ")[0][2:]: line.split(" | ")[-1].rstrip(" |")
                     for line in rc("render", *run_args).splitlines() if line.startswith("| c")}
 
+        # Stale evidence: work after a check reopens its claim at stop and before a PR; committing the
+        # same code doesn't. An observation alone is self-reported until something is attached.
+        home_branch = sh("git", "branch", "--show-current")
+        sh("git", "checkout", "-q", "-b", "stale")
+        rc("init")
+        rc("claim", "app prints 5")
+        rc("claim", "looks right in the browser")
+        (repo / "app.py").write_text('print("5")\n')
+        rc("run", "c1", "--", "grep", "-q", "5", "app.py")
+        rc("observe", "c2", "--passed", "renders 5")
+        assert verdicts()["c2"] == "⚠️ self-reported: an observation with nothing attached", verdicts()
+        rc("attach", "c2", str(shot))
+        assert verdicts()["c2"] == "✅ verified", verdicts()
+        sh("git", "commit", "-qam", "5")
+        assert verdicts()["c1"] == "✅ verified" and check("--hook", "stop", event={})[0] == 0, "a commit made it stale"
+        (repo / "app.py").write_text('print("6")\n')
+        code, out = check("--hook", "stop", event={})
+        assert code == 2 and "c1 ⚠️ stale" in out and "c2 ⚠️ stale" in out, out
+        code, out = check("--hook", "pr", event=gh_create)
+        assert code == 2 and "c1 ⚠️ stale" in out, out
+
+        # Required checks: workflow.checks become claims at init that only their own command settles,
+        # and they hold stop and PR until they pass on the current code.
+        sh("git", "checkout", "-q", "--", "app.py")
+        sh("git", "checkout", "-q", "-b", "checks")
+        (repo / ".kip" / "config.json").write_text(json.dumps(
+            {**PROJECT_CONFIG, "workflow": {"stages": [], "checks": {"tests": "grep -q ok app.py"}}}))
+        run = Path(rc("init"))
+        assert json.loads((run / "receipt.json").read_text())["claims"][0]["command"] == ["sh", "-c", "grep -q ok app.py"]
+        assert rc("claim", "app says ok") == "c2"
+        assert "required `tests` check" in rc("run", "c1", "--", "true", ok=False)
+        assert "required `tests` check" in rc("observe", "c1", "--passed", "ran it", ok=False)
+        assert "required `tests` check" in rc("unverified", "c1", "no time", ok=False)
+        (repo / "app.py").write_text('print("nope")\n')
+        rc("run", "c2", "--", "true")
+        code, out = check("--hook", "stop", event={})
+        assert code == 2 and "c1 ⚠️ unverified: `tests` passes" in out and "c2" not in out, out
+        assert "FAIL" in rc("run", "c1", cwd=repo / ".kip")  # from a subdirectory, still the same check at the root
+        code, out = check("--hook", "stop", event={})
+        assert code == 2 and "c1 ❌ refuted" in out, out
+        (repo / "app.py").write_text('print("ok")\n')
+        rc("run", "c1")
+        rc("run", "c2", "--", "true")
+        assert check("--hook", "stop", event={})[0] == 0 and check("--hook", "pr", event=gh_create)[0] == 0
+        assert len({e["cwd"] for e in json.loads((run / "receipt.json").read_text())["claims"][0]["evidence"]}) == 1
+        # Another checkout's code says nothing about this run's evidence.
+        (repo / "app.py").write_text('print("changed")\n')
+        assert "stale" in rc("render") and "stale" not in rc("render", "--run", str(run), cwd=tmp)
+        sh("git", "checkout", "-q", "--", "app.py")
+        (repo / "app.py").write_text('print("ok")\n')
+        # A remote desk test doesn't inherit this checkout's required checks.
+        remote_run = Path(rc("init", "--target", "https://staging.example.test"))
+        assert json.loads((remote_run / "receipt.json").read_text())["claims"] == []
+        shutil.rmtree(remote_run)
+        (remote_run.parent / "LATEST").write_text(run.name + "\n")
+
+        # A gate that crashes blocks (once per turn) instead of silently letting everything through.
+        good = (run / "receipt.json").read_text()
+        (run / "receipt.json").write_text("{")
+        code, out = check("--hook", "stop", event={})
+        assert code == 2 and "the gate crashed (JSONDecodeError" in out, out
+        assert check("--hook", "pr", event=gh_create)[0] == 2
+        assert check("--hook", "stop", event={"stop_hook_active": True})[0] == 0, "a crashing gate could loop"
+        assert check("--hook", "pr", event={"tool_input": {"command": "ls"}})[0] == 0, "a crash blocked a non-PR command"
+        code, out = check("--hook", "start", event={})
+        assert code == 0 and "the gate crashed" in out, out
+        code, out = check("--hook", "stop", event=cursor, cwd=tmp)
+        assert code == 0 and "the gate crashed" in json.loads(out)["followup_message"], out
+        (run / "receipt.json").write_text(good)
+        sh("git", "checkout", "-q", "--", ".")
+        sh("git", "checkout", "-q", home_branch)
+        (repo / ".kip" / "config.json").write_text(json.dumps({**PROJECT_CONFIG, "workflow": {"stages": []}}))
+
+        # Re-runs: the latest run of each check decides it. A failure clears only when the same, unchanged
+        # check passes on changed code, and that red-then-green also shows the check can fail.
         flag, check_sh = Path(tmp, "flag"), Path(tmp, "check.sh")
         rc("init", "--level", "ultra")
         for text in ("fixed", "flaky", "changed check", "gamed", "regressed"):
@@ -360,6 +450,7 @@ def main():
         rc("run", "c1", "--", "grep", "-q", "fixed", "app.py")
         (repo / "app.py").write_text('print("fixed")\n')
         rc("run", "c1", "--", "grep", "-q", "fixed", "app.py")
+        assert verdicts()["c1"] == "✅ verified", verdicts()
         has_flag = ["sh", "-c", f"test -f {flag}"]
         rc("run", "c2", "--", *has_flag)
         flag.write_text("")
@@ -389,10 +480,10 @@ def main():
         rc("run", "c8", "--", "test", "-f", "added.txt")
         (repo / "added.txt").write_text("new\n")  # untracked, so only the worktree diff sees it
         rc("run", "c8", "--", "test", "-f", "added.txt")
-        (repo / "added.txt").unlink()
         assert verdicts()["c8"] == "✅ verified", verdicts()
+        (repo / "added.txt").unlink()
         v = verdicts()
-        assert v["c1"] == "✅ verified", v
+        assert v["c1"] == v["c8"] == "⚠️ stale: the code changed since it was checked", v
         assert v["c2"] == "⚠️ flaky: failed and passed on the same code", v
         assert v["c3"].startswith("⚠️ check changed after failing"), v
         assert v["c4"] == "❌ refuted" and v["c5"] == "❌ refuted" and v["c6"] == "✅ verified", v

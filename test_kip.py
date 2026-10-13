@@ -61,7 +61,9 @@ def main():
                          ({"destinations": {"x": {"settings": {"X_TOKEN": "s"}}}}, "X_TOKEN looks secret"),
                          ({"evidence": {"x": {"fallback": "nope"}}}, "fallback nope isn't an evidence surface"),
                          ({"default_destination": "nope"}, "default_destination nope isn't a destination"),
-                         ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list")]:
+                         ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list"),
+                         ({"workflow": {"checks": ["make test"]}}, "workflow.checks must map check names"),
+                         ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command")]:
             write(repo / ".kip" / "config.json", bad)
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
@@ -89,7 +91,8 @@ def main():
         assert on["model"] == "x" and on["hooks"]["Stop"][0] == mine and len(on["hooks"]["Stop"]) == 2, on
         assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
         pre = on["hooks"]["PreToolUse"]
-        assert len(pre) == 1 and pre[0]["matcher"] == "Bash" and pre[0]["hooks"][0]["command"].endswith("--hook pr"), pre
+        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)"], pre
+        assert all(g["hooks"][0]["command"].endswith("--hook pr") for g in pre), pre
         assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
         assert settings.read_text() == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
@@ -132,6 +135,7 @@ def main():
         on = json.loads(cursor_hooks.read_text())
         assert on["version"] == 1 and on["hooks"]["stop"] == [{"command": f"python3 {RECEIPT} check --hook stop"}], on
         assert on["hooks"]["beforeShellExecution"][0]["command"].endswith("check --hook pr"), on
+        assert on["hooks"]["beforeMCPExecution"][0]["command"].endswith("check --hook pr"), on
         on["hooks"]["stop"].insert(0, {"command": "say hi"})
         write(cursor_hooks, on)
         kip("install", "--host", "cursor")
