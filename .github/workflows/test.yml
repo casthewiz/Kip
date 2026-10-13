@@ -4,6 +4,7 @@ jobs:
   test:
     runs-on: ubuntu-22.04  # oldest runner that still has Python 3.8 builds
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.8", "3.x"]
     steps:

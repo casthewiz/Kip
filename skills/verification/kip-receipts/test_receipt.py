@@ -7,8 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("receipt.py")
-DESKTEST = Path(__file__).with_name("playwright") / "desktest.py"
+SCRIPT = Path(__file__).resolve().with_name("receipt.py")  # 3.8 leaves __file__ relative
+DESKTEST = Path(__file__).resolve().with_name("playwright") / "desktest.py"
 
 # Stands in for the playwright CLI: writes a screenshot (and a video at ultra) per
 # project, and fails on mobile when the site is "broken".
