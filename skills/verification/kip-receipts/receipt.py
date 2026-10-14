@@ -23,7 +23,7 @@
   receipt.py check [--hook start|stop|pr|tool|prompt|response] exit 2 if this branch's run has open claims
                                                             and the code changed since init, or there's
                                                             no run for work that needs one (host hooks)
-  receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (a start hook launches it)
+  receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (install's service or a start hook launches it)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
 
@@ -1334,7 +1334,8 @@ def cmd_serve(a):
             if not streams and time.time() - live["busy"] > a.idle:
                 return server.shutdown()
 
-    threading.Thread(target=idle_exit, daemon=True).start()
+    if a.idle:
+        threading.Thread(target=idle_exit, daemon=True).start()
     print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
     server.serve_forever()
 
@@ -1477,7 +1478,7 @@ def main():
     s = sub.add_parser("serve", parents=[common])
     s.add_argument("--port", type=int, default=PORT)
     s.add_argument("--idle", type=float, default=float(os.environ.get("KIP_DASHBOARD_IDLE", 1800)),
-                   help="seconds with no events and no open pages before it exits")
+                   help="seconds with no events and no open pages before it exits; 0 never does")
     s.set_defaults(fn=cmd_serve)
 
     # Split off the wrapped command ourselves; argparse.REMAINDER swallows run's own flags.

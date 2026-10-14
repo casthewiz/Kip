@@ -71,9 +71,13 @@ hook for skills, so a skill counts as used when a prompt names it (`/name`) or
 attaches it, or a tool reads its `SKILL.md`. Each prompt and the agent's reply are kept too
 (redacted, up to 20,000 characters), so a session's timeline reads as the conversation; `install --no-conversation`
 turns that off (saved as `dashboard.conversation` in `~/.kip/config.json`, or the repo's with
-`--project`), and `--conversation` turns it back on. A session's start launches a live
-dashboard at <http://127.0.0.1:7377> (`KIP_DASHBOARD_PORT` to move it,
-`KIP_DASHBOARD=0` to never start it), which exits after 30 idle minutes. It
+`--project`), and `--conversation` turns it back on. A user `install` runs a live
+dashboard at <http://127.0.0.1:7377> as a login service (a launchd agent on macOS,
+a systemd user unit on Linux) that's always up; it runs from a copy at `~/.kip/dashboard`,
+since macOS stalls background agents that read `~/Documents` and the like, so re-run
+`install` after updating Kip. Elsewhere, a session's start launches it and it exits after
+30 idle minutes. `KIP_DASHBOARD=0` never starts it; `KIP_DASHBOARD_PORT` moves the one a
+session starts. It
 lists sessions with the stage each is in (decompose, implement, tidy, review,
 receipts), how many stops in a row the gate blocked, and its run's open
 reasons, and streams each session's timeline as it happens. A session's page

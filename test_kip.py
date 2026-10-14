@@ -20,6 +20,7 @@ def main():
         (repo / ".kip").mkdir(parents=True)
         env = {k: v for k, v in os.environ.items() if k not in ("KIP_HOME", "LINEAR_API_KEY", "KIP_RECEIPTS_DIR")}
         env["HOME"] = str(home)
+        env["KIP_DASHBOARD"] = "0"  # never load a real login service from a test
 
         def kip(*args, ok=True, **extra):
             r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=repo, env={**env, **extra},
@@ -182,6 +183,16 @@ def main():
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills
         kip("uninstall", "--project")
         assert not (repo / ".claude" / "settings.json").exists() and not list((repo / ".claude" / "skills").iterdir())
+        # The dashboard service: KIP_DASHBOARD=0 and --project write none; Linux's restarts it whenever it exits.
+        assert not [p for p in home.rglob("*") if "kip.dashboard" in p.name or "kip-dashboard" in p.name]
+        sys.path.insert(0, str(ROOT))
+        import kip as kip_py
+        path, text, load, unload = kip_py.service("linux")
+        assert path.name == "kip-dashboard.service" and "Restart=always" in text and "serve --idle 0" in text, text
+        assert kip_py.service("win32") is None
+        os.environ["KIP_DASHBOARD_PORT"] = "7400"
+        assert "--port 7400" in kip_py.service("linux")[1]
+        del os.environ["KIP_DASHBOARD_PORT"]
         assert "unknown host nope" in kip("install", "--host", "nope", ok=False)
 
         # Uninstall undoes install: the user's own settings, rules, and hooks are as they were,
