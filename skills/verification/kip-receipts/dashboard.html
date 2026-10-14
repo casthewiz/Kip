@@ -59,6 +59,15 @@ ol.timeline { list-style: none; margin: 0; padding: 0; }
 .ev .text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; min-width: 0; }
 .ev.blocked .text, .ev.blocked .kind { color: var(--bad); }
 .ev.skill .kind { color: var(--accent); }
+.ev.said .text { font: 13px/1.5 system-ui, -apple-system, sans-serif; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; }
+.ev.prompt .text { border-left: 3px solid var(--accent); }
+.ev.prompt .kind { color: var(--accent); }
+.ev.said .text.long { max-height: 9em; overflow: hidden; cursor: pointer; position: relative; }
+.ev.said .text.long::after { content: "show all"; position: absolute; right: 0; bottom: 0; padding: 2px 12px 4px 32px;
+  font-size: 12px; color: var(--accent); background: linear-gradient(to right, transparent, var(--panel) 24px); }
+.ev.said .text.long.open { max-height: none; }
+.ev.said .text.long.open::after { content: "show less"; position: static; display: block; padding: 4px 0 0; background: none; }
 .ev.fresh { animation: flash 1.2s ease-out; }
 @keyframes flash { from { background: var(--accent-soft); } to { background: transparent; } }
 @media (max-width: 760px) {
@@ -84,7 +93,7 @@ ol.timeline { list-style: none; margin: 0; padding: 0; }
 </main>
 <script>
 const STAGES = ["decompose", "implement", "tidy", "review", "receipts"];
-const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR" };
+const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "prompt", response: "reply" };
 let rows = [], selected = decodeURIComponent((location.hash.match(/session=([^&]+)/) || [])[1] || ""), events = [];
 const $ = id => document.getElementById(id);
 
@@ -125,13 +134,14 @@ function renderList() {
 }
 
 function eventItem(e, fresh) {
-  const blocked = e.blocked === true, skill = e.hook === "tool" && e.tool === "Skill";
-  const text = e.hook === "tool" ? (skill ? e.input : `${e.tool}${e.input ? "  " + e.input : ""}`)
+  const blocked = e.blocked === true, skill = e.hook === "tool" && e.tool === "Skill", said = "text" in e;
+  const text = said ? e.text : e.hook === "tool" ? (skill ? e.input : `${e.tool}${e.input ? "  " + e.input : ""}`)
     : e.message || (e.hook === "stop" ? "stop allowed" : e.hook);
-  return h("li", { class: `ev${blocked ? " blocked" : ""}${skill ? " skill" : ""}${fresh ? " fresh" : ""}` },
+  const long = said && (text.length > 600 || text.split("\n").length > 6);
+  return h("li", { class: `ev${blocked ? " blocked" : ""}${skill ? " skill" : ""}${said ? " said " + e.hook : ""}${fresh ? " fresh" : ""}` },
     h("time", { datetime: e.at }, clock(e.at)),
     h("span", { class: "kind" }, skill ? "skill" : blocked ? "blocked" : KIND[e.hook] || e.hook),
-    h("span", { class: "text" }, text));
+    h("span", { class: "text" + (long ? " long" : ""), onclick: long && (ev => ev.currentTarget.classList.toggle("open")) }, text));
 }
 
 function renderDetail(full) {

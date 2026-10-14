@@ -20,7 +20,7 @@
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
                                                             --migrate creates or upgrades it and imports JSON runs
-  receipt.py check [--hook start|stop|pr|tool|prompt]       exit 2 if this branch's run has open claims
+  receipt.py check [--hook start|stop|pr|tool|prompt|response] exit 2 if this branch's run has open claims
                                                             and the code changed since init, or there's
                                                             no run for work that needs one (host hooks)
   receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (a start hook launches it)
@@ -953,6 +953,7 @@ STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
 SKILL_STAGES = {"kip-decompose": "decompose", "kip-ponytail": "implement", "kip-marie-kondo": "tidy",
                 "code-review": "review", "kip-receipts": "receipts"}
 EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
+SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
 SKILL_FILE = re.compile(r"/skills/(?:\S*/)?([\w.-]+)/SKILL\.md$")  # reading one is using that skill (Cursor has no skill hook)
 
 
@@ -980,10 +981,26 @@ def log_tool(hook):
                  input=redact(str(what))[:200])
 
 
+def log_said(hook, kind, text):
+    """A prompt or the agent's reply, redacted, unless config's dashboard.conversation is false."""
+    if not (isinstance(text, str) and text.strip()):
+        return
+    try:
+        cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+        if cwd:
+            os.chdir(cwd)  # the repo's own .kip/config.json can turn it off
+        if not kip.load().get("dashboard", {}).get("conversation", True):
+            return
+    except (Exception, SystemExit):  # a config that won't load keeps nothing, and never fails the hook
+        return
+    append_event(hook, hook=kind, text=redact(text)[:SAID])
+
+
 def log_prompt(hook):
-    """The skills a prompt invokes, by `/name` or by attaching its SKILL.md, logged as Skill calls; neither host
-    has a hook for that. The prompt itself isn't kept. A `/name` counts when a skill folder has it, or it's a
-    stage's skill (built-ins like code-review have no folder)."""
+    """The prompt, then the skills it invokes, by `/name` or by attaching its SKILL.md, logged as Skill calls;
+    neither host has a hook for that. A `/name` counts when a skill folder has it, or it's a stage's skill
+    (built-ins like code-review have no folder)."""
+    log_said(hook, "prompt", hook.get("prompt"))
     roots = [Path.home() / d for d in (".kip/skills", ".claude/skills", ".cursor/skills")] + \
         [Path(w) / d for w in (hook.get("workspace_roots") or [hook.get("cwd")]) if w
          for d in (".claude/skills", ".cursor/skills")]
@@ -1205,11 +1222,12 @@ def cmd_check(a):
     events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
     if a.pr:
         return check_pr(a.pr)
-    if a.hook in ("tool", "prompt"):  # only logged: never blocks, never adds to the agent's context
+    if a.hook in ("tool", "prompt", "response"):  # only logged: never blocks, never adds to the agent's context
         hook = {}
         try:
             hook = json.loads(sys.stdin.read() or "{}")
-            (log_tool if a.hook == "tool" else log_prompt)(hook)
+            {"tool": log_tool, "prompt": log_prompt,
+             "response": lambda h: log_said(h, "response", h.get("text"))}[a.hook](hook)
         except Exception:
             pass
         if isinstance(hook, dict) and "workspace_roots" in hook:  # Cursor reads a JSON answer, even if logging failed
@@ -1230,6 +1248,8 @@ def cmd_check(a):
             a.hook == "stop" and not (hook.get("stop_hook_active") or hook.get("loop_count"))
         msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
                "Fix it or tell the user; don't work around it.")
+    if a.hook == "stop":  # Claude Code's reply; Cursor sends its own on afterAgentResponse
+        log_said(hook, "response", hook.get("last_assistant_message"))
     if a.hook and (a.hook != "pr" or opens_pr(hook)):  # a plain shell or MCP call is the tool hook's to log
         log_gate(a.hook, hook, blocked, msg)
     if a.hook == "start":
@@ -1328,7 +1348,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt", "response"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 
