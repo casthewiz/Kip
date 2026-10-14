@@ -347,6 +347,12 @@ def main():
         assert {k: last()[k] for k in ("session", "host", "repo", "branch", "hook", "blocked")} == \
             {"session": "d1", "host": "claude", "repo": "demo", "branch": sh("git", "branch", "--show-current"),
              "hook": "stop", "blocked": False} and last()["run"] and last()["at"], last()
+        assert last().get("github") is None, "a checkout with no GitHub remote got a GitHub link"
+        for remote in ("git@github.com:me/demo.git", "https://github.com/me/demo"):
+            sh("git", "remote", "add", "origin", remote)
+            check("--hook", "stop", event=dash)
+            assert last()["github"] == "https://github.com/me/demo", (remote, last())
+            sh("git", "remote", "remove", "origin")
         tools = [("Skill", {"skill": "kip-decompose"}), ("Edit", {"file_path": "app.py"}),
                  ("Skill", {"skill": "kip-marie-kondo"}), ("Bash", {"command": "python3 receipt.py run c1 -- true"})]
         for name, tool_input in tools:
