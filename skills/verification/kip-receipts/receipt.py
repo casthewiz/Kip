@@ -36,6 +36,7 @@ Standard library only, Python 3.8+.
 """
 import argparse
 import contextlib
+import copy
 import datetime
 import functools
 import hashlib
@@ -541,12 +542,16 @@ def verdict(c, rec):
     return "✅ verified"
 
 
-def verify_hashes(d, rec):
-    """Refuse to render evidence whose files changed since they were recorded."""
+def recorded(rec):
+    """Every file the run recorded inside its folder, with the hash it had then."""
     entries = [f for c in rec["claims"] for f in c["files"]]
     entries += [e[k] for c in rec["claims"] for e in c["evidence"] for k in ("log", "patch") if e.get(k)]
-    entries += [i for c in rec["claims"] for e in c["evidence"] for i in e.get("inputs", []) if i["inside_run"]]
-    for f in entries:
+    return entries + [i for c in rec["claims"] for e in c["evidence"] for i in e.get("inputs", []) if i["inside_run"]]
+
+
+def verify_hashes(d, rec):
+    """Refuse to render evidence whose files changed since they were recorded."""
+    for f in recorded(rec):
         p = d / f["path"]
         if p.exists() and sha256(p) != f["sha256"]:
             sys.exit(f"hash mismatch for {f['path']}: file changed after it was recorded")
@@ -961,6 +966,9 @@ SKILL_STAGES = {"kip-decompose": "decompose", "kip-ponytail": "implement", "kip-
 EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
 SKILL_FILE = re.compile(r"/skills/(?:\S*/)?([\w.-]+)/SKILL\.md$")  # reading one is using that skill (Cursor has no skill hook)
+ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
+TRACKER = re.compile(r"linear|jira|atlassian", re.I)  # an MCP server or sink whose issue keys are issues
+URL = re.compile(r"https?://(?!(?:localhost|127\.0\.0\.1|\[::1\])[:/])[^\s<>()\"'`]*[^\s<>()\"'`.,;:!?]")  # not this machine; not a sentence's period
 
 
 def append_event(payload, **fields):
@@ -1046,17 +1054,34 @@ def reason_kind(line):
             "failing check" if v[1].startswith("❌") else "unaddressed")
 
 
+def sources(tool, what):
+    """What outside the machine a tool call reads from: an MCP server, a web search, or the URLs it names."""
+    if tool.startswith("mcp__"):
+        return [("mcp", tool.split("__")[1])]
+    if tool == "WebSearch":
+        return [("search", what)]
+    return [("web", url) for url in URL.findall(what)]
+
+
 def fold(rows, e):
     """Add one event to its session's row; the session's id, or None for a line that isn't an event."""
     if not (isinstance(e, dict) and e.get("session") and e.get("at")):
         return None
     sid = str(e["session"])
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
-                              "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None})
+                              "runs": [], "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None,
+                              "sources": {}, "issues": {}})
     r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"])
+    if e.get("run") and e["run"] not in r["runs"]:
+        r["runs"].append(e["run"])
+    found = [("link", url) for url in URL.findall(str(e.get("text") or ""))] if e.get("hook") == "prompt" else []
     if e.get("hook") == "tool":
         tool, what = str(e.get("tool")), str(e.get("input") or "")
         r["tool"] = f"{tool}: {what}" if what else tool
+        found = sources(tool, what)
+        if found and found[0][0] == "mcp" and TRACKER.search(found[0][1]):
+            for key in ISSUE_KEY.findall(what):
+                r["issues"].setdefault(key, {"key": key, "via": found[0][1]})
         skill_file = tool not in EDITS and SKILL_FILE.search(what)  # editing a skill isn't using it
         if skill_file:
             tool, what = "Skill", skill_file[1]
@@ -1067,24 +1092,74 @@ def fold(rows, e):
         if stage:
             r["stage"] = stage
             r["reached"] = sorted(set(r["reached"]) | {stage}, key=STAGES.index)
+    for kind, name in found:
+        s = r["sources"].setdefault(f"{kind} {name}", {"kind": kind, "name": name, "count": 0})
+        s.update(count=s["count"] + 1, last=e["at"])
     if e.get("hook") == "stop" and e.get("message") != NUDGED:  # the stop it let through after a block isn't a pass
         r["blocked"] = r["blocked"] + 1 if e.get("blocked") else 0
     return sid
 
 
+def stored(run):
+    """A run by its id or folder, or None when kip.db doesn't have it."""
+    rid = Path(run).name
+    return load(rid) if db().execute("SELECT 1 FROM runs WHERE id = ?", (rid,)).fetchone() else None
+
+
+def run_summary(rec):
+    """What a session's segments show of a run: where it publishes and how its claims stand."""
+    counts = {}
+    for c in rec["claims"]:
+        v = verdict(c, rec).split(":")[0]
+        counts[v] = counts.get(v, 0) + 1
+    return {"id": rec["id"], "branch": rec.get("branch"), "level": rec["level"], "issue": rec.get("issue"),
+            "target": rec.get("target"), "finished": bool(rec.get("finished")), "claims": counts,
+            "sinks": [{"name": s, "url": rec.get("published", {}).get(s, {}).get("url")} for s in rec["sinks"]]}
+
+
+def run_detail(rec):
+    """A run as its review panel shows it: each claim's verdict, its evidence, and links to what it recorded."""
+    def url(f):
+        return f and f"/runs/{rec['id']}/{f['path']}"
+
+    return {**run_summary(rec), "commit": rec.get("commit"), "claims": [
+        {"id": c["id"], "text": c["text"], "unit": c.get("unit"), "stage": c.get("stage"),
+         "provider": c.get("provider") or "generic", "verdict": verdict(c, rec), "unverified": c.get("unverified"),
+         "evidence": [{"id": e["id"], "label": e.get("label"), "summary": summarize(e, full=True), "passed": e.get("passed"),
+                       "phase": e.get("phase"), "excerpt": e.get("excerpt"), "commit": e.get("commit"),
+                       "remote": bool(e.get("remote")), "log": url(e.get("log")), "patch": url(e.get("patch"))}
+                      for e in c["evidence"]],
+         "files": [{"type": f["type"], "name": Path(f["path"]).name, "url": url(f)} for f in c["files"]]}
+        for c in rec["claims"]]}
+
+
+@functools.lru_cache(maxsize=256)
+def hashed(path, mtime_ns, ctime_ns, size):
+    """A file's sha256, worked out again only when it's touched (ctime too: a copy can keep mtime): a video
+    is fetched in many ranges."""
+    return sha256(path)
+
+
 def finish(rows):
-    """The rows as the dashboard shows them, newest first: whether each is active, and its run's open
-    reasons by kind and the stages it has claims for."""
+    """The rows as the dashboard shows them, newest first: whether each is active, its runs, the issues they
+    and its tracker calls name, its run's open reasons by kind and the stages it has claims for."""
     now, out = datetime.datetime.now(datetime.timezone.utc), []
     for r in rows.values():
-        d = Path(r["run"]) if r["run"] else None
-        rec = load(d) if d and db().execute("SELECT 1 FROM runs WHERE id = ?", (d.name,)).fetchone() else None
+        recs = [rec for rec in map(stored, r["runs"]) if rec]
+        rec = next((x for x in recs if x["id"] == Path(r["run"]).name), None) if r["run"] else None
         open_ = {}
         for line in (blocking(rec, pr=True) if rec and not rec.get("finished") else []):
             open_.setdefault(reason_kind(line), []).append(line)
         claimed = {c.get("stage") for c in rec["claims"]} & set(STAGES) if rec else set()
+        issues = dict(r["issues"])
+        for x in recs:
+            for s in x["sinks"]:
+                if x.get("issue") and TRACKER.search(s):
+                    issues.setdefault(x["issue"], {"key": x["issue"], "via": s})
         out.append({**r, "active": now - datetime.datetime.fromisoformat(r["last"]) < ACTIVE, "open": open_,
-                    "reached": sorted(set(r["reached"]) | claimed, key=STAGES.index)})
+                    "reached": sorted(set(r["reached"]) | claimed, key=STAGES.index),
+                    "runs": [run_summary(x) for x in recs], "issues": list(issues.values()),
+                    "sources": sorted(r["sources"].values(), key=lambda s: s["last"], reverse=True)})
     return sorted(out, key=lambda r: r["last"], reverse=True)
 
 
@@ -1160,12 +1235,13 @@ def cmd_serve(a):
                 return self.send('{"error": "wrong host"}', code=403)  # a rebound DNS name; not this machine's page
             path = self.path.split("?")[0]
             one = re.fullmatch(r"/api/sessions/([\w.-]+)", path)
+            run = re.fullmatch(r"/api/runs/([\w-]+)", path)
+            file = re.fullmatch(r"/runs/([\w-]+)/(files/[\w.-]+)", path)
             if path == "/":
                 self.send(page, "text/html")
             elif path == "/api/sessions":
                 with lock:
-                    snapshot = {sid: {**r, "skills": list(r["skills"]), "reached": list(r["reached"])}
-                                for sid, r in rows.items()}
+                    snapshot = copy.deepcopy(rows)
                 with reading:
                     body = json.dumps(finish(snapshot), ensure_ascii=False)
                 self.send(body)
@@ -1173,10 +1249,50 @@ def cmd_serve(a):
                 with lock:
                     events = list(timelines.get(one[1], ()))
                 self.send(json.dumps(events, ensure_ascii=False))
+            elif run:
+                with reading:
+                    rec = stored(run[1])
+                    body = rec and json.dumps(run_detail(rec), ensure_ascii=False)
+                self.send(body) if body else self.send('{"error": "no such run"}', code=404)
+            elif file:
+                self.send_file(*file.groups())
             elif path == "/stream":
                 self.stream()
             else:
                 self.send('{"error": "not found"}', code=404)
+
+        def send_file(self, rid, rel):
+            """A file the run recorded, unchanged since; a byte range of it for video seeking."""
+            with reading:
+                rec = stored(rid)
+            entry = next((f for f in recorded(rec) if f["path"] == rel), None) if rec else None
+            p = ROOT / rec["repo"] / rid / rel if entry else None
+            st = p.stat() if p and p.is_file() else None
+            if not (st and hashed(str(p), st.st_mtime_ns, st.st_ctime_ns, st.st_size) == entry["sha256"]):
+                return self.send('{"error": "no such file, or it changed after it was recorded"}', code=404)
+            size, start, end, code = st.st_size, 0, st.st_size - 1, 200
+            want = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+            if want and (want[1] or want[2]):
+                start, end = (int(want[1]), min(int(want[2] or end), end)) if want[1] else (max(0, size - int(want[2])), end)
+                if start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    return self.end_headers()
+                code = 206
+            media = entry.get("type") in ("image", "video", "trace")  # logs, patches and inputs are only ever text
+            self.send_response(code)
+            self.send_header("Content-Type", (mimetypes.guess_type(p.name)[0] if media else None) or
+                             ("application/octet-stream" if media else "text/plain; charset=utf-8"))
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            with open(p, "rb") as f:
+                f.seek(start)
+                self.wfile.write(f.read(end - start + 1))
 
         def stream(self):
             self.send_response(200)
