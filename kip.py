@@ -3,9 +3,10 @@
 
   kip.py config                         print the merged config
   kip.py doctor                         what each configured surface needs, and whether it's here
-  kip.py install [--host NAME] [--project]
+  kip.py install [--host NAME] [--project] [--conversation | --no-conversation]
                                         link skills (and rules, and hooks) into each host,
-                                        and this repo at ~/.kip/kip; idempotent
+                                        and this repo at ~/.kip/kip; idempotent. The flag saves
+                                        whether the session log keeps prompts and replies
   kip.py uninstall [--host NAME] [--project]
                                         undo install: Kip's links, rules, and hooks; the user's own stay
 
@@ -13,7 +14,8 @@ Config layers, later wins: defaults.json next to this file, then
 $KIP_HOME/config.json (default ~/.kip), then <repo>/.kip/config.json. Dicts
 merge, anything else replaces, null deletes. A `doc` path is relative to the
 file that sets it. Surface kinds are hosts, connectors, evidence and
-destinations, plus `workflow` (stages a PR needs claims for); see the README
+destinations, plus `workflow` (stages a PR needs claims for) and `dashboard`
+(`conversation`: whether the session log keeps prompts and replies); see the README
 for the schema.
 
 Standard library only, Python 3.8+.
@@ -69,7 +71,7 @@ def load():
             layer = json.loads(path.read_text())
         except ValueError as err:
             sys.exit(f"{path}: {err}")
-        unknown = set(layer) - set(SURFACES) - {"default_destination", "workflow"}
+        unknown = set(layer) - set(SURFACES) - {"default_destination", "workflow", "dashboard"}
         if unknown:
             sys.exit(f"{path}: unknown surface kind {', '.join(sorted(unknown))}; valid: {', '.join(SURFACES)}")
         for entry in (layer.get("evidence") or {}).values():
@@ -107,6 +109,8 @@ def validate(cfg):
         if not (isinstance(cmd, str) and cmd.strip() or
                 isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
             sys.exit(f"workflow.checks.{name} must be a command: a string or a list of arguments")
+    if not isinstance(cfg.get("dashboard", {}).get("conversation", True), bool):
+        sys.exit("dashboard.conversation must be true or false")
     if cfg.get("default_destination", "local") not in cfg["destinations"]:
         sys.exit(f"default_destination {cfg['default_destination']} isn't a destination")
 
@@ -306,8 +310,19 @@ def print_receipts(*args, prefix=""):
         print(f"  {prefix}{line}")
 
 
+def save_conversation(path, on):
+    """Install's --[no-]conversation, written into a config layer beside whatever else it holds."""
+    layer = json.loads(path.read_text()) if path.is_file() else {}
+    layer.setdefault("dashboard", {})["conversation"] = on
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(layer, indent=2) + "\n")
+    print(f"dashboard: prompts and replies {'kept' if on else 'not kept'} ({path})")
+
+
 def cmd_install(a):
     selected, top = hosts(a)
+    if a.conversation is not None:
+        save_conversation(top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json", a.conversation)
     found = skills()
     if not a.project:  # a host-neutral path to kip.py for skills to call
         KIP_HOME.mkdir(parents=True, exist_ok=True)
@@ -405,7 +420,13 @@ def main():
         s = sub.add_parser(name)
         s.add_argument("--host", action="append", default=[], help="only this host, even if it isn't detected")
         s.add_argument("--project", action="store_true", help=f"{verb} this repo's project skills dirs instead")
-        s.set_defaults(fn=fn)
+        s.set_defaults(fn=fn, conversation=None)
+        if name == "install":
+            g = s.add_mutually_exclusive_group()
+            g.add_argument("--conversation", action="store_const", const=True,
+                           help="keep prompts and replies in the session log (the default), saved to config")
+            g.add_argument("--no-conversation", dest="conversation", action="store_const", const=False,
+                           help="keep neither, saved to config")
     a = p.parse_args()
     a.fn(a)
 

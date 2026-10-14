@@ -63,7 +63,8 @@ def main():
                          ({"default_destination": "nope"}, "default_destination nope isn't a destination"),
                          ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list"),
                          ({"workflow": {"checks": ["make test"]}}, "workflow.checks must map check names"),
-                         ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command")]:
+                         ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command"),
+                         ({"dashboard": {"conversation": "no"}}, "dashboard.conversation must be true or false")]:
             write(repo / ".kip" / "config.json", bad)
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
@@ -153,6 +154,7 @@ def main():
         assert on["hooks"]["afterFileEdit"][0]["command"].endswith("check --hook tool"), on
         assert on["hooks"]["preToolUse"] == [{"command": f"python3 {RECEIPT} check --hook tool"}], on
         assert on["hooks"]["beforeSubmitPrompt"][0]["command"].endswith("check --hook prompt"), on
+        assert on["hooks"]["afterAgentResponse"][0]["command"].endswith("check --hook response"), on
         on["hooks"]["stop"].insert(0, {"command": "say hi"})
         write(cursor_hooks, on)
         kip("install", "--host", "cursor")
@@ -165,6 +167,16 @@ def main():
         assert "rules stale (run install)" in kip("doctor")
         kip("install", "--host", "cursor")
         assert "rules current" in kip("doctor")
+        # The conversation switch: install saves it into the user's layer (the repo's with --project),
+        # beside what's already there; no flag leaves it as it was.
+        kip("install", "--host", "cursor", "--no-conversation")
+        user = json.loads((home / ".kip" / "config.json").read_text())
+        assert user["dashboard"] == {"conversation": False} and user["default_destination"] == "linear", user
+        kip("install", "--host", "cursor")
+        assert json.loads(kip("config"))["dashboard"]["conversation"] is False
+        kip("install", "--host", "cursor", "--project", "--conversation")
+        assert json.loads(kip("config"))["dashboard"]["conversation"] is True
+        assert "not allowed with" in kip("install", "--conversation", "--no-conversation", ok=False)
         kip("install", "--project")
         assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills

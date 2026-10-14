@@ -41,7 +41,8 @@
           "beforeMCPExecution": [{"command": "python3 {receipt} check --hook pr"}],
           "afterFileEdit": [{"command": "python3 {receipt} check --hook tool"}],
           "preToolUse": [{"command": "python3 {receipt} check --hook tool"}],
-          "beforeSubmitPrompt": [{"command": "python3 {receipt} check --hook prompt"}]
+          "beforeSubmitPrompt": [{"command": "python3 {receipt} check --hook prompt"}],
+          "afterAgentResponse": [{"command": "python3 {receipt} check --hook response"}]
         }
       }
     }
@@ -71,5 +72,6 @@
     "github": {"type": "github", "requires": {"cmd": ["gh"]}}
   },
   "default_destination": "local",
-  "workflow": {"stages": ["tidy", "review"], "checks": {}}
+  "workflow": {"stages": ["tidy", "review"], "checks": {}},
+  "dashboard": {"conversation": true}
 }

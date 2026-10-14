@@ -68,7 +68,10 @@ The hooks also keep a session log, one file per day in `~/.kip/receipts/events/`
 (the dashboard keeps 14 days): every
 gate decision and every tool call, redacted and cut short. Neither host has a
 hook for skills, so a skill counts as used when a prompt names it (`/name`) or
-attaches it, or a tool reads its `SKILL.md`; prompts themselves aren't kept. A session's start launches a live
+attaches it, or a tool reads its `SKILL.md`. Each prompt and the agent's reply are kept too
+(redacted, up to 20,000 characters), so a session's timeline reads as the conversation; `install --no-conversation`
+turns that off (saved as `dashboard.conversation` in `~/.kip/config.json`, or the repo's with
+`--project`), and `--conversation` turns it back on. A session's start launches a live
 dashboard at <http://127.0.0.1:7377> (`KIP_DASHBOARD_PORT` to move it,
 `KIP_DASHBOARD=0` to never start it), which exits after 30 idle minutes. It
 lists sessions with the stage each is in (decompose, implement, tidy, review,
@@ -108,7 +111,8 @@ Plus `workflow.stages`: the [stages](skills/verification/kip-receipts/SKILL.md#s
 a PR needs a claim for (default `["tidy", "review"]`; `[]` turns it off), and
 `workflow.checks`: [required checks](skills/verification/kip-receipts/SKILL.md#required-checks),
 commands like `{"tests": "npm test"}` that must pass on the current code
-before a turn can end or a PR open (default none).
+before a turn can end or a PR open (default none). And `dashboard.conversation`:
+whether the session log keeps prompts and replies (default `true`).
 
 Every surface can declare `requires` (`env`, `cmd`, `file`), which doctor
 checks and `install` uses to detect hosts. A surface with `via` runs through

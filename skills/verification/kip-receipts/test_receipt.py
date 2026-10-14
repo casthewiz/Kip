@@ -465,7 +465,7 @@ def main():
 
         # Skills with no skill hook: a prompt's `/name` (when a skill folder has it, or it's a stage's skill) or
         # attached SKILL.md, and a tool reading a SKILL.md, count as using that skill. Editing one doesn't.
-        # Cursor gets JSON answers and one session id across its events; the prompt itself is never kept.
+        # Cursor gets JSON answers and one session id across its events. Prompts and replies are kept, redacted.
         home = {"HOME": str(Path(tmp, "nohome"))}
         (repo / ".claude" / "skills" / "my-skill").mkdir(parents=True)
         (repo / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text("---\nname: my-skill\n---\n")
@@ -474,7 +474,16 @@ def main():
         assert check("--hook", "prompt", event=prompt, extra_env=home) == (0, "")
         assert [(e["session"], e["tool"], e["input"]) for e in map(json.loads, lines()[-2:])] == \
             [("p1", "Skill", "kip-decompose"), ("p1", "Skill", "my-skill")], lines()[-2:]
-        assert "/help" not in "".join(lines()), "a prompt was kept"
+        said = json.loads(lines()[-3])
+        assert (said["hook"], said["text"]) == ("prompt", prompt["prompt"]), said
+        # A repo's config can turn prompts and replies off; skills still count.
+        cfg_path = repo / ".kip" / "config.json"
+        kept = cfg_path.read_text()
+        cfg_path.write_text(json.dumps({**json.loads(kept), "dashboard": {"conversation": False}}))
+        check("--hook", "prompt", event={**prompt, "prompt": "quiet /kip-decompose"}, extra_env=home)
+        check("--hook", "stop", event={"session_id": "p1", "cwd": str(repo), "last_assistant_message": "quiet reply"})
+        assert "quiet" not in "".join(lines()) and json.loads(lines()[-2])["input"] == "kip-decompose", lines()[-2:]
+        cfg_path.write_text(kept)
         assert "code-review" not in "".join(lines()[-2:]), "a path in the prompt counted as a skill"
         check("--hook", "tool", event={"session_id": "p1", "tool_name": "Edit",
                                        "tool_input": {"file_path": str(repo / ".claude/skills/my-skill/SKILL.md")}})
@@ -485,6 +494,14 @@ def main():
             (0, '{"continue": true}')
         assert check("--hook", "tool", event={**k2, "hook_event_name": "preToolUse", "tool_name": "Read",
                                               "tool_input": {"file_path": "/u/.cursor/skills/kip-receipts/SKILL.md"}}) == (0, "{}")
+        assert check("--hook", "response", event={**k2, "text": "Done, key sk-test-12345678."},
+                     extra_env={"MY_API_KEY": "sk-test-12345678"}) == (0, "{}")
+        assert json.loads(lines()[-1])["text"] == "Done, key [MY_API_KEY].", lines()[-1]
+        check("--hook", "stop", event={**k2, "status": "completed"})
+        assert json.loads(lines()[-1])["hook"] == "stop", "Cursor's stop logged a reply it doesn't carry"
+        check("--hook", "stop", event={"session_id": "p1", "cwd": str(repo), "last_assistant_message": "All set."})
+        assert [(e["hook"], e.get("text")) for e in map(json.loads, lines()[-2:])] == \
+            [("response", "All set."), ("stop", None)], lines()[-2:]
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env=env,
                                   stdout=subprocess.PIPE, text=True)
