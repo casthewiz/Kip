@@ -72,6 +72,44 @@ ol.timeline { list-style: none; margin: 0; padding: 0; }
 .ev.said .text.long.open { max-height: none; }
 .ev.said .text.long.open::after { content: "show less"; position: static; display: block; padding: 4px 0 0; background: none; }
 .ev.fresh { animation: flash 1.2s ease-out; }
+.segments { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 20px; }
+.segment { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.segment h3 { margin: 0 0 8px; }
+.segment ul { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.segment li { display: flex; gap: 6px; align-items: baseline; padding: 2px 0; min-width: 0; }
+.segment li .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.segment .none { color: var(--dim); font-size: 12px; margin: 0; }
+.kindtag { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; color: var(--dim); flex: none; }
+.n { color: var(--dim); font-size: 12px; flex: none; }
+a { color: var(--accent); }
+.runs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.runs button { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--panel); color: inherit;
+  border-radius: 8px; padding: 6px 10px; cursor: pointer; text-align: left; }
+.runs button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.tally { display: inline-flex; gap: 4px; margin-left: 6px; }
+.v { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; flex: none; }
+.v.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.v.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+.v.bad { background: var(--bad-soft); color: var(--bad); }
+.claim summary { display: flex; gap: 8px; align-items: baseline; font-weight: 400; }
+.claim summary .cid { font-family: var(--mono); font-size: 12px; color: var(--dim); flex: none; }
+.claim summary .grow { min-width: 0; }
+.claim .tags { color: var(--dim); font-size: 11px; }
+.evidence { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12px; }
+.evidence > li { border-top: 1px solid var(--line); padding: 8px 0; }
+.evidence code { font-family: var(--mono); word-break: break-word; }
+.evidence .cmd { display: block; margin-top: 4px; max-height: 4.4em; overflow: hidden; cursor: pointer; color: var(--dim); }
+.evidence .cmd.open { max-height: none; }
+.evidence pre { font-family: var(--mono); font-size: 12px; background: var(--bg); border-radius: 6px; padding: 8px;
+  overflow-x: auto; max-height: 16em; margin: 6px 0 0; }
+.media { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
+.media img, .media video { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); display: block; }
+.media img { cursor: zoom-in; aspect-ratio: 4 / 3; object-fit: cover; object-position: top; }
+.media figure { margin: 0; min-width: 0; }
+.media figcaption { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+dialog#zoom { border: 0; padding: 0; background: none; max-width: 96vw; max-height: 96vh; }
+dialog#zoom::backdrop { background: rgb(0 0 0 / .75); }
+dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoom-out; }
 @keyframes flash { from { background: var(--accent-soft); } to { background: transparent; } }
 @media (max-width: 760px) {
   main { grid-template-columns: 1fr; }
@@ -93,6 +131,7 @@ ol.timeline { list-style: none; margin: 0; padding: 0; }
 <main>
   <nav id="list" aria-label="Sessions"></nav>
   <section id="detail"><p class="empty">Pick a session.</p></section>
+  <dialog id="zoom"><img alt=""></dialog>
 </main>
 <script>
 const STAGES = ["decompose", "implement", "tidy", "review", "receipts"];
@@ -160,24 +199,109 @@ function eventItem(e, fresh) {
     h("span", { class: "text" + (long ? " long" : ""), onclick: long && (ev => ev.currentTarget.classList.toggle("open")) }, text));
 }
 
+const tone = v => v.startsWith("✅") ? "ok" : v.startsWith("❌") ? "bad" : "warn";
+const link = (href, text) => href ? h("a", { href, target: "_blank", rel: "noopener" }, text) : text;
+let review = null;  // the run open in the review panel: { id, body, data }
+
+function tally(counts) {
+  return h("span", { class: "tally" }, Object.entries(counts || {}).map(([v, n]) => h("span", { class: "v " + tone(v), title: v }, `${v.split(" ")[0]} ${n}`)));
+}
+
+function segment(name, items, none) {
+  return h("div", { class: "segment" }, h("h3", {}, name), items.length ? h("ul", {}, items) : h("p", { class: "none" }, none));
+}
+
+// What the session touched beyond the repo: the issues it's tied to, where its receipts go, what it read from outside.
+function segments(r) {
+  const sinks = new Map();
+  for (const x of r.runs || []) for (const s of x.sinks) sinks.set(s.name + " " + (s.url || ""), s);
+  return h("div", { class: "segments" },
+    segment("Issues", (r.issues || []).map(i => h("li", {}, h("span", { class: "grow" }, i.key), h("span", { class: "n" }, "via " + i.via))),
+      "No Linear or Jira issue: no run publishes to one, and no tracker call named one."),
+    segment("Sinks", [...sinks.values()].map(s => h("li", {}, h("span", { class: "grow" }, link(s.url, s.name)),
+      h("span", { class: "n" }, s.url ? "published" : s.name === "local" ? "kip.db" : "not published yet"))),
+      "No receipts run, so nothing is recorded or published."),
+    segment("Sources", (r.sources || []).map(s => h("li", { title: s.name }, h("span", { class: "kindtag" }, s.kind),
+      h("span", { class: "grow" }, s.kind === "web" || s.kind === "link" ? link(s.name, s.name) : s.name), h("span", { class: "n" }, "×" + s.count))),
+      "No web, search or MCP calls, and no links in prompts."));
+}
+
+function receipts(r) {
+  const open = Object.entries(r.open || {}), expanded = new Set([...document.querySelectorAll("#head details[open]")].map(d => d.dataset.kind));
+  return [h("h3", {}, "Receipts"),
+    (r.runs || []).length ? h("div", { class: "runs" }, r.runs.slice().reverse().map(x => h("button", {
+      "aria-pressed": review && review.id === x.id ? "true" : "false", onclick: () => openRun(x.id) },
+      x.id, x.branch ? " · " + x.branch : "", x.finished ? " · finished" : "", tally(x.claims))))
+      : h("p", { class: "none" }, "No receipts run in this session."),
+    open.length ? h("p", { class: "meta" }, "Open in run " + r.run.split("/").pop()) : null,
+    open.map(([kind, lines]) => h("details", { "data-kind": kind, open: expanded.has(kind) ? "" : null },
+      h("summary", {}, `${kind} (${lines.length})`), h("ul", {}, lines.map(l => h("li", {}, l)))))];
+}
+
+function fileItem(f) {
+  const view = f.type === "image" ? h("img", { src: f.url, alt: f.name, loading: "lazy", onclick: () => zoom(f.url, f.name) })
+    : f.type === "video" ? h("video", { src: f.url, controls: "", preload: "metadata" }) : null;
+  return h("figure", {}, view, h("figcaption", { title: f.name }, link(f.url, view ? f.name : `${f.type}: ${f.name}`)));
+}
+
+function claimItem(c, open) {
+  const tags = [c.unit && "unit " + c.unit, c.stage, c.provider, c.files.length && `${c.files.length} file${c.files.length > 1 ? "s" : ""}`];
+  return h("details", { class: "claim", "data-claim": c.id, open: open ? "" : null },
+    h("summary", {}, h("span", { class: "v " + tone(c.verdict) }, c.verdict.split(":")[0]), h("span", { class: "cid" }, c.id),
+      h("span", { class: "grow" }, c.text, " ", h("span", { class: "tags" }, tags.filter(Boolean).join(" · ")))),
+    c.unverified || c.verdict.includes(":") ? h("p", { class: "meta" }, c.unverified ? "unverified: " + c.unverified : c.verdict) : null,
+    c.evidence.length ? h("ul", { class: "evidence" }, c.evidence.map(e => h("li", {},
+      h("span", { class: "v " + (e.passed ? "ok" : "bad") }, (e.phase === "red" ? "red · " : "") + (e.passed ? "passed" : "failed")), " ",
+      e.label ? h("strong", {}, e.label) : null,
+      h("code", { class: "cmd", title: "click to show all", onclick: ev => ev.currentTarget.classList.toggle("open") }, e.summary),
+      h("div", { class: "n" }, e.remote ? "remote" : e.commit ? "commit " + e.commit.slice(0, 7) : "",
+        e.log ? [" · ", link(e.log, "log")] : null, e.patch ? [" · ", link(e.patch, "patch")] : null),
+      e.excerpt ? h("pre", {}, e.excerpt) : null))) : h("p", { class: "none" }, "No evidence yet."),
+    c.files.length ? h("div", { class: "media" }, c.files.map(fileItem)) : null);
+}
+
+function renderReview() {
+  const el = $("review");
+  if (!el) return;
+  if (!review || !review.data) return el.replaceChildren();
+  const d = review.data, expanded = new Set(el.dataset.run === d.id ? [...el.querySelectorAll("details[open]")].map(x => x.dataset.claim) : []);
+  el.dataset.run = d.id;
+  el.replaceChildren(h("div", {}, h("p", { class: "meta" }, `run ${d.id} · ${d.level} · ${d.target || "commit " + (d.commit || "?").slice(0, 7)}`),
+    d.claims.length ? d.claims.map(c => claimItem(c, expanded.has(c.id))) : h("p", { class: "none" }, "No claims yet.")));
+}
+
+// Fetch a run for review; redraw only when it changed, so a playing video or an open claim survives live updates.
+async function openRun(id) {
+  if (!review || review.id !== id) { review = { id }; renderDetail(); renderReview(); }
+  let body;
+  try { body = await (await fetch("/api/runs/" + encodeURIComponent(id))).text(); } catch (_) { return; }
+  if (review?.id !== id || body === review.body) return;
+  try { review = { id, body, data: JSON.parse(body) }; } catch (_) { return; }
+  renderReview();
+}
+
+function zoom(src, alt) {
+  const img = $("zoom").querySelector("img");
+  img.src = src; img.alt = alt;
+  $("zoom").showModal();
+}
+
 function renderDetail(full) {
   const r = rows.find(x => x.session === selected);
   if (!r) { $("detail").replaceChildren(h("p", { class: "empty" }, selected ? "That session isn't in the log." : "Pick a session.")); return; }
-  const expanded = new Set([...document.querySelectorAll("#head details[open]")].map(d => d.dataset.kind));
-  const open = Object.entries(r.open || {});
   const head = [
     h("h2", {}, title(r, true)),
-    h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)}${r.run ? " · run " + r.run.split("/").pop() : ""}`),
+    h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)}`),
     h("div", { class: "pipeline", role: "list", "aria-label": "Stages" }, STAGES.map(s => h("div", {
       role: "listitem",
       class: "step" + ((r.reached || []).includes(s) ? " reached" : "") + (r.stage === s ? " current" + (r.blocked ? " stuck" : "") : ""),
     }, s, r.stage === s && r.blocked ? ` ↻${r.blocked}` : ""))),
-    h("h3", {}, open.length ? "Open in this run" : r.run ? "Run: nothing open (stale evidence shows in the gate's messages)" : "No receipts run"),
-    open.map(([kind, lines]) => h("details", { "data-kind": kind, open: expanded.has(kind) ? "" : null },
-      h("summary", {}, `${kind} (${lines.length})`), h("ul", {}, lines.map(l => h("li", {}, l)))))];
-  if (!full && $("head")) return $("head").replaceChildren(...head.flat());
-  $("detail").replaceChildren(h("div", { id: "head" }, head), h("h3", {}, "Timeline"),
+    segments(r),
+    receipts(r)];
+  if (!full && $("head")) return $("head").replaceChildren(...head.flat(Infinity).filter(x => x != null));
+  $("detail").replaceChildren(h("div", { id: "head" }, head), h("div", { id: "review" }), h("h3", {}, "Timeline"),
     h("ol", { class: "timeline", id: "timeline" }, events.slice().reverse().map(e => eventItem(e))));
+  renderReview();
 }
 
 async function refresh() {
@@ -190,12 +314,17 @@ async function refresh() {
 
 async function select(id) {
   selected = id;
+  review = null;
   history.replaceState(null, "", "#session=" + encodeURIComponent(id));
   events = await (await fetch("/api/sessions/" + encodeURIComponent(id))).json();
   renderList();
   renderDetail(true);
+  const r = rows.find(x => x.session === id), latest = r && r.run && r.run.split("/").pop();
+  if (latest && r.runs.some(x => x.id === latest)) openRun(latest);
   if (matchMedia("(max-width: 760px)").matches) $("detail").scrollIntoView({ behavior: "smooth" });
 }
+
+$("zoom").addEventListener("click", () => $("zoom").close());
 
 let pending;
 function soon() { clearTimeout(pending); pending = setTimeout(refresh, 300); }
@@ -207,6 +336,7 @@ function connect() {
   es.onmessage = m => {
     let e; try { e = JSON.parse(m.data); } catch (_) { return; }
     if (String(e.session) === selected) {
+      if (review) openRun(review.id);
       events.push(e);
       const tl = $("timeline");
       if (tl) tl.prepend(eventItem(e, true));

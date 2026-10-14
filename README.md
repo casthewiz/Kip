@@ -76,8 +76,16 @@ dashboard at <http://127.0.0.1:7377> (`KIP_DASHBOARD_PORT` to move it,
 `KIP_DASHBOARD=0` to never start it), which exits after 30 idle minutes. It
 lists sessions with the stage each is in (decompose, implement, tidy, review,
 receipts), how many stops in a row the gate blocked, and its run's open
-reasons, and streams each session's timeline as it happens. Run it yourself
-with `receipt.py serve`.
+reasons, and streams each session's timeline as it happens. A session's page
+splits what it touched into segments: **Issues** (the Linear or Jira issue its
+runs publish to, and issue keys its Linear, Jira or Atlassian MCP calls named),
+**Sinks** (where each run's receipts go, linked once published), **Sources** (MCP
+servers it called, web searches, URLs its tools fetched, links in prompts), and
+**Receipts**: every run the session touched, each opening a review panel with
+every claim's verdict, its evidence (command, exit, excerpt, commit, log and
+patch), and its screenshots and videos inline. The dashboard serves only files a
+run recorded, and only while their hashes still match. Run it yourself with
+`receipt.py serve`.
 
 Skills are always also linked into `~/.kip/skills/`, a host-neutral path
 that skills use to call their own scripts. Claude Code gets the rules as an

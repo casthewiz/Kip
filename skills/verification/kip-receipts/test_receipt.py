@@ -846,6 +846,83 @@ print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, 
         shutil.copytree(legacy, lazy, ignore=shutil.ignore_patterns("kip.db*"))
         assert rc("path", extra_env={"KIP_RECEIPTS_DIR": str(lazy)}) == str(lazy / "demo" / conc.name), \
             "the first open didn't import, or the gate's branch lookup misses the imported run"
+
+        # The dashboard's segments: every run a session touched (here, across two branches), the issues its runs
+        # publish to and its tracker calls name, the outside sources it read; and each run's review panel, whose
+        # files are served only if the run recorded them and they haven't changed since.
+        seg = {"KIP_RECEIPTS_DIR": str(Path(tmp, "segments"))}
+        sh("git", "checkout", "-q", "-b", "seg-a")
+        first = Path(rc("init", "--sink", "linear", "--issue", "ENG-9", extra_env=seg))
+        rc("claim", "the page renders", "--provider", "frontend", extra_env=seg)
+        rc("run", "c1", "--label", "smoke", "--", "true", extra_env=seg)
+        shot, clip = Path(tmp, "shot.png"), Path(tmp, "clip.webm")
+        shot.write_bytes(b"\x89PNG fake")
+        clip.write_bytes(bytes(range(256)) * 4)
+        rc("attach", "c1", str(shot), extra_env=seg)
+        rc("attach", "c1", str(clip), extra_env=seg)
+        sid = {"session_id": "seg1", "cwd": str(repo)}
+        check("--hook", "start", event=sid, extra_env=seg)
+        sh("git", "checkout", "-q", "-b", "seg-b")
+        second = Path(rc("init", extra_env=seg))
+        check("--hook", "stop", event=sid, extra_env=seg)
+        calls = [("mcp__linear__get_issue", {"id": "ENG-42"}), ("mcp__linear__get_issue", {"id": "ENG-42"}),
+                 ("mcp__claude_ai_Atlassian__getJiraIssue", {"cloudId": "c-1", "issueIdOrKey": "PROJ-7"}),
+                 ("mcp__github__get_issue", {"title": "FOO-1 is not a tracker key"}),
+                 ("WebSearch", {"query": "UTF-8 decode error"}), ("WebFetch", {"url": "https://docs.test/a"}),
+                 ("Bash", {"command": "curl -s https://api.test/v1 | jq ."}), ("Read", {"file_path": "app.py"}),
+                 ("Bash", {"command": "curl http://127.0.0.1:7377/api/sessions"})]
+        for name, tool_input in calls:
+            check("--hook", "tool", event={**sid, "tool_name": name, "tool_input": tool_input}, extra_env=seg)
+        check("--hook", "prompt", event={**sid, "prompt": "fix it, see https://linear.test/ENG-42."}, extra_env=seg)
+        sh("git", "checkout", "-q", "-")
+        sh("git", "checkout", "-q", "-")
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env={**env, **seg},
+                                  stdout=subprocess.PIPE, text=True)
+        server.stdout.readline()
+        try:
+            row = next(r for r in json.loads(get(port, "/api/sessions")) if r["session"] == "seg1")
+            assert [x["id"] for x in row["runs"]] == [first.name, second.name], row["runs"]
+            assert row["runs"][0]["sinks"] == [{"name": "local", "url": None}, {"name": "linear", "url": None}] and \
+                row["runs"][0]["issue"] == "ENG-9" and row["runs"][0]["claims"] == {"✅ verified": 1}, row["runs"][0]
+            assert sorted((i["key"], i["via"]) for i in row["issues"]) == \
+                [("ENG-42", "linear"), ("ENG-9", "linear"), ("PROJ-7", "claude_ai_Atlassian")], row["issues"]
+            assert sorted((s["kind"], s["name"], s["count"]) for s in row["sources"]) == [
+                ("link", "https://linear.test/ENG-42", 1), ("mcp", "claude_ai_Atlassian", 1), ("mcp", "github", 1),
+                ("mcp", "linear", 2), ("search", "UTF-8 decode error", 1), ("web", "https://api.test/v1", 1),
+                ("web", "https://docs.test/a", 1)], row["sources"]
+            detail = json.loads(get(port, f"/api/runs/{first.name}"))
+            c1 = detail["claims"][0]
+            assert c1["verdict"] == "✅ verified" and c1["provider"] == "frontend", c1
+            assert c1["evidence"][0]["label"] == "smoke" and c1["evidence"][0]["passed"] is True, c1["evidence"]
+            assert c1["evidence"][0]["log"].startswith(f"/runs/{first.name}/files/"), c1["evidence"]
+            assert [(f["type"], f["name"]) for f in c1["files"]] == [("image", "c1f1-shot.png"), ("video", "c1f2-clip.webm")]
+
+            def fetch(path, **headers):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return r.status, dict(r.headers), r.read()
+                except urllib.error.HTTPError as err:
+                    return err.code, dict(err.headers), b""
+
+            image, video = (f["url"] for f in c1["files"])
+            assert fetch(image)[0::2] == (200, shot.read_bytes()) and fetch(image)[1]["Content-Type"] == "image/png"
+            status, headers, body = fetch(video, Range="bytes=10-19")
+            assert (status, body, headers["Content-Range"]) == (206, clip.read_bytes()[10:20], "bytes 10-19/1024"), headers
+            assert fetch(video, Range="bytes=-4")[2] == clip.read_bytes()[-4:]
+            assert fetch(video, Range="bytes=5000-")[0] == 416
+            log = fetch(c1["evidence"][0]["log"])
+            assert log[0] == 200 and log[1]["Content-Type"].startswith("text/plain"), log[:2]
+            for path in (f"/runs/{first.name}/files/nope.png", f"/runs/{first.name}/files/..%2F..%2Fkip.db",
+                         f"/runs/{first.name}/files/../../../kip.db", f"/runs/nope/files/c1f1-shot.png",
+                         "/api/runs/nope"):
+                assert fetch(path)[0] == 404, path
+            with open(first / "files" / "c1f1-shot.png", "ab") as f:
+                f.write(b"tampered")
+            assert fetch(image)[0] == 404, "served a file that changed after it was recorded"
+        finally:
+            server.terminate()
     print("receipt.py: all checks passed")
 
 
