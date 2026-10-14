@@ -106,6 +106,12 @@ def repo_name():
     return Path(top).name if top else Path.cwd().name
 
 
+def github_url():
+    """This checkout's GitHub page, from its origin remote; None when it isn't on GitHub."""
+    m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", git("remote", "get-url", "origin") or "")
+    return m and f"https://github.com/{m[1]}"
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -1015,7 +1021,7 @@ def log_prompt(hook):
 def log_gate(event, hook, blocked, msg):
     try:
         d = branch_run()
-        append_event(hook, hook=event, repo=repo_name(), branch=git("branch", "--show-current"),
+        append_event(hook, hook=event, repo=repo_name(), github=github_url(), branch=git("branch", "--show-current"),
                      run=str(d) if d else None, blocked=blocked, message=msg)
     except Exception:
         pass
@@ -1045,9 +1051,9 @@ def fold(rows, e):
     if not (isinstance(e, dict) and e.get("session") and e.get("at")):
         return None
     sid = str(e["session"])
-    r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "branch": None, "run": None,
+    r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
                               "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None})
-    r.update({k: e[k] for k in ("host", "repo", "branch", "run") if e.get(k)}, last=e["at"])
+    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"])
     if e.get("hook") == "tool":
         tool, what = str(e.get("tool")), str(e.get("input") or "")
         r["tool"] = f"{tool}: {what}" if what else tool
