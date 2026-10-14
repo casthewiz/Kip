@@ -6,9 +6,12 @@
   kip.py install [--host NAME] [--project] [--conversation | --no-conversation]
                                         link skills (and rules, and hooks) into each host,
                                         and this repo at ~/.kip/kip; idempotent. The flag saves
-                                        whether the session log keeps prompts and replies
+                                        whether the session log keeps prompts and replies. A user
+                                        install also runs the dashboard as a login service
+                                        (launchd or systemd) from a copy at ~/.kip/dashboard, which
+                                        re-running install refreshes; KIP_DASHBOARD=0 skips it
   kip.py uninstall [--host NAME] [--project]
-                                        undo install: Kip's links, rules, and hooks; the user's own stay
+                                        undo install: Kip's links, rules, hooks, and service; the user's own stay
 
 Config layers, later wins: defaults.json next to this file, then
 $KIP_HOME/config.json (default ~/.kip), then <repo>/.kip/config.json. Dicts
@@ -23,6 +26,7 @@ Standard library only, Python 3.8+.
 import argparse
 import json
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -35,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
+APP = KIP_HOME / "dashboard"  # the copy the service runs: macOS stalls a login agent reading ~/Documents and the like
 SURFACES = ("hosts", "connectors", "evidence", "destinations")
 CONNECTOR_KINDS = ("mcp", "tool")
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
@@ -319,6 +324,61 @@ def save_conversation(path, on):
     print(f"dashboard: prompts and replies {'kept' if on else 'not kept'} ({path})")
 
 
+def service(platform=sys.platform):
+    """The dashboard as a login service the OS keeps running: its file, that file's text, and the commands
+    that load and unload it; None where there's no service manager (a session's start hook still launches it)."""
+    serve = [sys.executable, str(APP / RECEIPT.relative_to(ROOT)), "serve", "--idle", "0"]
+    if os.environ.get("KIP_DASHBOARD_PORT"):  # the port a session's start hook will look for
+        serve += ["--port", os.environ["KIP_DASHBOARD_PORT"]]
+    if platform == "darwin":
+        label, path = "com.kip.dashboard", Path.home() / "Library" / "LaunchAgents" / "com.kip.dashboard.plist"
+        text = plistlib.dumps({"Label": label, "ProgramArguments": serve, "RunAtLoad": True, "KeepAlive": True})
+        domain = f"gui/{os.getuid()}"
+        return path, text.decode(), [["launchctl", "bootstrap", domain, str(path)]], \
+            [["launchctl", "bootout", f"{domain}/{label}"]]
+    if platform.startswith("linux"):
+        path = Path.home() / ".config" / "systemd" / "user" / "kip-dashboard.service"
+        text = (f"[Unit]\nDescription=Kip dashboard\n\n[Service]\nExecStart={shlex.join(serve)}\nRestart=always\n\n"
+                "[Install]\nWantedBy=default.target\n")
+        ctl = ["systemctl", "--user"]
+        return path, text, [ctl + ["daemon-reload"], ctl + ["enable", "--now", path.name]], \
+            [ctl + ["disable", "--now", path.name]]
+    return None
+
+
+def run_quiet(cmds):
+    """Run each command; the first failure's message, or None."""
+    for cmd in cmds:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            return (r.stderr or r.stdout).strip() or f"{cmd[0]} exited {r.returncode}"
+
+
+def install_service():
+    s = service()
+    if not s or os.environ.get("KIP_DASHBOARD") == "0":
+        return
+    path, text, load, unload = s
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        run_quiet(unload)  # reload, so a changed copy, file, or python takes effect
+    shutil.rmtree(APP, ignore_errors=True)
+    shutil.copytree(ROOT, APP, ignore=shutil.ignore_patterns(".git", ".claude", "__pycache__", "node_modules"))
+    path.write_text(text)
+    err = run_quiet(load)
+    print(f"dashboard\n  service: {path}" + (f" (not started: {err})" if err else ""))
+
+
+def uninstall_service():
+    s = service()
+    if not s or not s[0].exists():
+        return
+    run_quiet(s[3])
+    s[0].unlink()
+    shutil.rmtree(APP, ignore_errors=True)
+    print(f"dashboard\n  service: removed {s[0]}")
+
+
 def cmd_install(a):
     selected, top = hosts(a)
     if a.conversation is not None:
@@ -342,6 +402,8 @@ def cmd_install(a):
             install_rules(h["rules"])
         if h.get("hooks"):
             install_hooks(h["hooks"], where(h["hooks"], "settings", top))
+    if not a.project:
+        install_service()
     print_receipts("--migrate")
 
 
@@ -408,6 +470,8 @@ def cmd_uninstall(a):
             uninstall_hooks(h["hooks"], where(h["hooks"], "settings", top))
     if not a.project and (KIP_HOME / "kip").is_symlink():
         (KIP_HOME / "kip").unlink()
+    if not a.project:
+        uninstall_service()
     print_receipts(prefix="kept: ")
 
 
