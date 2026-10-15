@@ -1,0 +1,60 @@
+# Install
+
+```bash
+git clone https://github.com/casthewiz/Kip.git ~/Documents/GitHub/Kip
+python3 ~/Documents/GitHub/Kip/kip.py install
+```
+
+Or ask your agent to do it, in Claude Code or Cursor:
+
+> Clone https://github.com/casthewiz/Kip.git to ~/Documents/GitHub/Kip, run
+> `python3 kip.py install`, then `python3 kip.py doctor` and tell me what
+> it reports.
+
+Approve the edit to your agent's settings when asked (that's the hooks),
+and paste the rules yourself if `install` says to. Then start a new
+session: skills, rules, and hooks load at session start.
+
+## What `install` does
+
+`install` links every skill (any folder with a `SKILL.md`, however deeply
+nested; names must be unique) into each **host** it detects, wires up the always-on
+[rules](../rules/user-rules.md) (lazy senior developer, claims and evidence,
+implementation workflow), adds the [receipts gate](receipts.md#the-gate) to each
+host's hooks, starts the [dashboard](dashboard.md), and links the repo at
+`~/.kip/kip`. Links mean a `git pull` updates every host; re-run `install` after
+adding or moving a skill (links to moved skills are pruned). Options:
+
+- `--host cursor`: install for one host, even if it isn't detected.
+- `--project`: link into this repo's `.claude/skills/`, `.cursor/skills/`
+  instead of your user folders.
+- `--no-conversation` / `--conversation`: whether the
+  [session log](dashboard.md#session-log) keeps prompts and replies.
+
+`python3 kip.py uninstall` (same options) undoes all of it: Kip's links,
+rules, and hooks go, and your own settings, rules, and hooks stay.
+
+## Per host
+
+Skills are always also linked into `~/.kip/skills/`, a host-neutral path
+that skills use to call their own scripts. Claude Code gets the rules as an
+`@` import in `~/.claude/CLAUDE.md`. Cursor keeps User Rules in its state
+database, so `install` writes them there between `kip rules` markers,
+keeping your own rules, and you restart Cursor to load them. Cursor holds a
+copy rather than an import, so re-run `install` after pulling; `doctor` says
+when it's stale. If the database isn't found, `install` prints what to paste.
+
+## Adding a skill
+
+Each skill is a folder with a `SKILL.md` (YAML frontmatter + instructions),
+the format both Claude Code and Cursor load. Supporting files live inside the
+skill's folder (e.g. [kip-receipts/providers](../skills/verification/kip-receipts/providers/)).
+Skills can be grouped into category folders like `implementation/`; the
+install step flattens them, so skill names must be unique across categories.
+
+## Verify
+
+Start a new session in either tool and ask what skills are available, or
+invoke one directly (`/kip-ponytail`, `/kip-receipts`). Skills load at session start,
+so restart any session that was open during install. `python3 kip.py doctor`
+shows what each [surface](configuration.md) needs and whether it's here.

@@ -18,7 +18,7 @@ $KIP_HOME/config.json (default ~/.kip), then <repo>/.kip/config.json. Dicts
 merge, anything else replaces, null deletes. A `doc` path is relative to the
 file that sets it. Surface kinds are hosts, connectors, evidence and
 destinations, plus `workflow` (stages a PR needs claims for) and `dashboard`
-(`conversation`: whether the session log keeps prompts and replies); see the README
+(`conversation`: whether the session log keeps prompts and replies); see docs/configuration.md
 for the schema.
 
 Standard library only, Python 3.8+.
