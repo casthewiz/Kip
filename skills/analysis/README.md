@@ -17,5 +17,5 @@ Effort sets depth:
 | --- | --- |
 | [kip-decompose](kip-decompose/SKILL.md) | Understand a problem statement and break it into units of work |
 
-Add more as `analysis/<name>/SKILL.md`; the install loop in the root README
+Add more as `analysis/<name>/SKILL.md`; `kip.py install` (see docs/install.md)
 picks them up automatically.
