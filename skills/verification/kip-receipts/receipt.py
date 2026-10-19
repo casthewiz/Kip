@@ -16,6 +16,7 @@
   receipt.py publish [--sink NAME --issue KEY]              upload files and upsert the comment on each sink,
                                                             optionally opting the run into another sink first
   receipt.py record --sink NAME --url URL [--comment-id ID] record a comment the agent posted (agent-backed sinks)
+  receipt.py record --sink NAME --file PATH --url URL       record a file the agent uploaded itself (e.g. github, by browser)
   receipt.py path                                           print the run dir (its logs, patches, specs)
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
@@ -587,7 +588,7 @@ def has_units(rec):
     return any(c.get("unit") for c in rec["claims"])
 
 
-def render_markdown(rec, sink=None):
+def render_markdown(rec, sink=None, bare_video=False):
     def cell(s):
         return str(s).replace("|", "\\|").replace("\n", " ")
 
@@ -616,6 +617,8 @@ def render_markdown(rec, sink=None):
             url = f["uploads"].get(sink)
             if url and f["type"] == "image":
                 out += ["", f"![{name}]({url})"]
+            elif url and f["type"] == "video" and bare_video:  # alone on a line, GitHub renders a player
+                out += ["", url]
             elif url:
                 out += ["", f"[{f['type']}: {name}]({url})"]
             else:
@@ -665,7 +668,7 @@ def render_github(rec, sink=None):
     """Markdown plus a hidden line CI reads (`check --pr`): the run and what blocks a PR."""
     gate = json.dumps({"run": rec["id"], "head": rec.get("head"), "blocking": blocking(rec, pr=True)},
                       ensure_ascii=False)
-    return render_markdown(rec, sink) + "\n\n<!-- kip-gate " + gate.replace(">", "\\u003e") + " -->"
+    return render_markdown(rec, sink, bare_video=True) + "\n\n<!-- kip-gate " + gate.replace(">", "\\u003e") + " -->"
 
 
 RENDERERS = {"markdown": render_markdown, "jira": render_jira, "github": render_github}
@@ -742,6 +745,10 @@ def cmd_publish(a):
         with mutate(d) as fresh:
             fresh["published"][name] = rec["published"][name] = {"comment_id": comment_id, "url": url}
         print(f"{name}: {'updated' if prior else 'posted'} {url}")
+        pending = [f["path"] for c in rec["claims"] for f in c["files"] if not f["uploads"].get(name)]
+        if pending:
+            print(f"{name}: not uploaded: {', '.join(pending)}; upload each yourself, "
+                  f"`receipt.py record --sink {name} --file PATH --url URL`, then publish again")
     if not [s for s in rec["sinks"] if s != "local"]:
         print(f"local only: {d}")
     if failed:
@@ -752,8 +759,14 @@ def cmd_record(a):
     with mutate(run_dir(a)) as rec:
         if a.sink not in rec["sinks"]:
             sys.exit(f"{a.sink} isn't one of this run's sinks: {', '.join(rec['sinks'])}")
-        prior = rec["published"].get(a.sink, {}).get("comment_id")
-        rec["published"][a.sink] = {"comment_id": a.comment_id or prior or a.url, "url": a.url}
+        if a.file:
+            f = next((f for c in rec["claims"] for f in c["files"] if a.file in (f["path"], Path(f["path"]).name)), None)
+            if f is None:
+                sys.exit(f"no file {a.file} in this run")
+            f["uploads"][a.sink] = a.url
+        else:
+            prior = rec["published"].get(a.sink, {}).get("comment_id")
+            rec["published"][a.sink] = {"comment_id": a.comment_id or prior or a.url, "url": a.url}
     print(f"{a.sink}: recorded {a.url}")
 
 
@@ -1457,6 +1470,7 @@ def main():
     s.add_argument("--sink", required=True)
     s.add_argument("--url", required=True)
     s.add_argument("--comment-id", help="the comment's id, so the next publish updates it (default: the url)")
+    s.add_argument("--file", help="a run file (files/NAME or NAME) the agent uploaded itself; --url is its reference")
     s.set_defaults(fn=cmd_record)
 
     s = sub.add_parser("path", parents=[common])

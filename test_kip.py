@@ -91,7 +91,7 @@ def main():
         assert "cursor: skipped, missing ~/.cursor" in out, out
         for d in (home / ".kip" / "skills", home / ".claude" / "skills"):
             assert sorted(p.name for p in d.iterdir()) == skills, d
-            assert all(p.is_symlink() and p.resolve().parent.parent.parent == ROOT for p in d.iterdir())
+            assert all(p.is_symlink() and ROOT in p.resolve().parents for p in d.iterdir())
         assert (home / ".kip" / "kip").resolve() == ROOT
         claude_md = home / ".claude" / "CLAUDE.md"
         assert claude_md.read_text() == f"@{RULES}\n", claude_md.read_text()

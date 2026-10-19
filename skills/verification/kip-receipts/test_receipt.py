@@ -553,6 +553,21 @@ def main():
         out = rc("check", "--pr", "7", ok=False, extra_env=ghenv)
         assert "c3 ❌ refuted: Fixed: app.py crashes on empty input" in out, out
 
+        # GitHub has no upload API: publish names the files the agent uploads by browser and records
+        # (kip-receipts-github); then the ledger embeds the image and puts the video alone on a line.
+        for name in ("shot.png", "demo.mp4"):
+            Path(tmp, name).write_bytes(b"x")
+            rc("attach", "c3", str(Path(tmp, name)))
+        out = rc("publish", extra_env=ghenv)
+        assert "github: not uploaded: files/c3f1-shot.png, files/c3f2-demo.mp4" in out, out
+        assert "no file nope.png" in rc("record", "--sink", "github", "--file", "nope.png", "--url", "u", ok=False)
+        img, vid = (f"https://github.com/user-attachments/assets/{n}" for n in ("img1", "vid1"))
+        rc("record", "--sink", "github", "--file", "c3f1-shot.png", "--url", img)
+        rc("record", "--sink", "github", "--file", "files/c3f2-demo.mp4", "--url", vid)
+        assert "not uploaded" not in rc("publish", extra_env=ghenv)
+        pr_body = body.read_text()
+        assert f"![c3f1-shot.png]({img})" in pr_body and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
+
         # Stages come from config, fixed into the run at init: a project that drops them doesn't need them.
         (repo / ".kip" / "config.json").write_text(json.dumps({**PROJECT_CONFIG, "workflow": {"stages": []}}))
         rc("init")

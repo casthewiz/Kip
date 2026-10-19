@@ -2,7 +2,8 @@
 
 Settings: none; uses the `gh` CLI's own login (`gh auth status`), in the current repo.
 Issue key: the pull request number. Editing the body fires `pull_request: edited`, so the
-Kip action (`check --pr`) re-checks the PR. Files aren't uploaded; the ledger lists them.
+Kip action (`check --pr`) re-checks the PR. GitHub has no attachment API, so `upload` leaves
+files to the agent's browser and `receipt.py record --file` (skill kip-receipts-github).
 """
 import json
 import re
