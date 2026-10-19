@@ -323,7 +323,7 @@ sites), each with its own settings.
 | local | The run in `~/.kip/receipts/kip.db`, files under `~/.kip/receipts/<repo>/<run-id>/` | nothing |
 | [linear](sinks/linear.py) | Issue comment with the ledger; images embedded, videos and logs linked | `LINEAR_API_KEY` |
 | [jira](sinks/jira.py) | Issue comment in Jira markup; files as attachments, images as thumbnails | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
-| [github](sinks/github.py) | A marked block in the pull request's body (the issue is the PR number), with a hidden line CI checks; images and videos uploaded through the browser ([kip-receipts-github](kip-receipts-github/SKILL.md)) | `gh` logged in |
+| [github](sinks/github.py) | A marked block in the pull request's body (the issue is the PR number), with a hidden line CI checks; images and videos uploaded by the agent's browser, whatever the host ([kip-receipts-github](kip-receipts-github/SKILL.md)) | `gh` logged in |
 
 `receipt.py publish` is the same for every sink: upload each file once, post
 `render` output verbatim (never a rewrite), and update the run's existing

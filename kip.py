@@ -9,15 +9,19 @@
                                         whether the session log keeps prompts and replies. A user
                                         install also runs the dashboard as a login service
                                         (launchd or systemd) from a copy at ~/.kip/dashboard, which
-                                        re-running install refreshes; KIP_DASHBOARD=0 skips it
+                                        re-running install refreshes; KIP_DASHBOARD=0 skips it. A user
+                                        install also adds git hooks to this repo that re-run it after a
+                                        commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them
+  kip.py setup [--skip NAME]           one-time steps a person does (sign-ins, downloads) that aren't
+                                        done yet, and how; sessions are reminded of them until done or skipped
   kip.py uninstall [--host NAME] [--project]
                                         undo install: Kip's links, rules, hooks, and service; the user's own stay
 
 Config layers, later wins: defaults.json next to this file, then
 $KIP_HOME/config.json (default ~/.kip), then <repo>/.kip/config.json. Dicts
 merge, anything else replaces, null deletes. A `doc` path is relative to the
-file that sets it. Surface kinds are hosts, connectors, evidence and
-destinations, plus `workflow` (stages a PR needs claims for) and `dashboard`
+file that sets it. Surface kinds are hosts, connectors, evidence,
+destinations and setup, plus `workflow` (stages a PR needs claims for) and `dashboard`
 (`conversation`: whether the session log keeps prompts and replies); see docs/configuration.md
 for the schema.
 
@@ -40,7 +44,9 @@ KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
 APP = KIP_HOME / "dashboard"  # the copy the service runs: macOS stalls a login agent reading ~/Documents and the like
-SURFACES = ("hosts", "connectors", "evidence", "destinations")
+GIT_HOOKS = ("post-commit", "post-merge", "post-checkout", "post-rewrite")
+GIT_HOOK = f"#!/bin/sh\n# kip: re-sync every host after this repo changes\npython3 {shlex.quote(str(ROOT / 'kip.py'))} install >/dev/null 2>&1\nexit 0\n"
+SURFACES = ("hosts", "connectors", "evidence", "destinations", "setup")
 CONNECTOR_KINDS = ("mcp", "tool")
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 
@@ -104,6 +110,9 @@ def validate(cfg):
     for name, e in cfg["evidence"].items():
         if e.get("fallback") and e["fallback"] not in cfg["evidence"]:
             sys.exit(f"evidence.{name}: fallback {e['fallback']} isn't an evidence surface")
+    for name, e in cfg["setup"].items():
+        if not (e.get("about") and e.get("run") and e.get("requires")):
+            sys.exit(f"setup.{name} needs about, run, and requires (how to tell it's done)")
     stages = cfg.get("workflow", {}).get("stages", [])
     if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
         sys.exit("workflow.stages must be a list of stage names")
@@ -165,10 +174,29 @@ def cmd_doctor(a):
                 s += " · hooks " + ("installed" if hooks_installed(entry["hooks"]) else "not installed (run install)")
             elif kind == "hosts" and entry.get("rules"):
                 s += " · rules only, no hooks"
+            if kind == "setup" and s != "ready":
+                s += f" → {entry['run']}"
             if kind == "hosts" and rules_db(entry.get("rules", {})):
                 s += " · rules " + rules_copy_status(entry["rules"])
             print(f"  {name:14} {s}")
     print_receipts()
+
+
+def pending_setup():
+    """The setup steps not done yet: (name, entry)."""
+    return [(n, e) for n, e in load()["setup"].items() if missing(e)]
+
+
+def cmd_setup(a):
+    if a.skip:
+        path = KIP_HOME / "config.json"
+        layer = json.loads(path.read_text()) if path.is_file() else {}
+        layer.setdefault("setup", {})[a.skip] = None  # null deletes it from the merged config
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(layer, indent=2) + "\n")
+        return print(f"setup: skipped {a.skip} ({path})")
+    for name, e in pending_setup():
+        print(f"{name}: {e['about']}\n  {e['run']}")
 
 
 def skills():
@@ -369,6 +397,39 @@ def install_service():
     print(f"dashboard\n  service: {path}" + (f" (not started: {err})" if err else ""))
 
 
+def git_hooks_dir():
+    """This repo's hooks folder, or None when it isn't a git checkout or KIP_GIT_HOOKS=0."""
+    if os.environ.get("KIP_GIT_HOOKS") == "0":
+        return None
+    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--git-path", "hooks"], capture_output=True, text=True)
+    return None if r.returncode else ROOT / r.stdout.strip()
+
+
+def install_git_hooks(d):
+    """Re-run install whenever the repo changes, so the copies (Cursor's rules, the dashboard) and links stay current."""
+    d.mkdir(parents=True, exist_ok=True)
+    print("git hooks")
+    written = []
+    for name in GIT_HOOKS:
+        p = d / name
+        if p.exists() and "# kip:" not in p.read_text():
+            print(f"  skipped {p}: not Kip's")
+            continue
+        p.write_text(GIT_HOOK)
+        p.chmod(0o755)
+        written.append(name)
+    if written:
+        print(f"  {', '.join(written)} in {d} re-run install")
+
+
+def uninstall_git_hooks(d):
+    gone = [p for p in (d / n for n in GIT_HOOKS) if p.exists() and "# kip:" in p.read_text()]
+    for p in gone:
+        p.unlink()
+    if gone:
+        print(f"git hooks\n  removed from {d}")
+
+
 def uninstall_service():
     s = service()
     if not s or not s[0].exists():
@@ -404,6 +465,8 @@ def cmd_install(a):
             install_hooks(h["hooks"], where(h["hooks"], "settings", top))
     if not a.project:
         install_service()
+        if git_hooks_dir():
+            install_git_hooks(git_hooks_dir())
     print_receipts("--migrate")
 
 
@@ -472,6 +535,8 @@ def cmd_uninstall(a):
         (KIP_HOME / "kip").unlink()
     if not a.project:
         uninstall_service()
+        if git_hooks_dir():
+            uninstall_git_hooks(git_hooks_dir())
     print_receipts(prefix="kept: ")
 
 
@@ -480,6 +545,9 @@ def main():
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("config").set_defaults(fn=cmd_config)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
+    s = sub.add_parser("setup")
+    s.add_argument("--skip", metavar="NAME", help="never remind about this step again (saved to config)")
+    s.set_defaults(fn=cmd_setup)
     for name, fn, verb in (("install", cmd_install, "link into"), ("uninstall", cmd_uninstall, "unlink from")):
         s = sub.add_parser(name)
         s.add_argument("--host", action="append", default=[], help="only this host, even if it isn't detected")

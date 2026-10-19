@@ -22,8 +22,12 @@ nested; names must be unique) into each **host** it detects, wires up the always
 [rules](../rules/user-rules.md) (lazy senior developer, claims and evidence,
 implementation workflow), adds the [receipts gate](receipts.md#the-gate) to each
 host's hooks, starts the [dashboard](dashboard.md), and links the repo at
-`~/.kip/kip`. Links mean a `git pull` updates every host; re-run `install` after
-adding or moving a skill (links to moved skills are pruned). Options:
+`~/.kip/kip`. Links mean a `git pull` updates every host. For what links can't
+reach (new or moved skills, Cursor's copy of the rules, the dashboard's copy),
+`install` also adds git hooks to the Kip repo that re-run it after every commit,
+pull, branch switch, and rebase, so you never re-run it by hand; uncommitted
+edits sync at the next commit. `KIP_GIT_HOOKS=0` skips them, and a hook that
+isn't Kip's is left alone. Options:
 
 - `--host cursor`: install for one host, even if it isn't detected.
 - `--project`: link into this repo's `.claude/skills/`, `.cursor/skills/`
@@ -41,7 +45,7 @@ that skills use to call their own scripts. Claude Code gets the rules as an
 `@` import in `~/.claude/CLAUDE.md`. Cursor keeps User Rules in its state
 database, so `install` writes them there between `kip rules` markers,
 keeping your own rules, and you restart Cursor to load them. Cursor holds a
-copy rather than an import, so re-run `install` after pulling; `doctor` says
+copy rather than an import; the git hooks keep it current, and `doctor` says
 when it's stale. If the database isn't found, `install` prints what to paste.
 
 ## Adding a skill

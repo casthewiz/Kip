@@ -932,8 +932,20 @@ def unplanned(event, hook):
     return False, "check: no receipt run for this branch"
 
 
+def setup_reminder():
+    """One-time setup a person still has to do, for the agent to offer."""
+    return "\n".join(f"kip setup: `{n}` isn't done ({e['about']}). Offer it to the user once; they run `{e['run']}` "
+                   f"themselves. If they don't want it, `python3 ~/.kip/kip/kip.py setup --skip {n}` "
+                   "stops this reminder." for n, e in kip.pending_setup())
+
+
 def session_start(hook):
-    """Remember the code as the session found it (once per session), and say where this branch's run stands."""
+    """Remember the code as the session found it (once per session), say where this branch's run stands,
+    and what setup is left."""
+    return "\n".join(filter(None, [run_status(hook), setup_reminder()]))
+
+
+def run_status(hook):
     if not git("rev-parse", "--show-toplevel"):
         return ""
     if session_id(hook) and not session_start_state(hook):

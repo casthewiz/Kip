@@ -82,6 +82,8 @@ def main():
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "KIP_DASHBOARD": "0"}
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
             env.pop(v, None)
+        Path(tmp, "home").mkdir()
+        Path(tmp, "home", "config.json").write_text('{"setup": null}')  # this machine's setup isn't the test's
 
         def sh(*args, ok=True, extra_env=None, cwd=repo):
             r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
@@ -274,6 +276,13 @@ def main():
         # A session starts knowing where this branch's run stands.
         code, out = check("--hook", "start", event={"session_id": "s0", "cwd": str(repo)}, cwd=tmp)
         assert code == 0 and "has run" in out and "c1 ⚠️ unverified: app prints hi!" in out, out
+        # ...and is reminded of setup a person still has to do, with how to skip it.
+        Path(tmp, "home2").mkdir()
+        Path(tmp, "home2", "config.json").write_text(json.dumps(
+            {"setup": {"demo": {"about": "a demo step", "requires": {"file": [str(Path(tmp, "nope"))]}, "run": "do-it"}}}))
+        out = check("--hook", "start", event={"session_id": "s0s", "cwd": str(repo)}, cwd=tmp,
+                    extra_env={"KIP_HOME": str(Path(tmp, "home2"))})[1]
+        assert "kip setup: `demo` isn't done (a demo step)" in out and "run `do-it`" in out and "--skip demo" in out, out
         code, out = check("--hook", "start", event={"session_id": "s0c", "workspace_roots": [str(repo)]}, cwd=tmp)
         assert "c1 ⚠️ unverified" in json.loads(out)["additional_context"], out
         # Cursor's events carry workspace_roots: same gate, answered in JSON. Stop asks for one follow-up.
