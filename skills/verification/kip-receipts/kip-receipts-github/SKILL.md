@@ -31,24 +31,33 @@ through the user's browser, and `receipt.py` only records where they landed.
    link), and the `file_upload` tool takes at most 10 MB per call. For a
    bigger or other video, make an MP4 under 10 MB (`ffmpeg -i in -vf scale=1280:-2
    -crf 28 out.mp4`), `receipt.py attach` it to the same claim, and upload that.
+   `file_upload` only reads this session's folders, and the run dir
+   (`~/.kip/receipts/…`) usually isn't one: copy each file into the scratchpad
+   or working directory first and upload the copy.
 3. In Claude in Chrome (load its tools first, with `file_upload` and
    `javascript_tool`): open `https://github.com/<owner>/<repo>/pull/<PR>`. If
    it shows a sign-in page, stop and ask the user to sign in; never type
    credentials.
 4. Find the new-comment box's file input (`find` "file input" or "Attach
    files", or see Selectors). Never click it: that opens a native picker you
-   can't use. Call `file_upload` with its `ref` and the file's absolute path.
-5. Wait until the textarea holds the URL instead of `Uploading…` (a few
-   seconds; longer for video), then read the textarea's value. An image
-   arrives as `![name](https://github.com/user-attachments/assets/<id>)`, a
-   video as the bare URL. Take the URL.
+   can't use. Call `file_upload` with its `ref` and the copy's absolute path.
+5. Poll the textarea's value with `javascript_tool` until it holds the URL
+   instead of `Uploading…` (a few seconds; longer for video). An image
+   arrives as `<img width=… alt=… src="https://github.com/user-attachments/assets/<id>" />`,
+   a video as the bare URL. Take the URL.
 6. `receipt.py record --sink github --file <files/NAME> --url <URL>`.
-7. Clear the textarea (select all, delete) and **never submit the comment**:
+7. Clear the textarea (`javascript_tool`: set its value to `''` and dispatch
+   an `input` event) and **never submit the comment**:
    the ledger lives in the PR body, and a posted comment would duplicate it.
    The upload alone doesn't post anything.
 8. When every file is recorded, `receipt.py publish` again. `render --sink
    github` shows the result: images as `![…](…)`, videos alone on a line,
    which GitHub renders as a player.
+9. Check it: reload the PR and confirm the `<img>` for the URL has a
+   `naturalWidth` above 0 (GitHub swaps the src for a signed
+   `private-user-images.githubusercontent.com` URL). Don't test the URL with
+   `curl` or a page `fetch`: anonymous requests get 404 even on a public repo,
+   and the page's fetch fails on the cross-origin redirect.
 
 If Chrome isn't connected or the user declines, leave the files "not
 uploaded" (the ledger names each with its hash) and say so. Don't host them
@@ -61,12 +70,15 @@ What step 4 and 5 rely on. GitHub changes its markup, so these are hints;
 
 | Thing | Last seen as |
 |---|---|
-| Comment textarea | `textarea[name="comment[body]"]`, or a textarea labeled "Add a comment" / "Markdown value" |
-| File input | `input[type=file]` inside the comment form, near "Paste, drop, or click to add files" |
-| Upload placeholder | `![Uploading <name>…]()` in the textarea until done |
-| Uploaded URL | `https://github.com/user-attachments/assets/<uuid>` |
+| Comment textarea | `#new_comment_field` (`textarea[name="comment[body]"]`) |
+| File input | `#fc-new_comment_field` in `form#new_comment_form`; `find` names it a "file" button |
+| Upload placeholder | `Uploading…` text in the textarea until done (not seen: a 64×32 PNG finished at once) |
+| Image result | `<img width="64" height="32" alt="<name>" src="https://github.com/user-attachments/assets/<uuid>" />` |
+| Rendered image | `src` rewritten to `https://private-user-images.githubusercontent.com/…` (signed) |
 
-Last verified: not yet, against a live PR. Update this line (date, what you
+Last verified: 2026-10-19, on casthewiz/Kip#10 (public repo): a PNG uploaded,
+recorded, and rendered in the PR body at its real size for a signed-in viewer;
+no comment posted. Video not yet checked. Update this line (date, what you
 checked) whenever you run the smoke test.
 
 ## Maintenance
@@ -76,7 +88,7 @@ run.
 
 - **Smoke test** (needs the user's go-ahead, since it uploads to GitHub): on a
   PR the user names, upload one small PNG, confirm step 5 yields a
-  `user-attachments` URL that loads, clear the box without submitting. Record
+  `user-attachments` URL that renders (step 9), clear the box without submitting. Record
   it as receipts evidence with `observe`, then update "Last verified".
 - **Input not found**: read the comment form with `read_page` and update
   Selectors with what's there now.
