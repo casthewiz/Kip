@@ -21,7 +21,7 @@
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
                                                             --migrate creates or upgrades it and imports JSON runs
-  receipt.py check [--hook start|stop|pr|tool|prompt|response] exit 2 if this branch's run has open claims
+  receipt.py check [--hook start|stop|pr|tool|prompt|response|end] exit 2 if this branch's run has open claims
                                                             and the code changed since init, or there's
                                                             no run for work that needs one (host hooks)
   receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (install's service or a start hook launches it)
@@ -49,6 +49,7 @@ import re
 import shlex
 import select
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -985,6 +986,8 @@ EVENTS = ROOT / "events"  # one <UTC date>.jsonl per day, so old days can be dro
 KEEP_DAYS = 14
 ACTIVE = datetime.timedelta(minutes=30)
 PORT = int(os.environ.get("KIP_DASHBOARD_PORT", 7377))
+SERVERS = ROOT / "servers"  # <pid>.json for each dashboard a Claude Code session started, for its end hook to stop
+OWNER = "CLAUDE_CODE_SESSION_ID"
 STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
 SKILL_STAGES = {"kip-decompose": "decompose", "kip-messy-bun": "implement", "kip-marie-kondo": "tidy",
                 "code-review": "review", "kip-receipts": "receipts"}
@@ -1069,7 +1072,23 @@ def ensure_server():
             return
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+                     start_new_session=True, env={k: v for k, v in os.environ.items() if k != OWNER})  # shared: no session's to stop
+
+
+def stop_servers(hook):
+    """A session's end: stop the dashboards it started and left running."""
+    sid = session_id(hook)
+    for p in SERVERS.glob("*.json") if sid else ():
+        try:
+            if json.loads(p.read_text()).get("session") != sid:
+                continue
+        except (OSError, ValueError):  # still being written, or another end hook took it
+            continue
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", p.stem], capture_output=True, text=True).stdout
+        # messy-bun: a crashed server's pid reused by another dashboard would be stopped; record start times if that bites
+        if "receipt.py" in cmd and " serve" in cmd:  # a dead server's pid may belong to something else by now
+            os.kill(int(p.stem), signal.SIGTERM)
+        p.unlink(missing_ok=True)
 
 
 def reason_kind(line):
@@ -1369,8 +1388,16 @@ def cmd_serve(a):
 
     if a.idle:
         threading.Thread(target=idle_exit, daemon=True).start()
-    print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
-    server.serve_forever()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so a stopped server drops its record too
+    record = SERVERS / f"{os.getpid()}.json"
+    try:
+        if os.environ.get(OWNER):
+            SERVERS.mkdir(parents=True, exist_ok=True)
+            record.write_text(json.dumps({"session": os.environ[OWNER]}))
+        print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
+        server.serve_forever()
+    finally:
+        record.unlink(missing_ok=True)
 
 
 def cmd_check(a):
@@ -1378,12 +1405,12 @@ def cmd_check(a):
     events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
     if a.pr:
         return check_pr(a.pr)
-    if a.hook in ("tool", "prompt", "response"):  # only logged: never blocks, never adds to the agent's context
+    if a.hook in ("tool", "prompt", "response", "end"):  # never blocks, never adds to the agent's context
         hook = {}
         try:
             hook = json.loads(sys.stdin.read() or "{}")
             {"tool": log_tool, "prompt": log_prompt,
-             "response": lambda h: log_said(h, "response", h.get("text"))}[a.hook](hook)
+             "response": lambda h: log_said(h, "response", h.get("text")), "end": stop_servers}[a.hook](hook)
         except Exception:
             pass
         if isinstance(hook, dict) and "workspace_roots" in hook:  # Cursor reads a JSON answer, even if logging failed
@@ -1505,7 +1532,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt", "response"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 

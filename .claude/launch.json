@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["skills/verification/kip-receipts/receipt.py", "serve", "--port", "7388"],
+      "port": 7388
+    }
+  ]
+}

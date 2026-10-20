@@ -108,6 +108,7 @@ def main():
         assert [g["hooks"][0]["command"].split()[-1] for g in pre] == ["pr", "pr", "tool"], pre
         assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
         assert on["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].endswith("check --hook prompt"), on
+        assert on["hooks"]["SessionEnd"][0]["hooks"][0]["command"].endswith("check --hook end"), on
         assert settings.read_text() == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
         write(settings, {**on, "hooks": {**on["hooks"], "PreToolUse": pre[:2]}})  # installed before the tool hook
