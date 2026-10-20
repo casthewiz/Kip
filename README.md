@@ -1,5 +1,7 @@
 # Kip
 
+<img src="assets/mascot/kip-working.svg" width="96" alt="Kip, a round pixel-art mascot with glasses and a messy bun, typing on a laptop">
+
 **A portable harness for agentic software development.** Skills, rules, and
 hooks that make Claude Code and Cursor work like a careful senior engineer,
 in any project.
