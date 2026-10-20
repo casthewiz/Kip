@@ -265,7 +265,7 @@ claims you make.
 | Level | Evidence required per claim |
 |---|---|
 | **lite** | Cheapest check that touches the claim: typecheck, build, lint, grep. Behavior claims at lite are ⚠️ unless a check already existed and was run. |
-| **full** | At least one **behavior** check that exercises the claim, with output quoted. If none exists, write the smallest one (kip-ponytail's "one runnable check"). Default. |
+| **full** | At least one **behavior** check that exercises the claim, with output quoted. If none exists, write the smallest one (kip-messy-bun's "one runnable check"). Default. |
 | **ultra** | Everything in full, plus: prove falsifiability (revert or break the change, watch the check go red, restore it); cover edge cases and every sibling caller of changed code; run it end to end in the real app or environment, not just unit tests. |
 
 **Automatic floor.** Claims touching money, auth, security, permissions, data
@@ -420,9 +420,9 @@ everyone, not just one agent's hooks.
 
 ## Boundaries
 
-Receipts governs how you prove work, not what you build (that's kip-ponytail) or
+Receipts governs how you prove work, not what you build (that's kip-messy-bun) or
 how you tidy it (that's kip-marie-kondo). Evidence checks you write to verify a
-claim follow kip-ponytail: smallest thing that can fail, no frameworks. Keep them
+claim follow kip-messy-bun: smallest thing that can fail, no frameworks. Keep them
 if they're useful regression checks; delete throwaway probes.
 
 "stop receipts" / "normal mode": revert. Level persists until changed or

@@ -8,7 +8,7 @@ Always-on rules for any agent. `python3 kip.py install` wires them into each det
 
 You are a lazy senior developer. Lazy means efficient, not careless. The best code is the code never written.
 
-On any coding task, follow the `/kip-ponytail` skill: it holds the ladder (YAGNI → reuse → stdlib → native → installed dependency → one line → minimum code), the rules, and what never to be lazy about. Understand the problem before you climb the ladder.
+On any coding task, follow the `/kip-messy-bun` skill: it holds the ladder (YAGNI → reuse → stdlib → native → installed dependency → one line → minimum code), the rules, and what never to be lazy about. Understand the problem before you climb the ladder.
 
 ---
 
@@ -26,4 +26,4 @@ Anything you believe you accomplished is a claim until evidence settles it. Evid
 
 ## Implementation workflow
 
-When a task is non-trivial, multi-step, or ambiguous, start with the `/kip-decompose` skill to understand the problem and break it into units of work; its claims carry through to `/kip-receipts`. When doing a code implementation task, follow the `/kip-ponytail` skill for the implementation itself. Before considering the task "done", run a pass using the `/kip-marie-kondo` skill over the changes made in this session (comments, duplication, dead code, unnecessary indirection), then a review pass for correctness bugs (the host's `/code-review` when it has one, otherwise read the branch diff for bugs yourself), then finish with the `/kip-receipts` skill: list every claim about the work and back each one with evidence at the current thoroughness level. The tidy and review passes are recorded as claims with `--stage tidy` and `--stage review`; a PR is blocked until each stage has one.
+When a task is non-trivial, multi-step, or ambiguous, start with the `/kip-decompose` skill to understand the problem and break it into units of work; its claims carry through to `/kip-receipts`. When doing a code implementation task, follow the `/kip-messy-bun` skill for the implementation itself. Before considering the task "done", run a pass using the `/kip-marie-kondo` skill over the changes made in this session (comments, duplication, dead code, unnecessary indirection), then a review pass for correctness bugs (the host's `/code-review` when it has one, otherwise read the branch diff for bugs yourself), then finish with the `/kip-receipts` skill: list every claim about the work and back each one with evidence at the current thoroughness level. The tidy and review passes are recorded as claims with `--stage tidy` and `--stage review`; a PR is blocked until each stage has one.
