@@ -20,7 +20,10 @@ up; it runs from a copy at `~/.kip/dashboard`, since macOS stalls background
 agents that read `~/Documents` and the like; the [git hooks](install.md#what-install-does) refresh it
 whenever Kip changes. Elsewhere, a session's start launches it and it exits after 30 idle
 minutes. `KIP_DASHBOARD=0` never starts it; `KIP_DASHBOARD_PORT` moves the one
-a session starts. Run it yourself with `receipt.py serve`.
+a session starts. Run it yourself with `receipt.py serve`; one a Claude Code
+session starts that way is stopped when that session ends. To preview
+dashboard changes from a checkout, start the `dashboard` configuration in
+`.claude/launch.json` (port 7388), which the app stops for you.
 
 ## What it shows
 
