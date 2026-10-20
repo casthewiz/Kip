@@ -839,6 +839,64 @@ def main():
         fsh("git", "commit", "-qam", "six")
         code, out = check("--hook", "stop", event=reader, cwd=fin)
         assert code == 2 and "c1 ⚠️ unverified: nothing yet" in out, out
+        # Orphaned runs: set aside, a run stops speaking for its branch, takes nothing more and leaves the
+        # start message, so the branch's next PR or changed stop needs a fresh run.
+        fsh("git", "checkout", "-q", "-b", "abandoned")
+        gone = {"session_id": "f5", "cwd": str(fin)}
+        check("--hook", "start", event=gone, cwd=fin)
+        frc("init")
+        frc("claim", "a is 7")
+        (fin / "a.txt").write_text("7\n")
+        frc("run", "c1", "--", "grep", "-q", "7", "a.txt")
+        fsh("git", "commit", "-qam", "seven")
+        assert "has run" in check("--hook", "start", event={"session_id": "f6", "cwd": str(fin)}, cwd=fin)[1]
+        assert frc("orphan", "--reason", "went another way").startswith("orphaned ")
+        assert json.loads(frc("json"))["orphaned"]["reason"] == "went another way"
+        assert check("--hook", "start", event={"session_id": "f7", "cwd": str(fin)}, cwd=fin) == (0, "")
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "no receipts run" in out, out
+        code, out = check("--hook", "stop", event=gone, cwd=fin)
+        assert code == 2 and "this session changed code" in out, out
+        for args in (("claim", "more"), ("run", "c1", "--", "true"), ("observe", "c1", "--passed", "x"),
+                     ("unverified", "c1", "x"), ("attach", "c1", str(fin / "a.txt"))):
+            assert "is orphaned" in frc(*args, ok=False), args
+        check("--hook", "stop", event={"session_id": "f9", "cwd": str(fin)}, cwd=fin)  # saw only the orphaned run
+        fresh = Path(frc("init")).name
+        frc("claim", "a is 7, again")
+        check("--hook", "stop", event=gone, cwd=fin)
+        # The dashboard leaves orphaned runs out, and a session whose runs all are.
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
+        server.terminate()
+        server.wait()
+        assert "f9" not in rows and [x["id"] for x in rows["f5"]["runs"]] == [fresh], rows.get("f5")
+        assert "c1 ⚠️ unverified: a is 7, again" in rows["f5"]["open"]["unaddressed"], rows["f5"]["open"]
+        # Sweep settles runs no checkout will: merged branches (kept, or deleted after a GitHub merge) finish,
+        # deleted unmerged ones are orphaned, open and commitless ones stay; a second sweep changes nothing.
+        swept = {}
+        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree"):
+            fsh("git", "checkout", "-q", "-b", name, base)
+            swept[name] = Path(frc("init")).name
+            if name != "no-commits":
+                (fin / f"{name}.txt").write_text(name)
+                fsh("git", "add", ".")
+                fsh("git", "commit", "-qm", name)
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "kept-merged", "-m", "merge kept-merged")
+        fsh("git", "merge", "-q", "--no-ff", "gh-merged", "-m", "Merge pull request #2 from me/gh-merged")
+        fsh("git", "merge", "-q", "--no-ff", "in-a-worktree", "-m", "merge in-a-worktree")
+        fsh("git", "branch", "-q", "-D", "gh-merged", "dropped")
+        fsh("git", "worktree", "add", "-q", str(Path(tmp, "wt")), "in-a-worktree")
+        out = frc("sweep")
+        state = {n: next((k for k in ("finished", "orphaned") if run_json(rid).get(k)), "open") for n, rid in swept.items()}
+        assert state == {"kept-merged": "finished", "gh-merged": "finished", "dropped": "orphaned",
+                         "still-open": "open", "no-commits": "open", "in-a-worktree": "open"}, (state, out)
+        assert f"orphaned {swept['dropped']} (dropped: branch gone)" in out, out
+        assert frc("sweep") == "", "a second sweep changed something"
+        fsh("git", "checkout", "-q", base)
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")

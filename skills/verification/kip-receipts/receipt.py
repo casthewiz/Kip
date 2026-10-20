@@ -12,6 +12,10 @@
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
+  receipt.py orphan [--reason TEXT]                         set aside a run whose work was abandoned: it leaves
+                                                            the dashboard and its branch needs a new run
+  receipt.py sweep                                          finish this repo's runs whose branch merged, orphan
+                                                            those whose branch is gone
   receipt.py render [--sink NAME]                           print the ledger as that sink would post it
   receipt.py publish [--sink NAME --issue KEY]              upload files and upsert the comment on each sink,
                                                             optionally opting the run into another sink first
@@ -213,6 +217,14 @@ def run_dir(a):
     return d
 
 
+def adding_to(a):
+    """run_dir for commands that add to a run: an orphaned one takes nothing more."""
+    d = run_dir(a)
+    if json.loads(db().execute("SELECT data FROM runs WHERE id = ?", (Path(d).name,)).fetchone()[0]).get("orphaned"):
+        sys.exit(f"run {Path(d).name} is orphaned; start a new one with `receipt.py init`")
+    return d
+
+
 def load(d):
     """A run as one dict, its claims with their evidence and files, read from one snapshot."""
     rid = Path(d).name
@@ -403,7 +415,7 @@ def cmd_init(a):
 
 
 def cmd_claim(a):
-    with mutate(run_dir(a)) as rec:
+    with mutate(adding_to(a)) as rec:
         if rec.get("finished"):
             sys.exit(f"run {rec['id']} is finished (its work is on the base branch); start a new one with `receipt.py init`")
         cid = f"c{len(rec['claims']) + 1}"
@@ -424,7 +436,7 @@ def not_a_check(c, how):
 
 
 def cmd_run(a):
-    d = run_dir(a)
+    d = adding_to(a)
     c = find_claim(load(d), a.claim)
     cmd = a.cmd or c.get("command")
     if not cmd:
@@ -460,7 +472,7 @@ def cmd_run(a):
 
 
 def cmd_observe(a):
-    d = run_dir(a)
+    d = adding_to(a)
     with mutate(d) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "observed")
@@ -472,17 +484,59 @@ def cmd_attach(a):
     src = Path(a.path)
     if not src.is_file():
         sys.exit(f"no such file: {src}")
-    d = run_dir(a)
+    d = adding_to(a)
     with mutate(d) as rec:
         dest = attach_file(d, find_claim(rec, a.claim), src, a.type)
     print(dest)
 
 
 def cmd_unverified(a):
-    with mutate(run_dir(a)) as rec:
+    with mutate(adding_to(a)) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "marked unverified")
         c["unverified"] = a.reason
+
+
+def cmd_orphan(a):
+    """Set a run aside whose work was abandoned: it leaves the dashboard and stops speaking for its branch."""
+    with mutate(run_dir(a)) as rec:
+        rec["orphaned"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                           "reason": a.reason}
+    print(f"orphaned {rec['id']}")
+
+
+def cmd_sweep(a):
+    """Settle this repo's runs that no checkout will finish: finished once their branch merged into the base
+    branch, orphaned once it's gone without merging. The current branch finishes as the gate would."""
+    base, here = base_branch(), git("branch", "--show-current")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    live = set(re.findall(r"^branch refs/heads/(.+)$", git("worktree", "list", "--porcelain") or "", re.M))
+    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? ORDER BY rowid", (repo_name(),)).fetchall():
+        d = ROOT / repo_name() / rid
+        rec = load(d)
+        branch = rec.get("branch")
+        if rec.get("finished") or rec.get("orphaned") or not branch:
+            continue
+        if branch == here:
+            if finish_if_done(d, rec):
+                print(f"finished {rid} ({branch}: merged)")
+            continue
+        if branch in live:  # checked out elsewhere: that checkout's hooks finish it, uncommitted work and all
+            continue
+        tip = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") or \
+            git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}")
+        # messy-bun: a deleted branch counts as merged only by GitHub's merge message; squash merges get orphaned.
+        # "Gone" means gone from this clone, and runs are keyed by folder name, so sweep in the clone that made them.
+        merged = bool(base) and git("merge-base", "--is-ancestor", tip, base) is not None and tip != rec["commit"] if tip else \
+            bool(base and git("log", base, "--merges", "-1", "--format=%h", f"--grep=from [^ ]*/{re.escape(branch)}$"))
+        if merged:
+            with mutate(d) as fresh:
+                fresh["finished"] = {"at": now, "head": tip, "fingerprint": None}
+            print(f"finished {rid} ({branch}: merged)")
+        elif not tip:
+            with mutate(d) as fresh:
+                fresh["orphaned"] = {"at": now, "reason": "its branch is gone"}
+            print(f"orphaned {rid} ({branch}: branch gone)")
 
 
 def check_key(e):
@@ -839,6 +893,8 @@ def gate(a, hook):
         return False, "check: not opening a PR"
     d = run_path(a.run) if a.run else branch_run()
     rec = load(d) if d else None
+    if rec and rec.get("orphaned"):  # its claims no longer speak for this branch
+        rec = None
     if rec and (rec.get("finished") or finish_if_done(d, rec)):
         if rec["finished"]["fingerprint"] == fingerprint():
             return False, f"check: run {rec['id']} is finished: its work is on the base branch, nothing changed since"
@@ -955,7 +1011,7 @@ def run_status(hook):
             con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)", (repo_name(), session_id(hook), state))
     d = branch_run()
     rec = load(d) if d else None
-    if not rec or rec.get("finished") or finish_if_done(d, rec):
+    if not rec or rec.get("finished") or rec.get("orphaned") or finish_if_done(d, rec):
         return ""
     open_ = blocking(rec, pr=True)
     return (f"kip-receipts: {git('branch', '--show-current')} has run {rec['id']} ({rec['level']}, {d}). "
@@ -1194,6 +1250,9 @@ def finish(rows):
         if r.pop("started_only"):  # Cursor starts a session for each empty composer; the prompt gets another
             continue
         recs = [rec for rec in map(stored, r["runs"]) if rec]
+        if recs and all(x.get("orphaned") for x in recs):  # its work was set aside
+            continue
+        recs = [x for x in recs if not x.get("orphaned")]
         rec = next((x for x in recs if x["id"] == Path(r["run"]).name), None) if r["run"] else None
         open_ = {}
         for line in (blocking(rec, pr=True) if rec and not rec.get("finished") else []):
@@ -1503,6 +1562,13 @@ def main():
     s.add_argument("claim")
     s.add_argument("reason")
     s.set_defaults(fn=cmd_unverified)
+
+    s = sub.add_parser("orphan", parents=[common])
+    s.add_argument("--reason", help="why its work was abandoned")
+    s.set_defaults(fn=cmd_orphan)
+
+    s = sub.add_parser("sweep")
+    s.set_defaults(fn=cmd_sweep)
 
     s = sub.add_parser("render", parents=[common])
     s.add_argument("--sink", help="render exactly what this sink would post")
