@@ -419,7 +419,13 @@ def main():
         assert d1["skills"] == ["kip-decompose", "kip-marie-kondo"] and d1["tool"].startswith("Bash: echo"), d1
         assert {k: len(v) for k, v in d1["open"].items()} == \
             {"failing check": 1, "missing stage": 2, "unaddressed": 1} and d1["active"], d1["open"]
-        assert rows["s1"]["blocked"] == 2 and "7" in rows and "old" not in rows, rows
+        assert rows["s1"]["blocked"] == 2 and rows["s1"]["hook"] == "stop" and "7" in rows and "old" not in rows, rows
+        assert get(port, "/kip-working.svg").startswith("<svg")
+        try:
+            get(port, "/kip-build.svg")
+            raise AssertionError("served a mascot state that isn't one")
+        except urllib.error.HTTPError as err:
+            assert err.code == 404, err
         assert "yesterday" in rows and "ancient" not in rows and not day(20).exists() and day(1).exists(), \
             "kept the wrong days"
         assert [e["hook"] for e in json.loads(get(port, "/api/sessions/d1"))][:2] == ["start", "stop"]

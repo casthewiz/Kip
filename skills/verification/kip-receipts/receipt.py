@@ -1096,7 +1096,7 @@ def fold(rows, e):
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
                               "runs": [], "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None,
                               "sources": {}, "issues": {}, "started_only": True})
-    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"],
+    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"], hook=e.get("hook"),
              started_only=r["started_only"] and e.get("hook") == "start")
     if e.get("run") and e["run"] not in r["runs"]:
         r["runs"].append(e["run"])
@@ -1201,6 +1201,7 @@ def cmd_serve(a):
     import threading
     import time
     page = Path(__file__).resolve().with_name("dashboard.html").read_text()
+    MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
     rows, timelines, streams, lock = {}, {}, set(), threading.Lock()
@@ -1266,8 +1267,11 @@ def cmd_serve(a):
             one = re.fullmatch(r"/api/sessions/([\w.-]+)", path)
             run = re.fullmatch(r"/api/runs/([\w-]+)", path)
             file = re.fullmatch(r"/runs/([\w-]+)/(files/[\w.-]+)", path)
+            mascot = re.fullmatch(r"/(kip-(?:waiting|working|success|failure)\.svg)", path)
             if path == "/":
                 self.send(page, "text/html")
+            elif mascot:
+                self.send((MASCOT / mascot[1]).read_text(), "image/svg+xml")
             elif path == "/api/sessions":
                 with lock:
                     snapshot = copy.deepcopy(rows)
