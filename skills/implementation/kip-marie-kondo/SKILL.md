@@ -29,7 +29,7 @@ Default: **full**. Switch: `/kip-marie-kondo lite|full|ultra`.
 |---|---|
 | **lite** | Mechanical cuts only: narration and restating comments, commented-out code, debug leftovers, unused imports and variables. No restructuring. |
 | **full** | Every check in step 3: comments, duplication, dead code, indirection, redundant defensive code, verbose control flow, re-implemented components. Default. |
-| **ultra** | Everything in full, plus question whether each added function, file, option, or abstraction needs to exist at all (YAGNI, per kip-ponytail) and cut what nothing requires. Verify with tests on touched files, not just typecheck. |
+| **ultra** | Everything in full, plus question whether each added function, file, option, or abstraction needs to exist at all (YAGNI, per kip-messy-bun) and cut what nothing requires. Verify with tests on touched files, not just typecheck. |
 
 At every level the behavior-preservation rule holds: when unsure, leave it in.
 

@@ -36,7 +36,7 @@ the same bar, whoever opened it.
 | Skill | Purpose |
 | --- | --- |
 | [kip-decompose](skills/analysis/kip-decompose/SKILL.md) | Understand a problem and break it into units of work |
-| [kip-ponytail](skills/implementation/kip-ponytail/SKILL.md) | Laziest solution that actually works |
+| [kip-messy-bun](skills/implementation/kip-messy-bun/SKILL.md) | Laziest solution that actually works |
 | [kip-marie-kondo](skills/implementation/kip-marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
 | [kip-receipts](skills/verification/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
 

@@ -59,6 +59,6 @@ install step flattens them, so skill names must be unique across categories.
 ## Verify
 
 Start a new session in either tool and ask what skills are available, or
-invoke one directly (`/kip-ponytail`, `/kip-receipts`). Skills load at session start,
+invoke one directly (`/kip-messy-bun`, `/kip-receipts`). Skills load at session start,
 so restart any session that was open during install. `python3 kip.py doctor`
 shows what each [surface](configuration.md) needs and whether it's here.

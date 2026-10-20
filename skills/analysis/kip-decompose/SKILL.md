@@ -72,7 +72,7 @@ its own. Each one has:
 
 Cutting rules:
 
-- Apply kip-ponytail's first rung to every unit: does it need to exist? Flag
+- Apply kip-messy-bun's first rung to every unit: does it need to exist? Flag
   speculative units and leave them out.
 - A unit too big to state in one goal line gets split. A unit too small to
   verify on its own gets merged into its neighbor.
@@ -121,7 +121,7 @@ claims is unaddressed. If the user changes the plan, start a new run.
 
 ## Boundaries
 
-Decompose governs understanding and planning. kip-ponytail governs how each unit
+Decompose governs understanding and planning. kip-messy-bun governs how each unit
 gets built, kip-marie-kondo tidies it, and kip-receipts verifies the claims written
 here, in the run it records. Don't start implementing inside this skill
 unless the user asks to go straight on.

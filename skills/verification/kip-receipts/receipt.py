@@ -986,7 +986,7 @@ KEEP_DAYS = 14
 ACTIVE = datetime.timedelta(minutes=30)
 PORT = int(os.environ.get("KIP_DASHBOARD_PORT", 7377))
 STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
-SKILL_STAGES = {"kip-decompose": "decompose", "kip-ponytail": "implement", "kip-marie-kondo": "tidy",
+SKILL_STAGES = {"kip-decompose": "decompose", "kip-messy-bun": "implement", "kip-marie-kondo": "tidy",
                 "code-review": "review", "kip-receipts": "receipts"}
 EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
