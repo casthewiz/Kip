@@ -407,6 +407,13 @@ about it, its old claims stop covering new work, and new claims are refused
 (start a new run), though late evidence, like a CI result, can still be
 recorded on it.
 
+A run whose work was abandoned (a deleted branch, a session left paused) is
+**orphaned** with `receipt.py orphan [--reason TEXT]`: it leaves the dashboard,
+takes no more claims or evidence, and its branch counts as having no run, so
+the next PR or stop with changed code needs a fresh `init`. `receipt.py sweep`
+settles a repo's leftovers in one pass: runs whose branch merged are finished,
+runs whose branch is gone unmerged are orphaned.
+
 Cursor can't block a stop, so it gets the same list once as a follow-up
 message. The block message lists the claims; address them, don't work
 around the hook.
