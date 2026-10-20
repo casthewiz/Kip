@@ -1095,8 +1095,9 @@ def fold(rows, e):
     sid = str(e["session"])
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
                               "runs": [], "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None,
-                              "sources": {}, "issues": {}})
-    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"])
+                              "sources": {}, "issues": {}, "started_only": True})
+    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"],
+             started_only=r["started_only"] and e.get("hook") == "start")
     if e.get("run") and e["run"] not in r["runs"]:
         r["runs"].append(e["run"])
     found = [("link", url) for url in URL.findall(str(e.get("text") or ""))] if e.get("hook") == "prompt" else []
@@ -1166,10 +1167,13 @@ def hashed(path, mtime_ns, ctime_ns, size):
 
 
 def finish(rows):
-    """The rows as the dashboard shows them, newest first: whether each is active, its runs, the issues they
-    and its tracker calls name, its run's open reasons by kind and the stages it has claims for."""
+    """The rows as the dashboard shows them, newest first, leaving out sessions that only started: whether each
+    is active, its runs, the issues they and its tracker calls name, its run's open reasons by kind and the
+    stages it has claims for."""
     now, out = datetime.datetime.now(datetime.timezone.utc), []
     for r in rows.values():
+        if r.pop("started_only"):  # Cursor starts a session for each empty composer; the prompt gets another
+            continue
         recs = [rec for rec in map(stored, r["runs"]) if rec]
         rec = next((x for x in recs if x["id"] == Path(r["run"]).name), None) if r["run"] else None
         open_ = {}

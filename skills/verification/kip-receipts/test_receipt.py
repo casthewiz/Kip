@@ -504,6 +504,7 @@ def main():
                                        "tool_input": {"file_path": str(repo / ".claude/skills/my-skill/SKILL.md")}})
         k2 = {**cursor, "conversation_id": "k2"}
         assert check("--hook", "start", event={**k2, "session_id": "cursor-session"})[0] == 0
+        check("--hook", "start", event={**cursor, "conversation_id": "k0", "workspace_roots": []})  # an empty composer
         assert check("--hook", "prompt", event={**k2, "prompt": "/nothing-here", "attachments": [
             {"type": "file", "file_path": "/u/.cursor/skills/kip-marie-kondo/SKILL.md"}]}, extra_env=home) == \
             (0, '{"continue": true}')
@@ -524,7 +525,8 @@ def main():
         rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
         server.terminate()
         assert rows["p1"]["skills"] == ["kip-decompose", "my-skill"] and rows["p1"]["stage"] == "implement", rows["p1"]
-        assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo" and "cursor-session" not in rows, rows
+        assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo", rows
+        assert "cursor-session" not in rows and "k0" not in rows, rows
         assert rows["k2"]["skills"] == ["kip-marie-kondo", "kip-receipts"] and rows["k2"]["stage"] == "receipts", rows["k2"]
         assert rows["k2"]["tool"] == "Read: /u/.cursor/skills/kip-receipts/SKILL.md", rows["k2"]
 
