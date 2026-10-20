@@ -155,6 +155,15 @@ def db():
     global _db, _imported
     if _db is None:
         DB.parent.mkdir(parents=True, exist_ok=True)
+        if not DB.exists():  # a new kip.db appears already in WAL mode: when openers switch one at once,
+            new = DB.with_name(f"{DB.name}.{os.getpid()}.new")  # SQLite fails one rather than wait (deadlock)
+            sqlite3.connect(new).execute("PRAGMA journal_mode=WAL").connection.close()
+            try:
+                os.link(new, DB)
+            except FileExistsError:
+                pass
+            finally:
+                new.unlink()
         _db = sqlite3.connect(DB, timeout=30, isolation_level=None, check_same_thread=False)
         try:
             _db.execute("PRAGMA journal_mode=WAL")
