@@ -26,7 +26,9 @@ a session starts. Run it yourself with `receipt.py serve`.
 
 It lists sessions with the stage each is in (decompose, implement, tidy, review,
 receipts), how many stops in a row the gate blocked, and its run's open
-reasons, and streams each session's timeline as it happens. Kip the
+reasons, and streams each session's timeline as it happens. Each timeline row but
+prompts and blocked ones starts folded to a short gist (`Bash git push`,
+`Edit dashboard.html`) and opens to the full invocation. Kip the
 [mascot](../assets/mascot) shows each session's state, in the list and on its page:
 working mid-turn, waiting on you, celebrating a finished run, or rained on when the
 gate blocked its stop. A session's page

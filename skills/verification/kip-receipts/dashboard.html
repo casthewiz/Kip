@@ -63,6 +63,9 @@ ol.timeline { list-style: none; margin: 0; padding: 0; }
 .ev time { color: var(--dim); font-family: var(--mono); font-size: 12px; }
 .ev .kind { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .03em; padding-top: 1px; }
 .ev .text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; min-width: 0; }
+.ev details { background: none; border: 0; padding: 0; margin: 0; }
+.ev summary { font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev details[open] summary { color: var(--dim); margin-bottom: 4px; }
 .ev.blocked .text, .ev.blocked .kind { color: var(--bad); }
 .ev.skill .kind { color: var(--accent); }
 .ev.said .text { font: 13px/1.5 system-ui, -apple-system, sans-serif; background: var(--panel); border: 1px solid var(--line);
@@ -208,15 +211,27 @@ function renderList() {
     : [h("p", { class: "empty" }, "No sessions yet. They appear as agents run.")]));
 }
 
+const cut = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+
+// As few characters as say what a row did: the tool and the gist of its input, or the first line of the rest.
+function gist(e, text) {
+  if (e.hook !== "tool" || e.tool === "Skill") return cut(text.trim().split("\n")[0], 60);
+  const name = e.tool.replace(/^mcp__.+?__|^MCP:/, ""), input = (e.input || "").trim();
+  const arg = input.startsWith("{") ? "" : /^[/~]/.test(input) ? input.split("/").filter(Boolean).pop()
+    : input.replace(/^cd \S+ && /, "").split(/[|;&\n]/)[0].trim().split(/\s+/).filter(w => !w.startsWith("-")).slice(0, 2).join(" ");
+  return cut(arg ? `${name} ${arg}` : name, 40);
+}
+
 function eventItem(e, fresh) {
-  const blocked = e.blocked === true, skill = e.hook === "tool" && e.tool === "Skill", said = "text" in e;
+  const blocked = e.blocked === true, skill = e.hook === "tool" && e.tool === "Skill", said = "text" in e, prompt = e.hook === "prompt";
   const text = said ? e.text : e.hook === "tool" ? (skill ? e.input : `${e.tool}${e.input ? "  " + e.input : ""}`)
     : e.message || (e.hook === "stop" ? "stop allowed" : e.hook);
-  const long = said && (text.length > 600 || text.split("\n").length > 6);
+  const long = prompt && (text.length > 600 || text.split("\n").length > 6);
   return h("li", { class: `ev${blocked ? " blocked" : ""}${skill ? " skill" : ""}${said ? " said " + e.hook : ""}${fresh ? " fresh" : ""}` },
     h("time", { datetime: e.at }, clock(e.at)),
     h("span", { class: "kind" }, skill ? "skill" : blocked ? "blocked" : KIND[e.hook] || e.hook),
-    h("span", { class: "text" + (long ? " long" : ""), onclick: long && (ev => ev.currentTarget.classList.toggle("open")) }, text));
+    h("span", { class: "text" + (long ? " long" : ""), onclick: long && (ev => ev.currentTarget.classList.toggle("open")) },
+      prompt || blocked ? text : h("details", {}, h("summary", {}, gist(e, text)), text)));
 }
 
 const tone = v => v.startsWith("✅") ? "ok" : v.startsWith("❌") ? "bad" : "warn";
