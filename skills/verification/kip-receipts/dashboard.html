@@ -27,8 +27,9 @@ h1 { font-size: 16px; margin: 0; }
 label.toggle { color: var(--dim); font-size: 12px; display: inline-flex; gap: 6px; align-items: center; }
 main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; min-height: calc(100vh - 53px); }
 #list { border-right: 1px solid var(--line); overflow-y: auto; }
-.card { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none;
+.card { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none;
   color: inherit; font: inherit; padding: 12px 16px; cursor: pointer; }
+.mascot { flex: none; image-rendering: pixelated; }
 .card:hover { background: var(--panel); }
 .card[aria-current="true"] { background: var(--accent-soft); }
 .card.idle { opacity: .55; }
@@ -46,6 +47,8 @@ a.icon:hover { color: var(--accent); }
 .empty { color: var(--dim); padding: 40px 0; text-align: center; }
 .meta { color: var(--dim); font-size: 12px; margin: 2px 0 16px; word-break: break-all; }
 h2 { font-size: 18px; margin: 0; }
+.headline { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.headline .meta { margin-bottom: 0; }
 h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin: 24px 0 8px; }
 .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
 .step { border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 12px; text-align: center; background: var(--panel); color: var(--dim); }
@@ -172,6 +175,21 @@ function title(r, link) {
   return [icon, r.repo || "unknown repo", r.branch ? h("span", { class: "sub" }, " · " + r.branch) : null];
 }
 
+const MOODS = { waiting: "waiting on you", working: "working", success: "its run finished", failure: "the gate blocked its stop" };
+
+// Kip as the session stands: blocked by the gate, mid-turn, done with its run, or waiting for a prompt.
+function mood(r) {
+  if (r.blocked) return "failure";
+  if (r.active && r.hook !== "stop" && r.hook !== "start") return "working";
+  const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop());
+  return run && run.finished ? "success" : "waiting";
+}
+
+function mascot(r, size) {
+  const m = mood(r);
+  return h("img", { class: "mascot", src: `/kip-${m}.svg`, width: size, height: size, alt: "Kip: " + MOODS[m], title: MOODS[m] });
+}
+
 function renderList() {
   const activeOnly = $("activeOnly").checked;
   const shown = rows.filter(r => !activeOnly || r.active || r.session === selected);
@@ -179,12 +197,14 @@ function renderList() {
       class: "card" + (r.active ? "" : " idle"), "aria-current": r.session === selected ? "true" : "false",
       onclick: () => select(r.session),
     },
-    h("div", { class: "row" },
-      h("div", { class: "grow title" }, title(r)),
-      r.blocked ? h("span", { class: "loop", title: "stops in a row the gate blocked" }, "↻ " + r.blocked) : null,
-      r.stage ? h("span", { class: "chip" }, r.stage) : null),
-    h("div", { class: "row" }, h("span", { class: "sub grow" }, `${r.host || "?"} · ${r.session.slice(0, 8)}`), h("span", { class: "when", "data-at": r.last }, ago(r.last))),
-    r.tool ? h("div", { class: "tool" }, r.tool) : null))
+    mascot(r, 40),
+    h("div", { class: "grow" },
+      h("div", { class: "row" },
+        h("div", { class: "grow title" }, title(r)),
+        r.blocked ? h("span", { class: "loop", title: "stops in a row the gate blocked" }, "↻ " + r.blocked) : null,
+        r.stage ? h("span", { class: "chip" }, r.stage) : null),
+      h("div", { class: "row" }, h("span", { class: "sub grow" }, `${r.host || "?"} · ${r.session.slice(0, 8)}`), h("span", { class: "when", "data-at": r.last }, ago(r.last))),
+      r.tool ? h("div", { class: "tool" }, r.tool) : null)))
     : [h("p", { class: "empty" }, "No sessions yet. They appear as agents run.")]));
 }
 
@@ -290,8 +310,9 @@ function renderDetail(full) {
   const r = rows.find(x => x.session === selected);
   if (!r) { $("detail").replaceChildren(h("p", { class: "empty" }, selected ? "That session isn't in the log." : "Pick a session.")); return; }
   const head = [
-    h("h2", {}, title(r, true)),
-    h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)}`),
+    h("div", { class: "headline" }, mascot(r, 64), h("div", { class: "grow" },
+      h("h2", {}, title(r, true)),
+      h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)} · ${MOODS[mood(r)]}`))),
     h("div", { class: "pipeline", role: "list", "aria-label": "Stages" }, STAGES.map(s => h("div", {
       role: "listitem",
       class: "step" + ((r.reached || []).includes(s) ? " reached" : "") + (r.stage === s ? " current" + (r.blocked ? " stuck" : "") : ""),
