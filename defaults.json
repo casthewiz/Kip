@@ -73,5 +73,12 @@
   },
   "default_destination": "local",
   "workflow": {"stages": ["tidy", "review"], "checks": {}},
-  "dashboard": {"conversation": true}
+  "dashboard": {"conversation": true},
+  "setup": {
+    "playwright": {
+      "about": "Playwright for desk tests (downloads about 150 MB)",
+      "requires": {"file": ["~/.kip/node_modules/@playwright/test/cli.js"]},
+      "run": "bash ~/.kip/skills/kip-receipts/playwright/setup.sh"
+    }
+  }
 }

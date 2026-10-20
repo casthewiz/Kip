@@ -17,8 +17,8 @@ turns it back on.
 A user `install` runs a live dashboard at <http://127.0.0.1:7377> as a login
 service (a launchd agent on macOS, a systemd user unit on Linux) that's always
 up; it runs from a copy at `~/.kip/dashboard`, since macOS stalls background
-agents that read `~/Documents` and the like, so re-run `install` after updating
-Kip. Elsewhere, a session's start launches it and it exits after 30 idle
+agents that read `~/Documents` and the like; the [git hooks](install.md#what-install-does) refresh it
+whenever Kip changes. Elsewhere, a session's start launches it and it exits after 30 idle
 minutes. `KIP_DASHBOARD=0` never starts it; `KIP_DASHBOARD_PORT` moves the one
 a session starts. Run it yourself with `receipt.py serve`.
 

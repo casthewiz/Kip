@@ -21,6 +21,7 @@ def main():
         env = {k: v for k, v in os.environ.items() if k not in ("KIP_HOME", "LINEAR_API_KEY", "KIP_RECEIPTS_DIR")}
         env["HOME"] = str(home)
         env["KIP_DASHBOARD"] = "0"  # never load a real login service from a test
+        env["KIP_GIT_HOOKS"] = "0"  # nor touch this checkout's git hooks
 
         def kip(*args, ok=True, **extra):
             r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=repo, env={**env, **extra},
@@ -65,7 +66,8 @@ def main():
                          ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list"),
                          ({"workflow": {"checks": ["make test"]}}, "workflow.checks must map check names"),
                          ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command"),
-                         ({"dashboard": {"conversation": "no"}}, "dashboard.conversation must be true or false")]:
+                         ({"dashboard": {"conversation": "no"}}, "dashboard.conversation must be true or false"),
+                         ({"setup": {"x": {"about": "a"}}}, "setup.x needs about, run, and requires")]:
             write(repo / ".kip" / "config.json", bad)
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
@@ -194,6 +196,23 @@ def main():
         assert "--port 7400" in kip_py.service("linux")[1]
         del os.environ["KIP_DASHBOARD_PORT"]
         assert "unknown host nope" in kip("install", "--host", "nope", ok=False)
+        # Setup a person still has to do: listed with its command, in doctor too, until skipped.
+        out = kip("setup")
+        assert "playwright: Playwright for desk tests" in out and "setup.sh" in out, out
+        assert "playwright     missing" in kip("doctor") and "→ bash" in kip("doctor")
+        assert "skipped playwright" in kip("setup", "--skip", "playwright")
+        assert "playwright" not in kip("setup") + kip("doctor").split("setup\n")[-1]
+        # Git hooks re-run install; someone else's hook is left alone, and uninstall takes only Kip's.
+        hooks = Path(tmp, "hooks")
+        hooks.mkdir()
+        (hooks / "post-merge").write_text("#!/bin/sh\nmine\n")
+        kip_py.install_git_hooks(hooks)
+        kip_py.install_git_hooks(hooks)  # idempotent
+        commit = (hooks / "post-commit").read_text()
+        assert f"{ROOT / 'kip.py'} install" in commit and os.access(hooks / "post-commit", os.X_OK), commit
+        assert (hooks / "post-merge").read_text() == "#!/bin/sh\nmine\n"
+        kip_py.uninstall_git_hooks(hooks)
+        assert [p.name for p in hooks.iterdir()] == ["post-merge"]
 
         # Uninstall undoes install: the user's own settings, rules, and hooks are as they were,
         # files install created are gone, and nothing links back into Kip.

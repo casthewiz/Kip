@@ -15,7 +15,8 @@ server, a preview deploy, staging, prod. It doesn't matter who built it.
 
 If 1 is unmet, fall through to generic (component tests). If 2 is unmet and
 the user declines the install, fall back to the `browser` surface: an agent
-browser tool with `observe` and attached screenshots, and say the evidence
+browser tool (driven per your host's [interface](../interfaces/CONTRACT.md))
+with `observe` and attached screenshots, and say the evidence
 is observed, not asserted.
 
 ## lite

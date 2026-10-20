@@ -82,6 +82,8 @@ def main():
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "KIP_DASHBOARD": "0"}
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
             env.pop(v, None)
+        Path(tmp, "home").mkdir()
+        Path(tmp, "home", "config.json").write_text('{"setup": null}')  # this machine's setup isn't the test's
 
         def sh(*args, ok=True, extra_env=None, cwd=repo):
             r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
@@ -274,6 +276,13 @@ def main():
         # A session starts knowing where this branch's run stands.
         code, out = check("--hook", "start", event={"session_id": "s0", "cwd": str(repo)}, cwd=tmp)
         assert code == 0 and "has run" in out and "c1 ⚠️ unverified: app prints hi!" in out, out
+        # ...and is reminded of setup a person still has to do, with how to skip it.
+        Path(tmp, "home2").mkdir()
+        Path(tmp, "home2", "config.json").write_text(json.dumps(
+            {"setup": {"demo": {"about": "a demo step", "requires": {"file": [str(Path(tmp, "nope"))]}, "run": "do-it"}}}))
+        out = check("--hook", "start", event={"session_id": "s0s", "cwd": str(repo)}, cwd=tmp,
+                    extra_env={"KIP_HOME": str(Path(tmp, "home2"))})[1]
+        assert "kip setup: `demo` isn't done (a demo step)" in out and "run `do-it`" in out and "--skip demo" in out, out
         code, out = check("--hook", "start", event={"session_id": "s0c", "workspace_roots": [str(repo)]}, cwd=tmp)
         assert "c1 ⚠️ unverified" in json.loads(out)["additional_context"], out
         # Cursor's events carry workspace_roots: same gate, answered in JSON. Stop asks for one follow-up.
@@ -495,6 +504,7 @@ def main():
                                        "tool_input": {"file_path": str(repo / ".claude/skills/my-skill/SKILL.md")}})
         k2 = {**cursor, "conversation_id": "k2"}
         assert check("--hook", "start", event={**k2, "session_id": "cursor-session"})[0] == 0
+        check("--hook", "start", event={**cursor, "conversation_id": "k0", "workspace_roots": []})  # an empty composer
         assert check("--hook", "prompt", event={**k2, "prompt": "/nothing-here", "attachments": [
             {"type": "file", "file_path": "/u/.cursor/skills/kip-marie-kondo/SKILL.md"}]}, extra_env=home) == \
             (0, '{"continue": true}')
@@ -515,7 +525,8 @@ def main():
         rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
         server.terminate()
         assert rows["p1"]["skills"] == ["kip-decompose", "my-skill"] and rows["p1"]["stage"] == "implement", rows["p1"]
-        assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo" and "cursor-session" not in rows, rows
+        assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo", rows
+        assert "cursor-session" not in rows and "k0" not in rows, rows
         assert rows["k2"]["skills"] == ["kip-marie-kondo", "kip-receipts"] and rows["k2"]["stage"] == "receipts", rows["k2"]
         assert rows["k2"]["tool"] == "Read: /u/.cursor/skills/kip-receipts/SKILL.md", rows["k2"]
 
