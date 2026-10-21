@@ -179,12 +179,13 @@ function title(r, link) {
   return [icon, r.repo || "unknown repo", r.branch ? h("span", { class: "sub" }, " · " + r.branch) : null];
 }
 
-const MOODS = { waiting: "waiting on you", working: "working", success: "its run finished", failure: "the gate blocked its stop" };
+const MOODS = { waiting: "waiting on you", working: "working", success: "the gate let its turn end", failure: "the gate blocked its stop" };
 
-// Kip as the session stands: blocked by the gate, mid-turn, done with its run, or waiting for a prompt.
+// Kip as the session stands: blocked by the gate, mid-turn, let stop by the gate or done with its run, or waiting for a prompt.
 function mood(r) {
   if (r.blocked) return "failure";
   if (r.active && r.hook !== "stop" && r.hook !== "start") return "working";
+  if (r.hook === "stop") return "success";
   const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop());
   return run && run.finished ? "success" : "waiting";
 }
