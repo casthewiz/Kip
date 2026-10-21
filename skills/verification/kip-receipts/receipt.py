@@ -12,6 +12,7 @@
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
+  receipt.py accept CLAIM [--reason TEXT]                   the user takes an unverified claim as it stands
   receipt.py orphan [--reason TEXT]                         set aside a run whose work was abandoned: it leaves
                                                             the dashboard and its branch needs a new run
   receipt.py sweep                                          finish this repo's runs whose branch merged, orphan
@@ -504,6 +505,15 @@ def cmd_unverified(a):
         c = find_claim(rec, a.claim)
         not_a_check(c, "marked unverified")
         c["unverified"] = a.reason
+
+
+def cmd_accept(a):
+    """The user takes an unverified claim as it stands, so the dashboard stops asking them about it."""
+    with mutate(adding_to(a)) as rec:
+        c = find_claim(rec, a.claim)
+        if not c["unverified"]:
+            sys.exit(f"{c['id']} isn't marked unverified; only an unverified claim can be accepted")
+        c["accepted"] = a.reason or True
 
 
 def cmd_orphan(a):
@@ -1178,8 +1188,8 @@ def fold(rows, e):
         return None
     sid = str(e["session"])
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
-                              "runs": [], "skills": [], "blocked": 0, "stage": None, "reached": [], "tool": None,
-                              "sources": {}, "issues": {}, "started_only": True})
+                              "runs": [], "skills": [], "blocked": 0, "pr": False, "stage": None, "reached": [],
+                              "tool": None, "sources": {}, "issues": {}, "started_only": True})
     r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"], hook=e.get("hook"),
              started_only=r["started_only"] and e.get("hook") == "start")
     if e.get("run") and e["run"] not in r["runs"]:
@@ -1207,6 +1217,8 @@ def fold(rows, e):
         s.update(count=s["count"] + 1, last=e["at"])
     if e.get("hook") == "stop" and e.get("message") != NUDGED:  # the stop it let through after a block isn't a pass
         r["blocked"] = r["blocked"] + 1 if e.get("blocked") else 0
+    if e.get("hook") == "pr" and not e.get("blocked"):
+        r["pr"] = True
     return sid
 
 
@@ -1218,12 +1230,13 @@ def stored(run):
 
 def run_summary(rec):
     """What a session's segments show of a run: where it publishes and how its claims stand."""
-    counts = {}
+    counts, asking = {}, 0
     for c in rec["claims"]:
         v = verdict(c, rec).split(":")[0]
         counts[v] = counts.get(v, 0) + 1
+        asking += bool(c["unverified"]) and not c.get("accepted")
     return {"id": rec["id"], "branch": rec.get("branch"), "level": rec["level"], "issue": rec.get("issue"),
-            "target": rec.get("target"), "finished": bool(rec.get("finished")), "claims": counts,
+            "target": rec.get("target"), "finished": bool(rec.get("finished")), "claims": counts, "asking": asking,
             "sinks": [{"name": s, "url": rec.get("published", {}).get(s, {}).get("url")} for s in rec["sinks"]]}
 
 
@@ -1235,6 +1248,7 @@ def run_detail(rec):
     return {**run_summary(rec), "commit": rec.get("commit"), "claims": [
         {"id": c["id"], "text": c["text"], "unit": c.get("unit"), "stage": c.get("stage"),
          "provider": c.get("provider") or "generic", "verdict": verdict(c, rec), "unverified": c.get("unverified"),
+         "accepted": c.get("accepted"),
          "evidence": [{"id": e["id"], "label": e.get("label"), "summary": summarize(e, full=True), "passed": e.get("passed"),
                        "phase": e.get("phase"), "excerpt": e.get("excerpt"), "commit": e.get("commit"),
                        "remote": bool(e.get("remote")), "log": url(e.get("log")), "patch": url(e.get("patch"))}
@@ -1354,7 +1368,7 @@ def cmd_serve(a):
             one = re.fullmatch(r"/api/sessions/([\w.-]+)", path)
             run = re.fullmatch(r"/api/runs/([\w-]+)", path)
             file = re.fullmatch(r"/runs/([\w-]+)/(files/[\w.-]+)", path)
-            mascot = re.fullmatch(r"/(kip-(?:waiting|working|success|failure)\.svg)", path)
+            mascot = re.fullmatch(r"/(kip-(?:waiting|working|asking|success|failure)\.svg)", path)
             if path == "/":
                 self.send(page, "text/html")
             elif mascot:
@@ -1571,6 +1585,11 @@ def main():
     s.add_argument("claim")
     s.add_argument("reason")
     s.set_defaults(fn=cmd_unverified)
+
+    s = sub.add_parser("accept", parents=[common])
+    s.add_argument("claim")
+    s.add_argument("--reason", help="why it's fine as it stands")
+    s.set_defaults(fn=cmd_accept)
 
     s = sub.add_parser("orphan", parents=[common])
     s.add_argument("--reason", help="why its work was abandoned")

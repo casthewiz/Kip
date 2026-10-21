@@ -179,15 +179,19 @@ function title(r, link) {
   return [icon, r.repo || "unknown repo", r.branch ? h("span", { class: "sub" }, " · " + r.branch) : null];
 }
 
-const MOODS = { waiting: "waiting on you", working: "working", success: "the gate let its turn end", failure: "the gate blocked its stop" };
+const MOODS = { waiting: "idle", working: "working", asking: "needs you: an unverified claim, no PR or accept yet",
+  success: "the gate let its turn end", failure: "blocked by the gate, or a claim is failing" };
 
-// Kip as the session stands: blocked by the gate, mid-turn, let stop by the gate or done with its run, or waiting for a prompt.
+// Kip as the session stands: blocked or failing a claim, mid-turn, asking the user to settle an unverified claim,
+// let stop by the gate or done with its run, or idle.
 function mood(r) {
   if (r.blocked) return "failure";
   if (r.active && r.hook !== "stop" && r.hook !== "start") return "working";
-  if (r.hook === "stop") return "success";
   const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop());
-  return run && run.finished ? "success" : "waiting";
+  if (run && run.finished) return "success";
+  if (run && Object.keys(run.claims).some(v => v.startsWith("❌"))) return "failure";
+  if (run && run.asking && !r.pr) return "asking";
+  return r.hook === "stop" ? "success" : "waiting";
 }
 
 function mascot(r, size) {
@@ -286,7 +290,7 @@ function claimItem(c, open) {
   return h("details", { class: "claim", "data-claim": c.id, open: open ? "" : null },
     h("summary", {}, h("span", { class: "v " + tone(c.verdict) }, c.verdict.split(":")[0]), h("span", { class: "cid" }, c.id),
       h("span", { class: "grow" }, c.text, " ", h("span", { class: "tags" }, tags.filter(Boolean).join(" · ")))),
-    c.unverified || c.verdict.includes(":") ? h("p", { class: "meta" }, c.unverified ? "unverified: " + c.unverified : c.verdict) : null,
+    c.unverified || c.verdict.includes(":") ? h("p", { class: "meta" }, c.unverified ? "unverified: " + c.unverified + (c.accepted ? " (accepted)" : "") : c.verdict) : null,
     c.evidence.length ? h("ul", { class: "evidence" }, c.evidence.map(e => h("li", {},
       h("span", { class: "v " + (e.passed ? "ok" : "bad") }, (e.phase === "red" ? "red · " : "") + (e.passed ? "passed" : "failed")), " ",
       e.label ? h("strong", {}, e.label) : null,

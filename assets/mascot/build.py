@@ -99,6 +99,8 @@ PAW = ("kkk", "kbk")
 Z = ("zzzz", "..z.", ".z..", "zzzz")
 SPARK = (".y.", "yyy", ".y.")
 DOT = ("y",)
+QUESTION = (".yyy.", "y...y", "...y.", "..y..", ".....", "..y..")
+ARM = (".kkk.", "kbbbk", "kbbbk", ".kbk.", ".kbk.", ".kbk.", ".kbk.", ".kbk.")
 CLOUD = (
     "....cccc......",
     "..ccccccc.cc..",
@@ -157,7 +159,12 @@ def failure():
     return frames
 
 
-STATES = {"waiting": (0.5, waiting()), "working": (0.15, working()), "success": (0.12, success()), "failure": (0.25, failure())}
+def asking():
+    return [[(QUESTION, 1, 3 + i % 2)] + kip(eyes="open", mouth="o" if i % 2 else "flat", bun=i % 2) +
+            [(ARM, 25 + i % 2, 8 + i % 2)] for i in range(4)]
+
+
+STATES = {"waiting": (0.5, waiting()), "asking": (0.3, asking()), "working": (0.15, working()), "success": (0.12, success()), "failure": (0.25, failure())}
 
 
 def svg(frame_time, frames):
