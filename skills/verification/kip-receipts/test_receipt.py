@@ -154,6 +154,9 @@ def main():
         assert md.endswith(f"`kip-receipt {run.name}`"), md
         assert md == rc("render"), "render is not deterministic"
         assert "| # | Claim | Provider | Evidence | Verdict |" in md, "unplanned runs grew a Unit column"
+        assert "only an unverified claim" in rc("accept", "c1", ok=False)
+        rc("accept", "c3", "--reason", "no PDF service here")
+        assert json.loads(rc("json"))["claims"][2]["accepted"] == "no PDF service here"
 
         jira = rc("render", "--sink", "jira")
         assert jira.startswith("h3. Receipts") and "{{c1f1-shot.png}}" in jira and "not uploaded" in jira, jira
@@ -380,6 +383,9 @@ def main():
         rc("claim", "handles the no claim case ❌")  # its text never decides its kind
         with open(events / f"{today}.jsonl", "a") as f:  # lines it can't use are skipped, not fatal
             f.write('not json\n{"session": "old"}\n[1]\n{"session": 7, "at": "2026-01-01T00:00:00+00:00"}\n')
+            for blocked in (True, False):  # only a PR the gate let through counts as opened
+                f.write(json.dumps({"session": f"pr-{blocked}", "at": f"{today}T00:00:00+00:00", "hook": "pr",
+                                    "blocked": blocked}) + "\n")
         assert not Path(tmp, "dashboard.html").exists(), "a hook wrote a static page"
 
         # The dashboard server: the page, sessions with their stage, one session's events, and a stream
@@ -420,7 +426,9 @@ def main():
         assert {k: len(v) for k, v in d1["open"].items()} == \
             {"failing check": 1, "missing stage": 2, "unaddressed": 1} and d1["active"], d1["open"]
         assert rows["s1"]["blocked"] == 2 and rows["s1"]["hook"] == "stop" and "7" in rows and "old" not in rows, rows
-        assert get(port, "/kip-working.svg").startswith("<svg")
+        assert rows["pr-False"]["pr"] and not rows["pr-True"]["pr"] and not d1["pr"], rows
+        assert all("asking" in x for x in d1["runs"]), d1["runs"]
+        assert get(port, "/kip-working.svg").startswith("<svg") and get(port, "/kip-asking.svg").startswith("<svg")
         try:
             get(port, "/kip-build.svg")
             raise AssertionError("served a mascot state that isn't one")
