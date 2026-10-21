@@ -16,7 +16,7 @@ surface needs and whether it's here.
 | `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, `sqlite` databases with a `key` to write the rules into, or `manual` instructions as the fallback), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (Stop and PR gates), cursor |
 | `connectors` | The agent's own tools a surface can run through: `kind` is `mcp` or `tool` | browser |
 | `evidence` | [Receipts providers](../skills/verification/kip-receipts/providers/CONTRACT.md): a `doc` procedure, plus a `fallback` | frontend (Playwright `viewports`), browser, api, generic |
-| `destinations` | [Receipts sinks](../skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira, github |
+| `destinations` | [Receipts sinks](../skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira, github, github-issue |
 | `setup` | One-time steps a person does themselves (a sign-in, a download): `about`, the `run` command, and `requires` that's met once it's done. Every session start reminds the agent of each one not done, to offer the user; `kip.py setup --skip NAME` (a `null` in your config) stops it | playwright |
 
 Plus `workflow.stages`: the [stages](../skills/verification/kip-receipts/SKILL.md#stages)
