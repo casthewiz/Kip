@@ -70,7 +70,8 @@
     "local": {"type": "local"},
     "linear": {"type": "linear", "requires": {"env": ["LINEAR_API_KEY"]}},
     "jira": {"type": "jira", "requires": {"env": ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]}},
-    "github": {"type": "github", "requires": {"cmd": ["gh"]}}
+    "github": {"type": "github", "requires": {"cmd": ["gh"]}},
+    "github-issue": {"type": "github-issue", "requires": {"cmd": ["gh"]}}
   },
   "default_destination": "local",
   "workflow": {"stages": ["tidy", "review"], "checks": {}},

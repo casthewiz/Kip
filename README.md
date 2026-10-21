@@ -48,7 +48,7 @@ Plus always-on [rules](rules/user-rules.md) that tie them together.
   `git pull` updates both.
 - **Evidence, not vibes.** Receipts record commands, outputs, screenshots, and
   videos, including Playwright desk tests across viewports, and publish them
-  locally or to Linear, Jira, or the PR.
+  locally or to Linear, Jira, a GitHub issue, or the PR.
 - **See every session.** A local [dashboard](docs/dashboard.md) streams each
   session's timeline, stage, and receipts as it happens.
 - **Configurable, not forked.** Hosts, evidence providers, and destinations are

@@ -35,7 +35,8 @@ environment (secrets only ever from the environment):
 
 - Linear: `LINEAR_API_KEY`
 - Jira: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
-- GitHub: the `gh` CLI, logged in; the ledger goes in the PR body
+- GitHub: the `gh` CLI, logged in; the ledger goes in the PR body (`github`) or an
+  issue comment (`github-issue`)
 
 ## CI
 

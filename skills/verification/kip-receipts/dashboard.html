@@ -258,7 +258,7 @@ function segments(r) {
   for (const x of r.runs || []) for (const s of x.sinks) sinks.set(s.name + " " + (s.url || ""), s);
   return h("div", { class: "segments" },
     segment("Issues", (r.issues || []).map(i => h("li", {}, h("span", { class: "grow" }, i.key), h("span", { class: "n" }, "via " + i.via))),
-      "No Linear or Jira issue: no run publishes to one, and no tracker call named one."),
+      "No Linear, Jira or GitHub issue: no run publishes to one, and no tracker call named one."),
     segment("Sinks", [...sinks.values()].map(s => h("li", {}, h("span", { class: "grow" }, link(s.url, s.name)),
       h("span", { class: "n" }, s.url ? "published" : s.name === "local" ? "kip.db" : "not published yet"))),
       "No receipts run, so nothing is recorded or published."),

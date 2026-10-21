@@ -324,6 +324,7 @@ sites), each with its own settings.
 | [linear](sinks/linear.py) | Issue comment with the ledger; images embedded, videos and logs linked | `LINEAR_API_KEY` |
 | [jira](sinks/jira.py) | Issue comment in Jira markup; files as attachments, images as thumbnails | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
 | [github](sinks/github.py) | A marked block in the pull request's body (the issue is the PR number), with a hidden line CI checks; images and videos uploaded by the agent's browser, whatever the host ([kip-receipts-github](kip-receipts-github/SKILL.md)) | `gh` logged in |
+| [github-issue](sinks/github-issue.py) | Issue comment with the ledger, like linear (the issue is `123` or `owner/repo#123`); files uploaded by browser, as for github | `gh` logged in |
 
 `receipt.py publish` is the same for every sink: upload each file once, post
 `render` output verbatim (never a rewrite), and update the run's existing
@@ -337,7 +338,7 @@ posting: post `render --sink <name>` output verbatim through that connector
 publish updates the same comment. Files aren't uploaded through a connector;
 the ledger says so.
 
-A sink that can't upload (github) makes `publish` list the files left; upload
+A sink that can't upload (github, github-issue) makes `publish` list the files left; upload
 them yourself, `receipt.py record --sink <name> --file PATH --url URL`, and
 publish again.
 

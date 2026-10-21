@@ -48,9 +48,12 @@ def publish(conf, issue, body, comment_id):
     return comment_id or "cm1", conf.get("FAKE_URL", "https://fake.test") + "/" + issue + "#cm1"
 '''
 
-# Stands in for gh: one pull request whose body lives in $FAKE_PR_BODY.
+# Stands in for gh: one pull request whose body lives in $FAKE_PR_BODY, and issue comments logged to
+# $FAKE_GH_LOG (each call's arguments, then the JSON it was sent).
 FAKE_GH = f'''#!/bin/sh
 case "$1 $2" in
+  "api -X") echo "$*" >> "$FAKE_GH_LOG"; cat >> "$FAKE_GH_LOG"; echo >> "$FAKE_GH_LOG"
+            echo \'{{"id": 99, "html_url": "https://github.test/issues/7#issuecomment-99"}}\';;
   "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
   "pr edit") cat > "$FAKE_PR_BODY";;
   *) echo "unexpected: gh $*" >&2; exit 1;;
@@ -596,7 +599,8 @@ def main():
         (bin_ / "gh").chmod(0o755)
         body = Path(tmp, "pr-body.md")
         body.write_text("My description")
-        ghenv = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}", "FAKE_PR_BODY": str(body),
+        ghlog = Path(tmp, "gh.log")
+        ghenv = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}", "FAKE_PR_BODY": str(body), "FAKE_GH_LOG": str(ghlog),
                  "FAKE_PR_HEAD": sh("git", "rev-parse", "HEAD")}
         out = rc("check", "--pr", "7", ok=False, extra_env=ghenv)
         assert "PR 7 has no receipts ledger" in out, out
@@ -622,6 +626,15 @@ def main():
         assert "not uploaded" not in rc("publish", extra_env=ghenv)
         pr_body = body.read_text()
         assert f"![c3f1-shot.png]({img})" in pr_body and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
+
+        # The github-issue sink posts the ledger as one issue comment, like Linear, then updates that comment.
+        assert "github-issue: posted https://github.test/issues/7#issuecomment-99" in \
+            rc("publish", "--sink", "github-issue", extra_env=ghenv)
+        assert "github-issue: updated" in rc("publish", extra_env=ghenv)
+        calls = ghlog.read_text().splitlines()
+        assert calls[0] == "api -X POST repos/{owner}/{repo}/issues/7/comments --input -", calls
+        assert calls[2] == "api -X PATCH repos/{owner}/{repo}/issues/comments/99 --input -", calls
+        assert "### Receipts" in json.loads(calls[3])["body"], calls[3]
 
         # Stages come from config, fixed into the run at init: a project that drops them doesn't need them.
         (repo / ".kip" / "config.json").write_text(json.dumps({**PROJECT_CONFIG, "workflow": {"stages": []}}))
@@ -996,6 +1009,7 @@ print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, 
         calls = [("mcp__linear__get_issue", {"id": "ENG-42"}), ("mcp__linear__get_issue", {"id": "ENG-42"}),
                  ("mcp__claude_ai_Atlassian__getJiraIssue", {"cloudId": "c-1", "issueIdOrKey": "PROJ-7"}),
                  ("mcp__github__get_issue", {"title": "FOO-1 is not a tracker key"}),
+                 ("mcp__github__get_issue", {"owner": "me", "repo": "demo", "issue_number": 12}),
                  ("WebSearch", {"query": "UTF-8 decode error"}), ("WebFetch", {"url": "https://docs.test/a"}),
                  ("Bash", {"command": "curl -s https://api.test/v1 | jq ."}), ("Read", {"file_path": "app.py"}),
                  ("Bash", {"command": "curl http://127.0.0.1:7377/api/sessions"})]
@@ -1014,9 +1028,10 @@ print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, 
             assert row["runs"][0]["sinks"] == [{"name": "local", "url": None}, {"name": "linear", "url": None}] and \
                 row["runs"][0]["issue"] == "ENG-9" and row["runs"][0]["claims"] == {"✅ verified": 1}, row["runs"][0]
             assert sorted((i["key"], i["via"]) for i in row["issues"]) == \
-                [("ENG-42", "linear"), ("ENG-9", "linear"), ("PROJ-7", "claude_ai_Atlassian")], row["issues"]
+                [("ENG-42", "linear"), ("ENG-9", "linear"), ("PROJ-7", "claude_ai_Atlassian"),
+                 ("me/demo#12", "github")], row["issues"]
             assert sorted((s["kind"], s["name"], s["count"]) for s in row["sources"]) == [
-                ("link", "https://linear.test/ENG-42", 1), ("mcp", "claude_ai_Atlassian", 1), ("mcp", "github", 1),
+                ("link", "https://linear.test/ENG-42", 1), ("mcp", "claude_ai_Atlassian", 1), ("mcp", "github", 2),
                 ("mcp", "linear", 2), ("search", "UTF-8 decode error", 1), ("web", "https://api.test/v1", 1),
                 ("web", "https://docs.test/a", 1)], row["sources"]
             detail = json.loads(get(port, f"/api/runs/{first.name}"))

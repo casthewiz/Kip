@@ -37,8 +37,8 @@ working mid-turn, waiting on you, celebrating a finished run, or rained on when 
 gate blocked its stop. A session's page
 splits what it touched into segments:
 
-- **Issues**: the Linear or Jira issue its runs publish to, and issue keys its
-  Linear, Jira or Atlassian MCP calls named.
+- **Issues**: the Linear, Jira or GitHub issue its runs publish to, and issue keys its
+  Linear, Jira, Atlassian or GitHub MCP calls named.
 - **Sinks**: where each run's receipts go, linked once published.
 - **Sources**: MCP servers it called, web searches, URLs its tools fetched,
   links in prompts.

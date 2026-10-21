@@ -1070,7 +1070,8 @@ EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
 SKILL_FILE = re.compile(r"/skills/(?:\S*/)?([\w.-]+)/SKILL\.md$")  # reading one is using that skill (Cursor has no skill hook)
 ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
-TRACKER = re.compile(r"linear|jira|atlassian", re.I)  # an MCP server or sink whose issue keys are issues
+TRACKER = re.compile(r"linear|jira|atlassian|github-issue", re.I)  # an MCP server or sink whose issue keys are issues
+GITHUB_ISSUE = [re.compile(rf'"{k}": "?([\w.-]+)') for k in ("owner", "repo", "issue_number")]  # in a GitHub MCP call
 URL = re.compile(r"https?://(?!(?:localhost|127\.0\.0\.1|\[::1\])[:/])[^\s<>()\"'`]*[^\s<>()\"'`.,;:!?]")  # not this machine; not a sentence's period
 
 
@@ -1199,9 +1200,12 @@ def fold(rows, e):
         tool, what = str(e.get("tool")), str(e.get("input") or "")
         r["tool"] = f"{tool}: {what}" if what else tool
         found = sources(tool, what)
-        if found and found[0][0] == "mcp" and TRACKER.search(found[0][1]):
-            for key in ISSUE_KEY.findall(what):
-                r["issues"].setdefault(key, {"key": key, "via": found[0][1]})
+        server = found[0][1] if found and found[0][0] == "mcp" else ""
+        gh = [m.search(what) for m in GITHUB_ISSUE] if re.search("github", server, re.I) else []
+        keys = ISSUE_KEY.findall(what) if TRACKER.search(server) else \
+            ["{}/{}#{}".format(*(m[1] for m in gh))] if gh and all(gh) else []
+        for key in keys:
+            r["issues"].setdefault(key, {"key": key, "via": server})
         skill_file = tool not in EDITS and SKILL_FILE.search(what)  # editing a skill isn't using it
         if skill_file:
             tool, what = "Skill", skill_file[1]
