@@ -983,6 +983,30 @@ def main():
         assert run_json(old)["orphaned"]["reason"] == "its branch was recreated"
         assert Path(frc("init")).name == Path(frc("path")).name
         fsh("git", "checkout", "-q", base)
+        # A worktree's runs belong to its repository, not its folder: sweeping the main checkout settles them
+        # once the worktree is gone. Runs stored under a worktree's folder name before that still load and serve.
+        wt2 = Path(tmp, "wt2-folder")
+        fsh("git", "worktree", "add", "-q", "-b", "in-wt2", str(wt2), base)
+        wt_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=wt2))
+        assert wt_run.parent.name == "fin" and run_json(wt_run.name)["repo"] == "fin", wt_run
+        (wt2 / "wt2.txt").write_text("1\n")
+        sh("git", "add", ".", cwd=wt2)
+        sh("git", "commit", "-qm", "wt2", cwd=wt2)
+        fsh("git", "merge", "-q", "--no-ff", "in-wt2", "-m", "merge in-wt2")
+        fsh("git", "worktree", "remove", str(wt2))
+        assert f"finished {wt_run.name} (in-wt2: merged)" in frc("sweep")
+        Path(tmp, "store", "old-wt").mkdir()
+        wt_run.rename(Path(tmp, "store", "old-wt", wt_run.name))
+        kipdb("UPDATE runs SET repo = 'old-wt', data = json_set(data, '$.repo', 'old-wt') WHERE id = ?", wt_run.name)
+        assert "old-wt @" in frc("render", "--run", wt_run.name)
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        served = json.loads(get(port, f"/api/runs/{wt_run.name}"))
+        server.terminate()
+        server.wait()
+        assert served["id"] == wt_run.name and served["finished"], served
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}

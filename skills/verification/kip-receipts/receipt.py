@@ -110,6 +110,11 @@ def load_sink(name):
 
 @functools.lru_cache(maxsize=None)
 def repo_name():
+    """The main checkout's folder name, so a worktree's runs are its repository's."""
+    common = git("rev-parse", "--git-common-dir")
+    common = common and Path.cwd() / common  # relative to here, when it isn't absolute
+    if common and common.name == ".git":
+        return common.resolve().parent.name
     top = git("rev-parse", "--show-toplevel")
     return Path(top).name if top else Path.cwd().name
 
