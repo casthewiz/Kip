@@ -525,8 +525,14 @@ def cmd_orphan(a):
 
 
 def cmd_sweep(a):
+    for line in settle():
+        print(line)
+
+
+def settle(orphan=True):
     """Settle this repo's runs that no checkout will finish: finished once their branch merged into the base
-    branch, orphaned once it's gone without merging. The current branch finishes as the gate would."""
+    branch, orphaned (if orphan) once it's gone without merging. The current branch finishes as the gate would.
+    Yields a line per run settled."""
     base, here = base_branch(), git("branch", "--show-current")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     live = set(re.findall(r"^branch refs/heads/(.+)$", git("worktree", "list", "--porcelain") or "", re.M))
@@ -538,7 +544,7 @@ def cmd_sweep(a):
             continue
         if branch == here:
             if finish_if_done(d, rec):
-                print(f"finished {rid} ({branch}: merged)")
+                yield f"finished {rid} ({branch}: merged)"
             continue
         if branch in live:  # checked out elsewhere: that checkout's hooks finish it, uncommitted work and all
             continue
@@ -551,11 +557,11 @@ def cmd_sweep(a):
         if merged:
             with mutate(d) as fresh:
                 fresh["finished"] = {"at": now, "head": tip, "fingerprint": None}
-            print(f"finished {rid} ({branch}: merged)")
-        elif not tip:
+            yield f"finished {rid} ({branch}: merged)"
+        elif orphan and not tip:
             with mutate(d) as fresh:
                 fresh["orphaned"] = {"at": now, "reason": "its branch is gone"}
-            print(f"orphaned {rid} ({branch}: branch gone)")
+            yield f"orphaned {rid} ({branch}: branch gone)"
 
 
 def check_key(e):
@@ -980,7 +986,7 @@ def session_state():
 
 def session_changed(hook):
     """This session changed code: its uncommitted diff differs from how it found it, or HEAD has
-    commits it made (not merges) that its starting HEAD lacks."""
+    commits it made (not merges) that its starting HEAD lacks and no finished run covers."""
     start = session_start_state(hook)
     if not start:
         return False
@@ -991,8 +997,13 @@ def session_changed(hook):
     if diff != session_state().split()[1]:
         return True
     me = re.search(r"<(.*)>", git("var", "GIT_COMMITTER_IDENT") or "")
-    return bool(me and git("rev-list", "--no-merges", f"--since={since}", "-F", f"--committer=<{me[1]}>",
-                           "HEAD", f"^{head}"))
+    mine = ["rev-list", "--no-merges", "--ignore-missing", f"--since={since}", "-F", f"--committer=<{me[1]}>",
+            "HEAD", f"^{head}"] if me else None
+    if not (mine and git(*mine)):
+        return False
+    list(settle(orphan=False))  # they may be a merged branch's, whose run finishes now
+    covered = db().execute("SELECT json_extract(data, '$.finished.head') FROM runs WHERE repo = ?", (repo_name(),))
+    return bool(git(*mine, *(f"^{h}" for (h,) in covered if h)))
 
 
 def unplanned(event, hook):

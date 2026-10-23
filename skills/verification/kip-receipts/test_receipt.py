@@ -918,6 +918,25 @@ def main():
         assert f"orphaned {swept['dropped']} (dropped: branch gone)" in out, out
         assert frc("sweep") == "", "a second sweep changed something"
         fsh("git", "checkout", "-q", base)
+        # A session that merges its own verified branch into the base branch didn't change code there: the
+        # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
+        merger = {"session_id": "f10", "cwd": str(fin)}
+        check("--hook", "start", event=merger, cwd=fin)
+        fsh("git", "checkout", "-q", "-b", "merged-here")
+        merged_run = Path(frc("init")).name
+        frc("claim", "b is 1")
+        (fin / "b.txt").write_text("1\n")
+        frc("run", "c1", "--", "grep", "-q", "1", "b.txt")
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "b")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "merged-here", "-m", "merge merged-here")
+        code, out = check("--hook", "stop", event=merger, cwd=fin)
+        assert code == 0 and run_json(merged_run).get("finished"), (out, run_json(merged_run).get("finished"))
+        (fin / "b.txt").write_text("2\n")
+        fsh("git", "commit", "-qam", "b on base")
+        code, out = check("--hook", "stop", event=merger, cwd=fin)
+        assert code == 2 and "this session changed code" in out, out
 
         with open(run / "files" / "c1e2.log", "a") as f:
             f.write("tampered\n")
