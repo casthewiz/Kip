@@ -205,10 +205,27 @@ def dumps(x):
 
 
 def branch_run():
-    """This branch's newest run: the last one started on it (rowid order; saving a run never moves it)."""
-    row = db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
-                       (repo_name(), git("branch", "--show-current"))).fetchone()
-    return ROOT / row[0] / row[1] if row else None
+    """This branch's newest run: the last one started on it (rowid order; saving a run never moves it), passing
+    over runs a branch of the same name left behind."""
+    branch = git("branch", "--show-current")
+    for repo, rid in db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
+                                  (repo_name(), branch)).fetchall():
+        if not branch or speaks_for(load(ROOT / repo / rid), branch):
+            return ROOT / repo / rid
+    return None
+
+
+def speaks_for(rec, branch):
+    """The run belongs to the branch now under this name: it started after the branch was created, or the
+    branch carries the commit it started on (not one the base branch has too). A branch whose reflog
+    lost its creation counts as the old one."""
+    first = ((git("reflog", "show", "--format=%ct %gs", f"refs/heads/{branch}", "--") or "").splitlines() or [""])[-1]
+    at, _, how = first.partition(" ")
+    if not how.startswith("branch: Created") or datetime.datetime.fromisoformat(rec["created_at"]).timestamp() >= int(at):
+        return True
+    base = base_branch()
+    return bool(rec["commit"]) and git("merge-base", "--is-ancestor", rec["commit"], f"refs/heads/{branch}") is not None and \
+        not (base and git("merge-base", "--is-ancestor", rec["commit"], base) is not None)
 
 
 def run_path(run):
@@ -543,6 +560,11 @@ def settle(orphan=True):
         rec = load(d)
         branch = rec.get("branch")
         if rec.get("finished") or rec.get("orphaned") or not branch:
+            continue
+        if orphan and git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") and not speaks_for(rec, branch):
+            with mutate(d) as fresh:
+                fresh["orphaned"] = {"at": now, "reason": "its branch was recreated"}
+            yield f"orphaned {rid} ({branch}: branch recreated)"
             continue
         if branch == here:
             if finish_if_done(d, rec):

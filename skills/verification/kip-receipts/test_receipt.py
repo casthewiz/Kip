@@ -967,6 +967,22 @@ def main():
         state = {n: next((k for k in ("finished", "orphaned") if run_json(r).get(k)), "open") for n, r in squashed.items()}
         assert state == {"squash-kept": "finished", "squash-gone": "finished", "squash-moved": "open"}, (state, out)
         fsh("git", "remote", "remove", "origin")
+        # A branch recreated under an old name doesn't inherit the old branch's run (one started before it was
+        # created, on commits it lacks); sweep orphans that run. A run started on the new branch is its own.
+        fsh("git", "checkout", "-q", "-b", "reused", base)
+        old = Path(frc("init")).name
+        frc("claim", "old promise")
+        kipdb("UPDATE runs SET data = json_set(data, '$.created_at', '2000-01-01T00:00:00+00:00') WHERE id = ?", old)
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "branch", "-q", "-D", "reused")
+        fsh("git", "checkout", "-q", "-b", "reused", base)
+        assert "no receipt run for this branch" in frc("path", ok=False)
+        assert old not in check("--hook", "start", event={"session_id": "f11", "cwd": str(fin)}, cwd=fin)[1]
+        out = frc("sweep")
+        assert f"orphaned {old} (reused: branch recreated)" in out, out
+        assert run_json(old)["orphaned"]["reason"] == "its branch was recreated"
+        assert Path(frc("init")).name == Path(frc("path")).name
+        fsh("git", "checkout", "-q", base)
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}
