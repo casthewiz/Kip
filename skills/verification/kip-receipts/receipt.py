@@ -556,14 +556,34 @@ def settle(orphan=True):
         # "Gone" means gone from this clone, and runs are keyed by folder name, so sweep in the clone that made them.
         merged = landed(rec, tip, base) if tip else \
             bool(base and git("log", base, "--merges", "-1", "--format=%h", f"--grep=from [^ ]*/{re.escape(branch)}$"))
+        asks_gh = not merged and github_url()  # squash merges leave no ancestry to find
+        prs = merged_prs() if asks_gh else None
+        if prs:
+            created = datetime.datetime.fromisoformat(rec["created_at"])
+            merged = any(head == tip if tip else datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) > created
+                         for head, at in prs.get(branch, []))
         if merged:
             with mutate(d) as fresh:
                 fresh["finished"] = {"at": now, "head": tip, "fingerprint": None}
             yield f"finished {rid} ({branch}: merged)"
-        elif orphan and not tip:
+        elif orphan and not tip and not (asks_gh and prs is None):  # on GitHub, only once gh has answered
             with mutate(d) as fresh:
                 fresh["orphaned"] = {"at": now, "reason": "its branch is gone"}
             yield f"orphaned {rid} ({branch}: branch gone)"
+
+
+@functools.lru_cache(maxsize=None)
+def merged_prs():
+    """{branch: [(head, mergedAt)]} for this repo's merged GitHub PRs, or None when gh can't say."""
+    try:
+        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--limit", "500", "--json",
+                            "headRefName,headRefOid,mergedAt"], capture_output=True, text=True, timeout=30)
+        prs = {}
+        for pr in json.loads(r.stdout) if r.returncode == 0 else None:
+            prs.setdefault(pr["headRefName"], []).append((pr["headRefOid"], pr["mergedAt"]))
+        return prs
+    except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
+        return None
 
 
 def check_key(e):

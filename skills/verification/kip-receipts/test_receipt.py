@@ -56,6 +56,7 @@ case "$1 $2" in
             echo \'{{"id": 99, "html_url": "https://github.test/issues/7#issuecomment-99"}}\';;
   "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
   "pr edit") cat > "$FAKE_PR_BODY";;
+  "pr list") [ -n "$FAKE_MERGED_PRS" ] || exit 1; cat "$FAKE_MERGED_PRS";;
   *) echo "unexpected: gh $*" >&2; exit 1;;
 esac
 '''
@@ -938,6 +939,34 @@ def main():
         fsh("git", "checkout", "-q", "late-gate")
         assert "is finished" in check("--hook", "stop", event={}, cwd=fin)[1] and run_json(late_gate).get("finished")
         fsh("git", "checkout", "-q", base)
+        # Squash merges leave no ancestry, so on GitHub sweep asks gh which PRs merged: a kept branch whose tip
+        # is a merged PR's head finishes, and so does a deleted one with a PR merged after its run started; a
+        # branch that moved on after its PR merged stays open. Until gh answers, a deleted branch isn't orphaned.
+        squashed, tips = {}, {}
+        for name in ("squash-kept", "squash-gone", "squash-moved"):
+            fsh("git", "checkout", "-q", "-b", name, base)
+            squashed[name] = Path(frc("init")).name
+            (fin / f"{name}.txt").write_text(name)
+            fsh("git", "add", ".")
+            fsh("git", "commit", "-qm", name)
+            tips[name] = fsh("git", "rev-parse", "HEAD")
+            fsh("git", "checkout", "-q", base)
+            fsh("git", "merge", "-q", "--squash", name)
+            fsh("git", "commit", "-qm", f"{name} (#9)")
+        fsh("git", "checkout", "-q", "squash-moved")
+        fsh("git", "commit", "-q", "--allow-empty", "-m", "after the merge")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "branch", "-q", "-D", "squash-gone")
+        fsh("git", "remote", "add", "origin", "https://github.com/me/fin.git")
+        merged_prs = Path(tmp, "merged.json")
+        merged_prs.write_text(json.dumps([{"headRefName": n, "headRefOid": tips[n], "mergedAt": "2999-01-01T00:00:00Z"}
+                                          for n in squashed]))
+        no_gh = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}"}  # FAKE_MERGED_PRS unset: gh fails
+        assert frc("sweep", extra_env=no_gh) == "", "settled squash merges without gh"
+        out = frc("sweep", extra_env={**no_gh, "FAKE_MERGED_PRS": str(merged_prs)})
+        state = {n: next((k for k in ("finished", "orphaned") if run_json(r).get(k)), "open") for n, r in squashed.items()}
+        assert state == {"squash-kept": "finished", "squash-gone": "finished", "squash-moved": "open"}, (state, out)
+        fsh("git", "remote", "remove", "origin")
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}
