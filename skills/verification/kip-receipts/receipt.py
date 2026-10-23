@@ -417,8 +417,10 @@ def cmd_init(a):
     checks = [] if a.target else [  # required checks are this checkout's, not a remote site's
         new_claim(f"c{i}", f"`{name}` passes", check=name, command=cmd if isinstance(cmd, list) else ["sh", "-c", cmd])
         for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
+    base = base_branch()
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
+             "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
              "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "stages": workflow.get("stages", []), "claims": checks})
     print(d)
@@ -552,7 +554,7 @@ def settle(orphan=True):
             git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}")
         # messy-bun: a deleted branch counts as merged only by GitHub's merge message; squash merges get orphaned.
         # "Gone" means gone from this clone, and runs are keyed by folder name, so sweep in the clone that made them.
-        merged = bool(base) and git("merge-base", "--is-ancestor", tip, base) is not None and tip != rec["commit"] if tip else \
+        merged = landed(rec, tip, base) if tip else \
             bool(base and git("log", base, "--merges", "-1", "--format=%h", f"--grep=from [^ ]*/{re.escape(branch)}$"))
         if merged:
             with mutate(d) as fresh:
@@ -957,12 +959,22 @@ def session_start_state(hook):
     return row[0] if row else None
 
 
+def landed(rec, tip, base):
+    """The run's branch is on the base branch: tip is in it and past where the branch left it, so a run
+    started after the branch's last commit still counts. Runs from before init kept the fork point left it
+    where their commit is on the base branch's own line (messy-bun: a fast-forwarded branch's old run stays open)."""
+    if not base or git("merge-base", "--is-ancestor", tip, base) is None:
+        return False
+    fork = rec["fork"] if "fork" in rec else \
+        rec["commit"] if rec["commit"] in (git("rev-list", "--first-parent", base) or "").split() else None
+    return tip != fork
+
+
 def finish_if_done(d, rec):
-    """Mark a run finished once commits made since its init are on the base branch and nothing
-    changed since, so its old claims stop speaking for new work. True if it just finished."""
+    """Mark a run finished once its branch is on the base branch and nothing changed since, so its old
+    claims stop speaking for new work. True if it just finished."""
     head, base = git("rev-parse", "HEAD"), base_branch()
-    if head == rec["commit"] or not base or git("merge-base", "--is-ancestor", "HEAD", base) is None \
-            or worktree_diff():
+    if not landed(rec, head, base) or worktree_diff():
         return False
     rec["finished"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                        "head": head, "fingerprint": fingerprint()}

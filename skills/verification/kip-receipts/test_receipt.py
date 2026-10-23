@@ -896,16 +896,25 @@ def main():
         assert "f9" not in rows and [x["id"] for x in rows["f5"]["runs"]] == [fresh], rows.get("f5")
         assert "c1 ⚠️ unverified: a is 7, again" in rows["f5"]["open"]["unaddressed"], rows["f5"]["open"]
         # Sweep settles runs no checkout will: merged branches (kept, or deleted after a GitHub merge) finish,
+        # runs started after their branch's last commit included (from before init kept the fork point too),
         # deleted unmerged ones are orphaned, open and commitless ones stay; a second sweep changes nothing.
         swept = {}
-        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree"):
+        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree", "late-merged",
+                     "legacy-late"):
             fsh("git", "checkout", "-q", "-b", name, base)
-            swept[name] = Path(frc("init")).name
+            if "late" not in name:
+                swept[name] = Path(frc("init")).name
             if name != "no-commits":
                 (fin / f"{name}.txt").write_text(name)
                 fsh("git", "add", ".")
                 fsh("git", "commit", "-qm", name)
+            if "late" in name:
+                swept[name] = Path(frc("init")).name
+        assert run_json(swept["late-merged"])["fork"] == fsh("git", "rev-parse", base)
+        kipdb("UPDATE runs SET data = json_remove(data, '$.fork') WHERE id = ?", swept["legacy-late"])
         fsh("git", "checkout", "-q", base)
+        for name in ("late-merged", "legacy-late"):
+            fsh("git", "merge", "-q", "--no-ff", name, "-m", f"merge {name}")
         fsh("git", "merge", "-q", "--no-ff", "kept-merged", "-m", "merge kept-merged")
         fsh("git", "merge", "-q", "--no-ff", "gh-merged", "-m", "Merge pull request #2 from me/gh-merged")
         fsh("git", "merge", "-q", "--no-ff", "in-a-worktree", "-m", "merge in-a-worktree")
@@ -914,9 +923,20 @@ def main():
         out = frc("sweep")
         state = {n: next((k for k in ("finished", "orphaned") if run_json(rid).get(k)), "open") for n, rid in swept.items()}
         assert state == {"kept-merged": "finished", "gh-merged": "finished", "dropped": "orphaned",
-                         "still-open": "open", "no-commits": "open", "in-a-worktree": "open"}, (state, out)
+                         "still-open": "open", "no-commits": "open", "in-a-worktree": "open", "late-merged": "finished",
+                         "legacy-late": "finished"}, (state, out)
         assert f"orphaned {swept['dropped']} (dropped: branch gone)" in out, out
         assert frc("sweep") == "", "a second sweep changed something"
+        # The gate on its own branch finishes a run started after the branch's last commit, once that's merged.
+        fsh("git", "checkout", "-q", "-b", "late-gate", base)
+        (fin / "late-gate.txt").write_text("1\n")
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "late-gate")
+        late_gate = Path(frc("init")).name
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "late-gate", "-m", "merge late-gate")
+        fsh("git", "checkout", "-q", "late-gate")
+        assert "is finished" in check("--hook", "stop", event={}, cwd=fin)[1] and run_json(late_gate).get("finished")
         fsh("git", "checkout", "-q", base)
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
