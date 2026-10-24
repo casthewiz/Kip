@@ -1186,12 +1186,21 @@ def use_a_worktree(where):
             "(`claude --worktree`, EnterWorktree, a Cursor worktree), then make the change there.")
 
 
-NUDGES = ROOT / "nudges"  # <session id>: that session was already stopped once from editing a main checkout
+NUDGES = ROOT / "nudges"  # <session id>: nudged once off a main checkout; <session id>.<stage>: that skill is settled
+
+
+def nudge_once(name):
+    NUDGES.mkdir(parents=True, exist_ok=True)
+    for old in NUDGES.iterdir():  # a session that never reached its end hook
+        if old.stat().st_mtime < datetime.datetime.now().timestamp() - KEEP_DAYS * 86400:
+            old.unlink(missing_ok=True)
+    (NUDGES / name).touch()
 
 
 def edit_gate(hook):
-    """(blocked, message) for a file edit: the main checkout's files are worktree work under workflow.worktrees.
-    One git call decides; files outside a repo or in a linked worktree pass without loading config."""
+    """(blocked, message) for a file edit in a repo: the main checkout's files are worktree work under
+    workflow.worktrees, and workflow.skills' decompose and implement skills come first. One git call decides a
+    file outside a repo; one in a linked worktree adds none once those skills are used."""
     ti = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
     path = ti.get("file_path") or ti.get("notebook_path")
     if not path:
@@ -1200,20 +1209,68 @@ def edit_gate(hook):
     while not folder.is_dir():
         folder = folder.parent
     dirs = (git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", cwd=folder) or "").splitlines()
-    if len(dirs) != 2 or dirs[0] != dirs[1]:
+    if len(dirs) != 2:
         return False, ""
     os.chdir(folder)
-    policy, sid = worktree_policy(), session_id(hook)
-    if policy == "off" or policy == "nudge" and (not sid or (NUDGES / sid).exists()):  # no session: nothing to nudge once
-        return False, ""
-    if policy == "nudge":
-        NUDGES.mkdir(parents=True, exist_ok=True)
-        for old in NUDGES.iterdir():  # a session that never reached its end hook
-            if old.stat().st_mtime < datetime.datetime.now().timestamp() - KEEP_DAYS * 86400:
-                old.unlink(missing_ok=True)
-        (NUDGES / sid).touch()
-    return True, use_a_worktree(path) + (" This is a nudge, once a session: retrying edits here anyway."
-                                         if policy == "nudge" else "")
+    blocked, msg = False, ""
+    if dirs[0] == dirs[1]:
+        policy, sid = worktree_policy(), session_id(hook)
+        if not (policy == "off" or policy == "nudge" and (not sid or (NUDGES / sid).exists())):  # no session: nothing to nudge once
+            if policy == "nudge":
+                nudge_once(sid)
+            blocked, msg = True, use_a_worktree(path) + (" This is a nudge, once a session: retrying edits here anyway."
+                                                         if policy == "nudge" else "")
+    return with_due(skills_due(hook, ("decompose", "implement")), blocked, msg)
+
+
+ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",
+       "implement": "`/kip-messy-bun` (a nudge, once a session: skip it if the change is trivial)",
+       "tidy": "`/kip-marie-kondo` over this session's changes"}
+
+
+def session_skills(sid):
+    """The skills a session has used, from the event log."""
+    used = set()
+    for p in EVENTS.glob("*.jsonl"):
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if sid not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("session") == sid and e.get("hook") == "tool":
+                    used.add(used_skill(str(e.get("tool")), str(e.get("input") or "")))
+    return used
+
+
+def skills_due(hook, stages):
+    """What this session still owes of workflow.skills' stages: a required skill until it's used, a nudged one once.
+    A stage settled (used, or nudged) gets a nudge file, so later edits skip the log; config is read only once
+    a skill is missing."""
+    sid = session_id(hook)
+    todo = [s for s in stages if sid and not (NUDGES / f"{sid}.{s}").exists()]
+    if not todo:
+        return ""
+    used = session_skills(sid)
+    for s in todo:
+        if SKILL_OF[s] in used:
+            nudge_once(f"{sid}.{s}")
+    todo = [s for s in todo if SKILL_OF[s] not in used]
+    if not todo:
+        return ""
+    policy = kip.load().get("workflow", {}).get("skills", {})
+    due = [s for s in todo if policy.get(s) in ("nudge", "required")]
+    for s in due:
+        if policy[s] == "nudge":
+            nudge_once(f"{sid}.{s}")
+    return f"kip: run {' and '.join(ASK[s] for s in due)} first (workflow.skills)." if due else ""
+
+
+def with_due(due, blocked, msg):
+    """A gate's verdict with the skills the session still owes put first."""
+    return (True, "\n".join(filter(None, [due, msg if blocked else ""]))) if due else (blocked, msg)
 
 
 def gate(a, hook):
@@ -1222,6 +1279,11 @@ def gate(a, hook):
         return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
+    due = skills_due(hook, ("decompose", "tidy")) if a.hook == "stop" and session_changed(hook) else ""
+    return with_due(due, *branch_gate(a, hook))
+
+
+def branch_gate(a, hook):
     if a.hook == "stop" and worktree_policy() == "required" and main_checkout() and not linked() \
             and session_changed(hook):
         return True, use_a_worktree(f"this session's work in {here()[1]}") + \
@@ -1430,6 +1492,7 @@ OWNER = "CLAUDE_CODE_SESSION_ID"
 STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
 SKILL_STAGES = {"kip-decompose": "decompose", "kip-messy-bun": "implement", "kip-marie-kondo": "tidy",
                 "code-review": "review", "kip-receipts": "receipts"}
+SKILL_OF = {stage: skill for skill, stage in SKILL_STAGES.items()}
 EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
 SKILL_FILE = re.compile(r"/skills/(?:\S*/)?([\w.-]+)/SKILL\.md$")  # reading one is using that skill (Cursor has no skill hook)
@@ -1437,6 +1500,12 @@ ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 TRACKER = re.compile(r"linear|jira|atlassian|github-issue", re.I)  # an MCP server or sink whose issue keys are issues
 GITHUB_ISSUE = [re.compile(rf'"{k}": "?([\w.-]+)') for k in ("owner", "repo", "issue_number")]  # in a GitHub MCP call
 URL = re.compile(r"https?://(?!(?:localhost|127\.0\.0\.1|\[::1\])[:/])[^\s<>()\"'`]*[^\s<>()\"'`.,;:!?]")  # not this machine; not a sentence's period
+
+
+def used_skill(tool, what):
+    """The skill a tool call uses: a Skill call, or reading its SKILL.md (Cursor has no skill hook); editing one isn't."""
+    m = tool not in EDITS and SKILL_FILE.search(what)
+    return m[1] if m else what if tool == "Skill" else None
 
 
 def append_event(payload, **fields):
@@ -1518,7 +1587,8 @@ def ensure_server():
 def session_end(hook):
     stop_servers(hook)
     if session_id(hook):
-        (NUDGES / session_id(hook)).unlink(missing_ok=True)
+        for name in [session_id(hook)] + [f"{session_id(hook)}.{s}" for s in SKILL_OF]:
+            (NUDGES / name).unlink(missing_ok=True)
 
 
 def stop_servers(hook):
@@ -1579,9 +1649,9 @@ def fold(rows, e):
             ["{}/{}#{}".format(*(m[1] for m in gh))] if gh and all(gh) else []
         for key in keys:
             r["issues"].setdefault(key, {"key": key, "via": server})
-        skill_file = tool not in EDITS and SKILL_FILE.search(what)  # editing a skill isn't using it
-        if skill_file:
-            tool, what = "Skill", skill_file[1]
+        skill = used_skill(tool, what)
+        if skill:
+            tool, what = "Skill", skill
         stage = SKILL_STAGES.get(what) if tool == "Skill" else "implement" if tool in EDITS else \
             "receipts" if re.search(r"receipt\.py (run|render|publish)\b", what) else None
         if tool == "Skill" and what not in r["skills"]:

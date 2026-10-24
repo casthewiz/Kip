@@ -26,10 +26,11 @@ Every non-trivial task follows the same loop:
 4. **Review**: a pass for correctness bugs.
 5. **Receipts**: every claim backed by rerunnable, deterministic evidence.
 
-The loop isn't a suggestion. Kip's gate hooks into the agent: it can't end a
-turn with unproven claims or failing checks, or open a PR without its tidy
-and review passes. A [GitHub Action](docs/receipts.md#ci) holds every PR to
-the same bar, whoever opened it.
+The loop isn't a suggestion. Kip's gate hooks into the agent: it can't edit
+before decomposing, end a turn without tidying or with unproven claims or
+failing checks, or open a PR without its tidy and review passes. A
+[GitHub Action](docs/receipts.md#ci) holds every PR to the same bar, whoever
+opened it.
 
 ## Skills
 

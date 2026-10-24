@@ -8,11 +8,11 @@ description: >
   levels: lite (shallow, efficient chunking and sequencing), full (default),
   ultra (deep: the underlying problem traced through the real code and data,
   assumptions and open questions surfaced, units grounded in what was found).
-  Use before implementing anything non-trivial, multi-step, or ambiguous, and
-  whenever the user says "decompose", "break this down", "plan this", "scope
-  this", "what would this take", "units of work", "what's the real problem",
-  or "help me understand this". Do NOT use for one-line changes or questions
-  that need an answer, not a plan.
+  Use before any code change (lite for a small one; Kip's gate holds edits
+  until it has run), and whenever the user says "decompose", "break this
+  down", "plan this", "scope this", "what would this take", "units of work",
+  "what's the real problem", or "help me understand this". Do NOT use for
+  questions that need an answer, not a plan.
 argument-hint: "[lite|full|ultra]"
 license: MIT
 ---
