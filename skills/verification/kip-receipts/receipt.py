@@ -174,6 +174,10 @@ SCHEMA = [  # one entry per version: append a new one, never edit a shipped one
     CREATE TABLE files (run TEXT NOT NULL, claim TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL,
                         PRIMARY KEY (run, claim, seq));
     CREATE TABLE sessions (repo TEXT NOT NULL, id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (repo, id));""",
+    # A session's start per worktree it works in. `sessions` stays as it was: an older Kip (another checkout's
+    # hooks) shares this kip.db and still writes it, and its rows read as starts in an unknown worktree ('').
+    """CREATE TABLE session_starts (repo TEXT NOT NULL, id TEXT NOT NULL, worktree TEXT NOT NULL, state TEXT NOT NULL,
+                                    PRIMARY KEY (repo, id, worktree))""",
 ]
 _db, _imported = None, (0, 0)
 
@@ -1050,11 +1054,38 @@ def session_id(hook):
     return str(sid) if sid else None
 
 
-def session_start_state(hook):
-    """The code as this session found it (session_state), or None for a session Kip didn't see start."""
+def session_states(hook):
+    """{worktree: the code as this session found it there (session_state)} for each worktree it started in."""
     sid = session_id(hook)
-    row = sid and db().execute("SELECT state FROM sessions WHERE repo = ? AND id = ?", (repo_name(), sid)).fetchone()
-    return row[0] if row else None
+    return dict(db().execute("SELECT '', state FROM sessions WHERE repo = ?1 AND id = ?2 UNION ALL "
+                             "SELECT worktree, state FROM session_starts WHERE repo = ?1 AND id = ?2",
+                             (repo_name(), sid)).fetchall()) if sid else {}
+
+
+def session_start_state(hook):
+    """The code as this session found it in this worktree; for a linked worktree it entered after starting
+    elsewhere, the worktree as it was created; None for a session Kip didn't see start."""
+    states, top = session_states(hook), here()[1] or ""
+    if top in states or "" in states:  # '': recorded by a Kip that didn't keep starts per worktree
+        return states.get(top, states.get(""))
+    return worktree_created() if states and linked() else None
+
+
+def linked():
+    """This checkout is a linked worktree, not the main one."""
+    top, main = here()[1], main_checkout()
+    return bool(top and main and Path(top).resolve() != main)
+
+
+def worktree_created():
+    """A linked worktree as it was created: where its branch left the base branch, no diff, and when its git dir's
+    commondir was written (once, by `git worktree add`). Not its HEAD's reflog: hosts can create one without it."""
+    base, made = base_branch(), git("rev-parse", "--git-path", "commondir")
+    fork = base and git("merge-base", "HEAD", base)
+    if not (fork and made and Path(made).is_file()):
+        return None
+    at = datetime.datetime.fromtimestamp(int(Path(made).stat().st_mtime), datetime.timezone.utc)
+    return f"{fork} {hashlib.sha256(b'').hexdigest()} {at.isoformat(timespec='seconds')}"
 
 
 def landed(rec, tip, base, cwd=None):
@@ -1143,12 +1174,14 @@ def session_start(hook):
 
 
 def run_status(hook):
-    if not git("rev-parse", "--show-toplevel"):
+    top = here()[1]
+    if not top:
         return ""
-    if session_id(hook) and not session_start_state(hook):
+    if session_id(hook) and not {top, ""} & set(session_states(hook)):
         state = session_state()  # git runs outside the write lock
         with tx() as con:  # a resumed session keeps the state it first started from
-            con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)", (repo_name(), session_id(hook), state))
+            con.execute("INSERT OR IGNORE INTO session_starts VALUES (?, ?, ?, ?)",
+                        (repo_name(), session_id(hook), top, state))
     list(settle())  # merged and deleted branches, so no one has to remember `sweep`
     d = branch_run()
     rec = load(d) if d else None

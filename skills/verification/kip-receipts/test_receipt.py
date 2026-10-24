@@ -1075,6 +1075,27 @@ def main():
         fsh("git", "checkout", "-q", "--detach")
         assert "no receipt run" in frc("path", ok=False)
         fsh("git", "checkout", "-q", base)
+        # A session's start is kept per worktree. One that started in a main checkout with uncommitted edits and
+        # moved into a worktree made after it started is judged there from the worktree as it was created:
+        # nothing done there yet passes, an edit or a commit there needs a run, the main checkout's edits don't count.
+        mover, wt3 = {"session_id": "mover"}, Path(tmp, "wt3-folder")
+        (fin / "left-behind.txt").write_text("main checkout's edit\n")
+        check("--hook", "start", event={**mover, "cwd": str(fin)}, cwd=fin)
+        fsh("git", "worktree", "add", "-q", "-b", "in-wt3", str(wt3), base)
+        assert check("--hook", "stop", event={**mover, "cwd": str(wt3)}, cwd=wt3)[0] == 0
+        (wt3 / "wt3.txt").write_text("1\n")
+        code, out = check("--hook", "stop", event={**mover, "cwd": str(wt3)}, cwd=wt3)
+        assert code == 2 and "this session changed code" in out, out
+        sh("git", "add", ".", cwd=wt3)
+        sh("git", "commit", "-qm", "wt3", cwd=wt3)
+        code, out = check("--hook", "stop", event={**mover, "cwd": str(wt3)}, cwd=wt3)
+        assert code == 2 and "this session changed code" in out, out
+        assert check("--hook", "start", event={**mover, "cwd": str(wt3)}, cwd=wt3)[0] == 0
+        assert {w for (w,) in kipdb("SELECT worktree FROM session_starts WHERE id = 'mover'")} == \
+            {str(fin.resolve()), str(wt3.resolve())}
+        (fin / "left-behind.txt").unlink()
+        fsh("git", "worktree", "remove", "--force", str(wt3))
+        fsh("git", "branch", "-q", "-D", "in-wt3")
         fsh("git", "merge", "-q", "--no-ff", "in-wt2", "-m", "merge in-wt2")
         fsh("git", "worktree", "remove", str(wt2))
         assert f"finished {wt_run.name} (in-wt2: merged)" in frc("sweep")
@@ -1197,7 +1218,7 @@ def main():
         # and concurrent writers queue instead of overwriting each other.
         fresh = {"KIP_RECEIPTS_DIR": str(Path(tmp, "fresh dir #1?"))}  # a path a hand-built file: URI would break on
         assert rc("db", extra_env=fresh) == f"{Path(tmp, 'fresh dir #1?', 'kip.db')} · not created yet"
-        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v1 of 1 · 0 runs")
+        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v2 of 2 · 0 runs")
         upgrade = f"""import sys
 sys.path.insert(0, {str(SCRIPT.parent)!r})
 import receipt
@@ -1206,7 +1227,21 @@ receipt._db = None
 receipt.SCHEMA.append("ALTER TABLE runs ADD COLUMN note TEXT")
 con = receipt.db()
 print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, note FROM runs").fetchall())"""
-        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "2 [('r1', None)]"
+        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "3 [('r1', None)]"
+        # Upgrading a v1 kip.db leaves `sessions` as an older Kip (another checkout's hooks) writes it: that still
+        # works, and its rows read as starts in an unknown worktree.
+        v1 = f"""import sys
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import receipt
+schema = list(receipt.SCHEMA)
+del receipt.SCHEMA[1:]
+receipt.db()
+receipt._db = None
+receipt.SCHEMA[:] = schema
+receipt.db().execute("INSERT INTO sessions VALUES ('demo', 's1', 'an older Kip, after the upgrade')")
+print(receipt.session_states({{"session_id": "s1"}}))"""
+        assert sh(sys.executable, "-c", v1, extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "v1"))}) == \
+            "{'': 'an older Kip, after the upgrade'}"
         conc = Path(rc("init"))
         rc("claim", "written by 20 processes at once", "--run", conc.name)
         writers = [subprocess.Popen([sys.executable, str(SCRIPT), "observe", "c1", "--passed", f"w{i}", "--run", str(conc)],
@@ -1228,7 +1263,7 @@ print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, 
             shutil.copytree(r, legacy / "demo" / r.name)
             (legacy / "demo" / r.name / "receipt.json").write_text(json.dumps(run_json(r), indent=2))
         (legacy / "demo" / "sessions").mkdir()
-        (legacy / "demo" / "sessions" / "m1").write_text(kipdb("SELECT state FROM sessions LIMIT 1")[0][0] + "\n")
+        (legacy / "demo" / "sessions" / "m1").write_text(kipdb("SELECT state FROM session_starts LIMIT 1")[0][0] + "\n")
         old = {"KIP_RECEIPTS_DIR": str(legacy)}
         assert rc("db", "--migrate", extra_env=old).startswith("imported 2 runs and 1 session starts"), "import"
         assert rc("db", "--migrate", extra_env=old).startswith("imported 0 runs and 0 session starts"), "re-import"
