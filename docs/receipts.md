@@ -23,6 +23,19 @@ so there the gate asks once, as a follow-up message.
 Stages and required checks are set under `workflow` in
 [configuration](configuration.md).
 
+## Worktrees
+
+Kip expects work to happen in linked worktrees, one per task or parallel
+unit: `kip.py worktree new NAME` makes one at `.kip/worktrees/NAME` on
+branch `kip/NAME`, copies the gitignored files `.worktreeinclude` names, and
+runs `workflow.worktree.setup` there; the host's own worktrees work the same.
+Every run records the worktree it started in, and evidence is judged only
+where its code is checked out. A [plan](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan)
+hands each unit's claims to the unit's run (`--parent RUN --unit N`) and
+shows their verdicts. The gate steers edits off a main checkout
+(`workflow.worktrees`), and evidence against a dev server running another
+checkout's code is flagged.
+
 ## Storage
 
 `kip-receipts` records evidence with `python3` (standard library only) in

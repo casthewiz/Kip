@@ -56,9 +56,16 @@ where it was published and finished), the sessions that wrote to it, the
 sessions that only shared its branch when a hook fired, and its claims grouped
 by `kip-decompose` unit.
 
+A plan's unit runs are listed right under it, each with its unit and the
+[worktree](receipts.md#worktrees) it started in (struck through once that
+folder is removed); a run's page names its plan or lists its unit runs, and a
+delegated claim links to the run that took it. A session's row shows the
+worktree its last gate fired in, when that isn't the main checkout.
+
 Flags mark what looks wrong: open on a branch that has merged, superseded by
 a newer run on its branch, no writer recorded, sessions linked only by branch,
-and settled before Kip recorded how. Only an open run's flags need attention,
+settled before Kip recorded how, a worktree removed with work not merged, and
+evidence served from another checkout. Only an open run's flags need attention,
 which is what **Needs attention** filters to; a settled run's flags are
 history, shown muted.
 

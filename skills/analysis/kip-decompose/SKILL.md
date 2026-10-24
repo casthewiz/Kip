@@ -119,6 +119,22 @@ where kip-receipts requires it. The run records the code as it is now; once
 work lands, the host's hooks won't let the session end while any of these
 claims is unaddressed. If the user changes the plan, start a new run.
 
+**Parallel units go in worktrees.** Each unit marked parallel runs in its own
+linked worktree, on its own branch, so units don't step on each other's
+files, dev servers, or uncommitted work. Start one with the host's own
+(`claude --worktree`, a worktree-isolated subagent, a Cursor worktree) or
+Kip's, which also starts the unit's run:
+
+```bash
+python3 ~/.kip/kip/kip.py worktree new unit-2 --parent <plan run id> --unit 2   # prints the worktree's path
+```
+
+In a worktree the host made, hand the unit over from inside it:
+`python3 $R init --parent <plan run id> --unit 2`. The unit's run takes the
+plan's open claims for that unit, so they're recorded once and verified where
+the work happens; the plan shows their verdicts. Don't retype them into a
+fresh `init`.
+
 ## Boundaries
 
 Decompose governs understanding and planning. kip-messy-bun governs how each unit
