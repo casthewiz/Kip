@@ -1052,9 +1052,29 @@ def main():
         fsh("git", "worktree", "add", "-q", "-b", "in-wt2", str(wt2), base)
         wt_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=wt2))
         assert wt_run.parent.name == "fin" and run_json(wt_run.name)["repo"] == "fin", wt_run
+
+        def wrc(*args, **kw):
+            return sh(sys.executable, str(SCRIPT), *args, cwd=wt2, **kw)
+
+        # A run knows the worktree it started in, and only the checkout holding its code judges its evidence stale:
+        # a sibling checkout's own changes don't, the run's worktree's do.
+        assert run_json(wt_run.name)["worktree"] == str(wt2.resolve()), run_json(wt_run.name)
+        wrc("claim", "wt2 works")
+        wrc("run", "c1", "--", "true")
+        (fin / "dirty.txt").write_text("the main checkout's own change\n")
+        assert "stale" not in frc("render", "--run", wt_run.name)
+        (fin / "dirty.txt").unlink()
         (wt2 / "wt2.txt").write_text("1\n")
+        assert "stale" in wrc("render")
         sh("git", "add", ".", cwd=wt2)
         sh("git", "commit", "-qm", "wt2", cwd=wt2)
+        # On a detached HEAD, a worktree's branchless run is its own, never a sibling worktree's.
+        sh("git", "checkout", "-q", "--detach", cwd=wt2)
+        detached = Path(wrc("init")).name
+        assert Path(wrc("path")).name == detached and not run_json(detached)["branch"]
+        fsh("git", "checkout", "-q", "--detach")
+        assert "no receipt run" in frc("path", ok=False)
+        fsh("git", "checkout", "-q", base)
         fsh("git", "merge", "-q", "--no-ff", "in-wt2", "-m", "merge in-wt2")
         fsh("git", "worktree", "remove", str(wt2))
         assert f"finished {wt_run.name} (in-wt2: merged)" in frc("sweep")

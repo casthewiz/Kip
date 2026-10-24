@@ -125,6 +125,19 @@ def repo_name():
     return Path(top).name if top else Path.cwd().name
 
 
+@functools.lru_cache(maxsize=None)
+def here():
+    """(branch, worktree folder) of this checkout, once per invocation; (None, None) outside one."""
+    return git("branch", "--show-current"), git("rev-parse", "--show-toplevel")
+
+
+def holds(rec):
+    """This checkout has the run's code: its branch is checked out here (git checks a branch out in one worktree
+    at a time) or, for a run started on a detached HEAD, this is the worktree it started in."""
+    branch, top = here()
+    return repo_name() == rec["repo"] and (branch == rec["branch"] if rec.get("branch") else rec.get("worktree") == top)
+
+
 def github_url():
     """This checkout's GitHub page, from its origin remote; None when it isn't on GitHub."""
     m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", git("remote", "get-url", "origin") or "")
@@ -222,11 +235,12 @@ def dumps(x):
 
 def branch_run():
     """This branch's newest run: the last one started on it (rowid order; saving a run never moves it), passing
-    over runs a branch of the same name left behind."""
-    branch = git("branch", "--show-current")
+    over runs a branch of the same name left behind. On a detached HEAD, this worktree's newest branchless run."""
+    branch, top = here()
     for repo, rid in db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
                                   (repo_name(), branch)).fetchall():
-        if not branch or speaks_for(load(ROOT / repo / rid), branch):
+        rec = load(ROOT / repo / rid)
+        if speaks_for(rec, branch) if branch else rec.get("worktree") == top:
             return ROOT / repo / rid
     return None
 
@@ -454,9 +468,10 @@ def cmd_init(a):
         for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
     base = base_branch()
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
-             "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
+             "commit": git("rev-parse", "HEAD"), "branch": here()[0], "baseline": fingerprint(),
              "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
              "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
+             "worktree": here()[1],  # the checkout it started in, main or linked
              "session": writer(), "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "stages": workflow.get("stages", []), "claims": checks})
     print(d)
@@ -696,7 +711,7 @@ def verdict(c, rec):
             if note:
                 return f"⚠️ {note}"
             shown = True
-    now = current_tree() if repo_name() == rec["repo"] else None  # another checkout's code says nothing
+    now = current_tree() if holds(rec) else None  # another checkout's code says nothing
     if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
         return "⚠️ stale: the code changed since it was checked"
     if c["unverified"] or not ev:
