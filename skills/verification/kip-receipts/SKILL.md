@@ -182,6 +182,7 @@ python3 $R claim "POST /invoices accepts null due" --provider api --level ultra
 python3 $R run c1 --red -- npm test -- invoices      # ultra: on the old code, must fail
 python3 $R run c1 -- npm test -- invoices            # on the new code, must pass
 python3 $R run c2 --static -- npx tsc --noEmit       # static, not behavior
+python3 $R run c1 c4 c5 -- npm test                  # one run, evidence for each claim it covers
 python3 $R observe c3 --passed "form shows 'No due date'"   # browser-tool checks only
 python3 $R attach c3 shot.png                        # screenshots, videos, logs
 python3 $R unverified c4 "needs the PDF service"
@@ -237,7 +238,8 @@ it stays ⚠️ self-reported.
   prod credentials, needs hardware, no test harness) and what would verify it.
 - ⚠️ **falsifiability not shown**: the claim is at ultra and has no `--red` run.
 - ⚠️ **stale**: the code changed since a check last passed (compared by
-  content, so committing the checked code doesn't count). Re-run it.
+  content, so committing the checked code doesn't count). Re-run it; claims
+  that share a check re-run together (`run c1 c2 c3 -- …`).
 - ⚠️ **self-reported**: the only evidence is observations, with no file
   attached.
 - ⚠️ **flaky**: the same check failed and passed on the same code. Find out

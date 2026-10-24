@@ -1041,6 +1041,19 @@ def main():
         assert (rec["session"], c1["session"], c2["session"], c3["session"]) == ("w1", "w1", "w2", None), rec
         assert [e["session"] for e in c1["evidence"]] == ["w2", "w1"], c1["evidence"]
         assert (c2["unverified_by"], c2["accepted_by"], c3["unverified_by"]) == ("w1", "w2", None), (c2, c3)
+        # One command can be evidence for several claims: it runs once, and each claim gets its own evidence
+        # sharing that log. An unknown claim stops it before anything runs.
+        count = Path(tmp, "ran-once")
+        once = ["sh", "-c", f"echo ran >> '{count}'"]
+        assert "unknown claim c9" in frc("run", "c1", "c9", "--", *once, ok=False) and not count.exists()
+        out = frc("run", "c1", "c3", "--", *once, extra_env=w1)
+        assert count.read_text() == "ran\n" and out.splitlines() == [
+            "c1e3: exit 0 (expected success) -> pass", "c3e1: exit 0 (expected success) -> pass"], out
+        c1, _, c3 = run_json(prov)["claims"]
+        shared = [c1["evidence"][-1], c3["evidence"][-1]]
+        assert {(e["command"][0], e["log"]["path"], e["log"]["sha256"], e["session"]) for e in shared} == \
+            {("sh", "files/c1e3.log", shared[0]["log"]["sha256"], "w1")} and c3["unverified"] is None, shared
+        assert "✅ verified" in frc("render", "--run", prov).split("| c3 |")[1].split("\n")[0]
         assert frc("orphan", "--reason", "done here", extra_env=w2) and run_json(prov)["orphaned"]["session"] == "w2"
         fsh("git", "checkout", "-q", base)
         # A session that merges its own verified branch into the base branch didn't change code there: the

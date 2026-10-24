@@ -6,7 +6,7 @@
                                                             start a run (local only by default), print its dir
   receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
-  receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
+  receipt.py run CLAIM... [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
                                                             run CMD (a required check's own command if omitted),
                                                             record the result, attach media from DIR
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
@@ -475,39 +475,48 @@ def not_a_check(c, how):
 
 
 def cmd_run(a):
+    """Run one command and record it as evidence for each claim given; they share its log."""
     d = adding_to(a)
-    c = find_claim(load(d), a.claim)
-    cmd = a.cmd or c.get("command")
+    claims = [find_claim(load(d), cid) for cid in a.claims]
+    cmd = a.cmd or next((c["command"] for c in claims if c.get("command")), None)
     if not cmd:
-        sys.exit("usage: receipt.py run CLAIM [--red] [--static] -- CMD ...")
-    if c.get("command") and cmd != c["command"]:
-        not_a_check(c, f"settled by `{shlex.join(cmd)}`")
-    cwd = (c.get("command") and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a required check runs at the root
+        sys.exit("usage: receipt.py run CLAIM... [--red] [--static] -- CMD ...")
+    for c in claims:
+        if c.get("command") and cmd != c["command"]:
+            not_a_check(c, f"settled by `{shlex.join(cmd)}`")
+    root = any(c.get("command") for c in claims) and git("rev-parse", "--show-toplevel")
+    cwd = root or os.getcwd()  # a required check runs at the root
     try:
         r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         code, out = r.returncode, redact(r.stdout)
     except OSError as err:
         code, out = 127, f"{cmd[0]}: {err.strerror}\n"
     passed = code != 0 if a.red else code == 0
-    collected = []
+    collected, log = [], None
     with mutate(d) as rec:  # after the command, so a long check never holds the write lock
-        c = find_claim(rec, a.claim)
-        e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
-                         label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
-                         passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
-        log = d / "files" / f"{e['id']}.log"
-        log.write_text(out)
-        e["log"] = {"path": f"files/{log.name}", "sha256": sha256(log)}
-        if a.collect and Path(a.collect).is_dir():
-            root = Path(a.collect)
-            for p in sorted(root.rglob("*")):
-                kind = FILE_TYPES.get(p.suffix.lower())
-                if p.is_file() and kind:
-                    name = f"{e['id']}-" + "-".join(p.relative_to(root).parts)
-                    collected.append(attach_file(d, c, p, kind, name).name)
+        ids = []
+        for cid in a.claims:
+            c = find_claim(rec, cid)
+            e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
+                             label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
+                             passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
+            if not log:
+                path = d / "files" / f"{e['id']}.log"
+                path.write_text(out)
+                log = {"path": f"files/{path.name}", "sha256": sha256(path)}
+            e["log"] = dict(log)
+            ids.append(e["id"])
+            if a.collect and Path(a.collect).is_dir():
+                media = Path(a.collect)
+                for p in sorted(media.rglob("*")):
+                    kind = FILE_TYPES.get(p.suffix.lower())
+                    if p.is_file() and kind:
+                        name = f"{e['id']}-" + "-".join(p.relative_to(media).parts)
+                        collected.append(attach_file(d, c, p, kind, name).name)
     expected = "expected failure" if a.red else "expected success"
-    print(f"{e['id']}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
-          + (f", collected {len(collected)} file(s)" if a.collect else ""))
+    for eid in ids:
+        print(f"{eid}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
+              + (f", collected {len(collected)} file(s)" if a.collect else ""))
 
 
 def cmd_observe(a):
@@ -1642,7 +1651,7 @@ def main():
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("run", parents=[common])
-    s.add_argument("claim")
+    s.add_argument("claims", nargs="+", metavar="CLAIM", help="one or more claims this command is evidence for")
     s.add_argument("--red", action="store_true", help="falsifiability run: expected to fail")
     s.add_argument("--static", action="store_true", help="typecheck/lint/grep, not behavior")
     s.add_argument("--collect", help="after the run, attach every image, video, and trace under this dir")
