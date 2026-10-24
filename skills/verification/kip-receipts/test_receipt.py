@@ -1128,7 +1128,8 @@ def main():
         for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "mv"], ["checkout", "-q", "-b", "mv-work"]):
             sh("git", *cmd, cwd=moved)
         mv_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=moved)).name
-        moved = moved.rename(Path(tmp, "mv-after"))
+        Path(tmp, "elsewhere").mkdir()
+        moved = moved.rename(Path(tmp, "elsewhere", "mv-before"))  # same name, so the same repo, in a new place
         sh(sys.executable, str(SCRIPT), "sweep", cwd=moved)
         assert not run_json(mv_run).get("orphaned"), run_json(mv_run)
         Path(tmp, "store", "old-wt").mkdir()
