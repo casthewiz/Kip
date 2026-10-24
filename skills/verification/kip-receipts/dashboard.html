@@ -196,22 +196,30 @@ function title(r, link) {
 }
 
 const MOODS = { waiting: "idle", working: "working", asking: "needs you: an unverified claim, no PR or accept yet",
-  success: "the gate let its turn end", failure: "blocked by the gate, or a claim is failing" };
+  success: "the gate let its turn end, or its run finished", failure: "blocked by the gate, or a claim is failing" };
+
+// Kip as a run's claims stand: finished, a claim failing, or one unverified and not accepted; null otherwise.
+function claimMood(x) {
+  if (x.finished) return "success";
+  if (Object.keys(x.claims).some(v => v.startsWith("❌"))) return "failure";
+  return x.asking ? "asking" : null;
+}
 
 // Kip as the session stands: blocked or failing a claim, mid-turn, asking the user to settle an unverified claim,
 // let stop by the gate or done with its run, or idle.
 function mood(r) {
   if (r.blocked) return "failure";
   if (r.active && r.hook !== "stop" && r.hook !== "start") return "working";
-  const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop());
-  if (run && run.finished) return "success";
-  if (run && Object.keys(run.claims).some(v => v.startsWith("❌"))) return "failure";
-  if (run && run.asking && !r.pr) return "asking";
+  const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop()), m = run && claimMood(run);
+  if (m && !(m === "asking" && r.pr)) return m;
   return r.hook === "stop" ? "success" : "waiting";
 }
 
-function mascot(r, size) {
-  const m = mood(r);
+// A run's Kip: idle once orphaned, else as its claims stand, else working while a session that wrote to it is mid-turn.
+const runMood = x => x.state === "orphaned" ? "waiting"
+  : claimMood(x) || (rows.some(r => x.writers[r.session] && mood(r) === "working") ? "working" : "waiting");
+
+function mascot(m, size) {
   return h("img", { class: "mascot", src: `/kip-${m}.svg`, width: size, height: size, alt: "Kip: " + MOODS[m], title: MOODS[m] });
 }
 
@@ -226,7 +234,7 @@ function renderList() {
       class: "card" + (r.active ? "" : " idle"), "aria-current": r.session === selected ? "true" : "false",
       onclick: () => select(r.session),
     },
-    mascot(r, 40),
+    mascot(mood(r), 40),
     h("div", { class: "grow" },
       h("div", { class: "row" },
         h("div", { class: "grow title" }, title(r)),
@@ -361,7 +369,7 @@ function renderDetail(full) {
   const r = rows.find(x => x.session === selected);
   if (!r) { $("detail").replaceChildren(h("p", { class: "empty" }, selected ? "That session isn't in the log." : "Pick a session.")); return; }
   const head = [
-    h("div", { class: "headline" }, mascot(r, 64), h("div", { class: "grow" },
+    h("div", { class: "headline" }, mascot(mood(r), 64), h("div", { class: "grow" },
       h("h2", {}, title(r, true)),
       h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)} · ${MOODS[mood(r)]}`))),
     h("div", { class: "pipeline", role: "list", "aria-label": "Stages" }, STAGES.map(s => h("div", {
@@ -410,6 +418,7 @@ function renderRuns() {
   $("list").replaceChildren(...(shown.length ? shown.map(x => h("button", {
       class: "card" + (byId.has(x.parent) ? " unit" : ""), "aria-current": x.id === runSelected ? "true" : "false",
       onclick: () => selectRun(x.id) },
+    mascot(runMood(x), 40),
     h("div", { class: "grow" },
       h("div", { class: "row" },
         h("div", { class: "grow title" }, title(x)),
@@ -444,10 +453,10 @@ function renderRunDetail() {
   const x = runs.find(r => r.id === runSelected);
   if (!x) { $("detail").replaceChildren(h("p", { class: "empty" }, runSelected ? "That run isn't in kip.db." : "Pick a run.")); return; }
   const how = x.state === "open" ? "" : ` · ${x.via || "how unknown"}${x.reason && x.via !== x.reason ? ": " + x.reason : ""}`;
-  const writers = Object.entries(x.writers).sort((a, b) => b[1] - a[1]);
+  const writers = Object.entries(x.writers).sort((a, b) => b[1] - a[1]), m = runMood(x);
   const top = h("div", {},
-    h("div", { class: "headline" }, h("div", { class: "grow" }, h("h2", {}, title(x)),
-      h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how,
+    h("div", { class: "headline" }, mascot(m, 64), h("div", { class: "grow" }, h("h2", {}, title(x)),
+      h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)} · ${MOODS[m]}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how,
         x.worktree && x.worktree.linked ? [" · ", treeChip(x.worktree.path, x.worktree.live)] : null))),
     x.flags.length ? h("ul", { class: "flags", title: x.attention ? "" : "settled: these are history" },
       x.flags.map(f => h("li", { class: "loop" + (x.attention ? "" : " past") }, f))) : null,
