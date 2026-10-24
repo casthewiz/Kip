@@ -594,10 +594,10 @@ def cmd_sweep(a):
         print(line)
 
 
-def worktrees():
+def worktrees(cwd=None):
     """{folder: its branch, or None when detached} for each of this repo's worktrees whose folder still exists."""
     out = {}
-    for block in (git("worktree", "list", "--porcelain") or "").split("\n\n"):
+    for block in (git("worktree", "list", "--porcelain", cwd=cwd) or "").split("\n\n"):
         folder, branch = re.search(r"^worktree (.+)$", block, re.M), re.search(r"^branch refs/heads/(.+)$", block, re.M)
         if folder and not re.search(r"^prunable", block, re.M):
             out[os.path.realpath(folder[1])] = branch and branch[1]
@@ -987,12 +987,43 @@ def cmd_db(a):
         db()  # creates or upgrades it; a new one imports as it opens
         runs, sessions = map(sum, zip(import_json(), _imported))
         print(f"imported {runs} runs and {sessions} session starts from the JSON store")
+        for line in rehome():
+            print(line)
     if not DB.exists():
         return print(f"{DB} · not created yet")
     con = sqlite3.connect(DB.as_uri() + "?mode=ro", uri=True)
     version = con.execute("PRAGMA user_version").fetchone()[0]
     runs = con.execute("SELECT count(*) FROM runs").fetchone()[0] if version else 0
     print(f"{DB} · schema v{version} of {len(SCHEMA)} · {runs} runs")
+
+
+def rehome():
+    """Move runs stored under a worktree's folder name (Kip once named a repo after its checkout's folder) to their
+    repository: the one main checkout that has a worktree of that name, or has the run's branch and commit. The
+    main checkouts looked in are those runs recorded, this one, and their siblings named like a stored repo.
+    Yields a line per run moved."""
+    con = db()
+    names = {r for (r,) in con.execute("SELECT DISTINCT repo FROM runs")}
+    known = {c for (c,) in con.execute("SELECT DISTINCT json_extract(data, '$.checkout') FROM runs") if c}
+    known |= {str(main_checkout())} if main_checkout() else set()
+    mains = {Path(c) for c in known | {str(Path(k).parent / n) for k in known for n in names} if Path(c, ".git").is_dir()}
+    folders = {m: {Path(f).name for f in worktrees(m)} for m in mains}
+    for rid, repo, branch, commit in con.execute(
+            "SELECT id, repo, branch, json_extract(data, '$.commit') FROM runs WHERE repo NOT IN (%s) ORDER BY rowid"
+            % ",".join("?" * len(mains)), [m.name for m in mains]).fetchall():
+        hits = [m for m in mains if repo in folders[m] or branch and commit and
+                git("rev-parse", "-q", "--verify", f"refs/heads/{branch}", cwd=m) and
+                git("cat-file", "-e", f"{commit}^{{commit}}", cwd=m) is not None]
+        if len(hits) != 1:
+            continue
+        home = hits[0]
+        with tx():
+            con.execute("UPDATE runs SET repo = ?1, data = json_set(data, '$.repo', ?1, '$.checkout', ?2) WHERE id = ?3",
+                        (home.name, str(home), rid))
+            (ROOT / home.name).mkdir(parents=True, exist_ok=True)
+            if (ROOT / repo / rid).is_dir():  # a failed move rolls the update back
+                (ROOT / repo / rid).rename(ROOT / home.name / rid)
+        yield f"re-homed {rid}: {repo} -> {home.name}"
 
 
 def blocking(rec, pr=False):

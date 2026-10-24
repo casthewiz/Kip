@@ -1133,6 +1133,31 @@ def main():
         server.terminate()
         server.wait()
         assert served["id"] == wt_run.name and served["finished"], served
+        # `db --migrate` moves such runs to their repository: the one main checkout with the run's branch and commit,
+        # or with a live worktree of that folder name, looking in recorded checkouts and their siblings named like a
+        # stored repo. Its files move too and still verify; one no checkout claims stays where it is.
+        sib, sib_wt = Path(tmp, "sib"), Path(tmp, "sib-wt")
+        sib.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "sib"], ["worktree", "add", "-q", "--detach", str(sib_wt)]):
+            sh("git", *cmd, cwd=sib)
+        sib_runs = [Path(sh(sys.executable, str(SCRIPT), "init", cwd=c)).name for c in (sib, sib_wt)]
+        kipdb("UPDATE runs SET data = json_remove(data, '$.checkout') WHERE repo = 'sib'")
+        Path(tmp, "store", "sib-wt").mkdir()
+        Path(tmp, "store", "sib", sib_runs[1]).rename(Path(tmp, "store", "sib-wt", sib_runs[1]))
+        kipdb("UPDATE runs SET repo = 'sib-wt', data = json_set(data, '$.repo', 'sib-wt') WHERE id = ?", sib_runs[1])
+        stray = Path(frc("init")).name
+        Path(tmp, "store", "nowhere").mkdir()
+        Path(tmp, "store", "fin", stray).rename(Path(tmp, "store", "nowhere", stray))
+        kipdb("UPDATE runs SET repo = 'nowhere', branch = 'no-such-branch', data = json_set(data, '$.repo', 'nowhere') "
+              "WHERE id = ?", stray)
+        out = frc("db", "--migrate")
+        assert f"re-homed {wt_run.name}: old-wt -> fin" in out and f"re-homed {sib_runs[1]}: sib-wt -> sib" in out, out
+        assert "nowhere" not in out and run_json(stray)["repo"] == "nowhere", out
+        assert run_json(wt_run.name)["checkout"] == str(fin.resolve()) and "fin @" in frc("render", "--run", wt_run.name)
+        assert Path(frc("path", "--run", sib_runs[1])) == Path(tmp, "store", "sib", sib_runs[1]) and \
+            run_json(sib_runs[1])["repo"] == "sib"
+        assert "re-homed" not in frc("db", "--migrate")
+        sh("git", "worktree", "remove", str(sib_wt), cwd=sib)
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
         for name in ("start-merged", "start-dropped"):
