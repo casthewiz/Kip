@@ -758,11 +758,13 @@ SPEC_COPY = re.compile(r"(/specs/[^/]+)-[0-9a-f]{12}(?=\.[^/]*$)")  # desktest.p
 
 def check_key(e):
     """Runs of the same command in the same dir are one check; observations are one check. A desk test's
-    KIP_OUT is a fresh temp folder its media lands in, not part of what it checks, and its spec runs as a copy
-    named by content, so a revised spec is the same check with changed inputs (see rerun_note)."""
+    KIP_OUT is a fresh temp folder its media lands in, not part of what it checks; its BASE_URL is where it
+    runs, so a --red against a baseline server pairs with the greens on the change's; and its spec runs as a
+    copy named by content, so a revised spec is the same check with changed inputs (see rerun_note)."""
     if not e.get("command"):
         return ("observed",)
-    return tuple(SPEC_COPY.sub(r"\1", a) for a in e["command"] if not a.startswith("KIP_OUT=")), e.get("cwd")
+    return tuple(SPEC_COPY.sub(r"\1", a) for a in e["command"]
+                 if not a.startswith(("KIP_OUT=", "BASE_URL="))), e.get("cwd")
 
 
 def code_key(e):
