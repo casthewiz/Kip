@@ -1268,6 +1268,41 @@ def main():
         check("--hook", "start", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)
         assert "workflow.worktrees" not in check("--hook", "stop", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)[1]
         sh("git", "worktree", "remove", "--force", str(pol_wt), cwd=pol)
+        # Evidence against a local URL records the folder its server runs in. Served by another checkout of this
+        # repo (worktrees share ports), it doesn't speak for the code it pinned: flagged, and it holds the gate.
+        # Served from this checkout, or from outside any checkout of the repo, it counts.
+        srv_wt = Path(tmp, "srv-wt")
+        sh("git", "worktree", "add", "-q", "--detach", str(srv_wt), cwd=pol)
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"stages": []}}')
+        sh("git", "checkout", "-q", "-b", "srv", cwd=pol)
+        sh("git", "commit", "-q", "--allow-empty", "-m", "srv", cwd=pol)
+        srv_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=pol)).name
+        sh(sys.executable, str(SCRIPT), "claim", "the page loads", cwd=pol)
+
+        port = free_port()  # one URL throughout, as a dev server's would be: one check
+
+        def served_by(folder):
+            server = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"], cwd=folder,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            assert wait_until(lambda: listening(port), 10)
+            try:
+                sh(sys.executable, str(SCRIPT), "run", "c1", "--", sys.executable, "-c",
+                   f"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/')", cwd=pol)
+            finally:
+                server.terminate()
+                server.wait()
+            return run_json(srv_run)["claims"][0]["evidence"][-1]["served"], \
+                verdicts(("--run", srv_run))["c1"]
+
+        info, v = served_by(srv_wt)
+        assert info["checkout"] == str(srv_wt.resolve()) and info["here"] == str(pol.resolve()), info
+        assert v == f"⚠️ served from another checkout: {srv_wt.resolve()}", v
+        code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}}, cwd=pol)
+        assert code == 2 and "c1 ⚠️ served from another checkout" in out, out
+        assert served_by(pol)[1] == "✅ verified"
+        info, v = served_by(Path(tmp))
+        assert info["cwd"] and info["checkout"] is None and v == "✅ verified", (info, v)
+        sh("git", "worktree", "remove", "--force", str(srv_wt), cwd=pol)
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
         for name in ("start-merged", "start-dropped"):

@@ -435,6 +435,34 @@ def command_inputs(cmd, d):
     return inputs
 
 
+LOCAL_URL = re.compile(r"https?://(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)")
+
+
+def quiet(*cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def served(cmd):
+    """The local server a command names (a dev server's URL): the folder its listening process runs in and, when
+    that's a checkout of this repo, which one. Worktrees share ports, so a URL can serve another checkout's code
+    than the one evidence pins. None when the command names no local URL."""
+    url = next((m for m in map(LOCAL_URL.search, cmd) if m), None)
+    if not url:
+        return None
+    pid = (quiet("lsof", "-nP", f"-iTCP:{url[1]}", "-sTCP:LISTEN", "-t").split() or
+           re.findall(r"pid=(\d+)", quiet("ss", "-ltnpH", f"sport = :{url[1]}")) or [None])[0]
+    cwd = pid and (os.path.realpath(f"/proc/{pid}/cwd") if Path(f"/proc/{pid}/cwd").exists() else
+                   next((l[1:] for l in quiet("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn").splitlines()
+                         if l.startswith("n")), None))
+    common = ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+    ours = cwd and git(*common, cwd=cwd) == git(*common) and git("rev-parse", "--show-toplevel", cwd=cwd)
+    return {"url": url[0], "pid": pid, "cwd": cwd, "checkout": ours or None, "here": here()[1]}
+
+
 def attach_file(d, c, src, kind=None, name=None):
     dest = d / "files" / f"{c['id']}f{len(c['files']) + 1}-{name or src.name}"
     shutil.copy2(src, dest)
@@ -537,6 +565,7 @@ def cmd_run(a):
         if c.get("command") and cmd != c["command"]:
             not_a_check(c, f"settled by `{shlex.join(cmd)}`")
     cwd = (any(c.get("command") for c in claims) and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a check runs at the root
+    server = None if load(d).get("target") else served(cmd)  # while it's up, before the command runs
     try:
         r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         code, out = r.returncode, redact(r.stdout)
@@ -550,7 +579,8 @@ def cmd_run(a):
             c = find_claim(rec, cid)
             e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
                              label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
-                             passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
+                             passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]),
+                             **({"served": server} if server else {}))
             if not log:
                 path = d / "files" / f"{e['id']}.log"
                 path.write_text(out)
@@ -783,6 +813,10 @@ def verdict(c, rec):
     now = current_tree() if holds(rec) else None  # another checkout's code says nothing
     if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
         return "⚠️ stale: the code changed since it was checked"
+    latest = [r["green"][-1].get("served") or {} for r in runs.values() if r["green"]]
+    away = [s["checkout"] for s in latest if s.get("checkout") not in (None, s.get("here"))]
+    if away:
+        return f"⚠️ served from another checkout: {away[0]}"
     if c["unverified"] or not ev:
         return "⚠️ unverified"
     if all(e["kind"] == "observed" for e in ev) and not c["files"]:
@@ -1085,7 +1119,7 @@ def blocking(rec, pr=False):
     checks that haven't passed and, before a PR, refuted claims, workflow stages (tidy, review)
     with no claim, or no claims at all."""
     def open_(c, v):
-        return (not c["evidence"] and not c["unverified"]) or v.startswith("⚠️ stale") or \
+        return (not c["evidence"] and not c["unverified"]) or v.startswith(("⚠️ stale", "⚠️ served")) or \
             (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
     out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
            if open_((delegate(c) or (c,))[0], v)]
@@ -1478,7 +1512,7 @@ def stop_servers(hook):
 def reason_kind(line):
     """A blocking() line's kind, read from its verdict (claim lines start with their id), never its text."""
     v = re.match(r"c\d+ (.*)", line)
-    return ("missing stage" if not v else "stale" if v[1].startswith("⚠️ stale") else
+    return ("missing stage" if not v else "stale" if v[1].startswith(("⚠️ stale", "⚠️ served")) else
             "failing check" if v[1].startswith("❌") else "unaddressed")
 
 
