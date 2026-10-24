@@ -123,6 +123,8 @@ def validate(cfg):
     stages = cfg.get("workflow", {}).get("stages", [])
     if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
         sys.exit("workflow.stages must be a list of stage names")
+    if cfg.get("workflow", {}).get("worktrees", "nudge") not in ("off", "nudge", "required"):
+        sys.exit("workflow.worktrees must be off, nudge or required")
     setup = cfg.get("workflow", {}).get("worktree", {}).get("setup")
     if setup is not None and not is_command(setup):
         sys.exit("workflow.worktree.setup must be a command: a string or a list of arguments")

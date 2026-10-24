@@ -27,9 +27,10 @@
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
                                                             --migrate creates or upgrades it and imports JSON runs
-  receipt.py check [--hook start|stop|pr|tool|prompt|response|end] exit 2 if this branch's run has open claims
-                                                            and the code changed since init, or there's
-                                                            no run for work that needs one (host hooks)
+  receipt.py check [--hook start|stop|pr|edit|tool|prompt|response|end] exit 2 if this branch's run has open
+                                                            claims and the code changed since init, or there's
+                                                            no run for work that needs one, or (edit) a file in
+                                                            the main checkout is edited against workflow.worktrees
   receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (install's service or a start hook launches it)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
@@ -1115,12 +1116,55 @@ def opens_pr(hook):
 NUDGED = "check: already nudged this turn"
 
 
+def worktree_policy():
+    """workflow.worktrees: off, nudge (the first edit to a main checkout in a session is stopped once), or
+    required (every one is, and a stop after this session changed a main checkout)."""
+    return kip.load().get("workflow", {}).get("worktrees", "nudge")
+
+
+def use_a_worktree(where):
+    return (f"kip: {where} is in the main checkout; work in a linked worktree instead: "
+            "`python3 ~/.kip/kip/kip.py worktree new NAME` (prints its path), or your host's own "
+            "(`claude --worktree`, EnterWorktree, a Cursor worktree), then make the change there.")
+
+
+NUDGES = ROOT / "nudges"  # <session id>: that session was already stopped once from editing a main checkout
+
+
+def edit_gate(hook):
+    """(blocked, message) for a file edit: the main checkout's files are worktree work under workflow.worktrees.
+    One git call decides; files outside a repo or in a linked worktree pass without loading config."""
+    ti = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
+    path = ti.get("file_path") or ti.get("notebook_path")
+    if not path:
+        return False, ""
+    folder = Path(os.path.abspath(path)).parent
+    while not folder.is_dir():
+        folder = folder.parent
+    dirs = (git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", cwd=folder) or "").splitlines()
+    if len(dirs) != 2 or dirs[0] != dirs[1]:
+        return False, ""
+    os.chdir(folder)
+    policy, sid = worktree_policy(), session_id(hook)
+    if policy == "off" or policy == "nudge" and sid and (NUDGES / sid).exists():
+        return False, ""
+    if policy == "nudge" and sid:
+        NUDGES.mkdir(parents=True, exist_ok=True)
+        (NUDGES / sid).touch()
+    return True, use_a_worktree(path) + (" This is a nudge, once a session: retrying edits here anyway."
+                                         if policy == "nudge" else "")
+
+
 def gate(a, hook):
     """(blocked, message) for this branch's run; anything that isn't this branch's changed work passes."""
     if hook.get("stop_hook_active") or hook.get("loop_count"):  # already nudged once this turn; never loop
         return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
+    if a.hook == "stop" and worktree_policy() == "required" and main_checkout() and not linked() \
+            and session_changed(hook):
+        return True, use_a_worktree(f"this session's work in {here()[1]}") + \
+            " (workflow.worktrees is required; move or commit the work onto a worktree's branch)"
     if a.hook == "pr" and not opens_pr(hook):
         return False, "check: not opening a PR"
     d = run_path(a.run) if a.run else branch_run()
@@ -1407,6 +1451,12 @@ def ensure_server():
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env={k: v for k, v in os.environ.items() if k != OWNER})  # shared: no session's to stop
+
+
+def session_end(hook):
+    stop_servers(hook)
+    if session_id(hook):
+        (NUDGES / session_id(hook)).unlink(missing_ok=True)
 
 
 def stop_servers(hook):
@@ -1818,7 +1868,7 @@ def cmd_check(a):
         try:
             hook = json.loads(sys.stdin.read() or "{}")
             {"tool": log_tool, "prompt": log_prompt,
-             "response": lambda h: log_said(h, "response", h.get("text")), "end": stop_servers}[a.hook](hook)
+             "response": lambda h: log_said(h, "response", h.get("text")), "end": session_end}[a.hook](hook)
         except Exception:
             pass
         if isinstance(hook, dict) and "workspace_roots" in hook:  # Cursor reads a JSON answer, even if logging failed
@@ -1830,7 +1880,8 @@ def cmd_check(a):
         cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
         if cwd:
             os.chdir(cwd)
-        blocked, msg = (False, session_start(hook)) if a.hook == "start" else gate(a, hook)
+        blocked, msg = (False, session_start(hook)) if a.hook == "start" else \
+            edit_gate(hook) if a.hook == "edit" else gate(a, hook)
     except Exception as err:  # hosts let a crashed hook through, so a broken gate blocks instead, once per turn
         if not a.hook:
             raise
@@ -1841,7 +1892,7 @@ def cmd_check(a):
                "Fix it or tell the user; don't work around it.")
     if a.hook == "stop":  # Claude Code's reply; Cursor sends its own on afterAgentResponse
         log_said(hook, "response", hook.get("last_assistant_message"))
-    if a.hook and (a.hook != "pr" or opens_pr(hook)):  # a plain shell or MCP call is the tool hook's to log
+    if a.hook and (a.hook != "pr" or opens_pr(hook)) and (a.hook != "edit" or blocked):  # the tool hook logs the rest
         log_gate(a.hook, hook, blocked, msg)
     if a.hook == "start":
         try:
@@ -1954,7 +2005,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "pr", "edit", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 

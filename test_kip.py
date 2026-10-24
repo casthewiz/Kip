@@ -68,6 +68,7 @@ def main():
                          ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list"),
                          ({"workflow": {"checks": ["make test"]}}, "workflow.checks must map check names"),
                          ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command"),
+                         ({"workflow": {"worktrees": "always"}}, "workflow.worktrees must be off, nudge or required"),
                          ({"dashboard": {"conversation": "no"}}, "dashboard.conversation must be true or false"),
                          ({"setup": {"x": {"about": "a"}}}, "setup.x needs about, run, and requires")]:
             write(repo / ".kip" / "config.json", bad)
@@ -165,8 +166,9 @@ def main():
         assert on["model"] == "x" and on["hooks"]["Stop"][0] == mine and len(on["hooks"]["Stop"]) == 2, on
         assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
         pre = on["hooks"]["PreToolUse"]
-        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "*"], pre
-        assert [g["hooks"][0]["command"].split()[-1] for g in pre] == ["pr", "pr", "tool"], pre
+        assert [g["matcher"] for g in pre] == \
+            ["Bash", "mcp__.*(create_pull_request|create_pr)", "Edit|MultiEdit|Write|NotebookEdit", "*"], pre
+        assert [g["hooks"][0]["command"].split()[-1] for g in pre] == ["pr", "pr", "edit", "tool"], pre
         assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
         assert on["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].endswith("check --hook prompt"), on
         assert on["hooks"]["SessionEnd"][0]["hooks"][0]["command"].endswith("check --hook end"), on

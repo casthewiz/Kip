@@ -1222,6 +1222,52 @@ def main():
             fsh("git", "worktree", "remove", "--force", str(folder))
             fsh("git", "branch", "-q", "-D", branch)
         fsh("git", "checkout", "-q", base)
+        # workflow.worktrees: editing a main checkout's file is stopped once a session by default (nudge), every time
+        # when required, never when off. A linked worktree's files and files outside a repo always pass. Under
+        # required, a stop after this session changed the main checkout is blocked too.
+        pol = Path(tmp, "pol")
+        pol.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "pol"]):
+            sh("git", *cmd, cwd=pol)
+        pol_wt = Path(tmp, "pol-wt")
+        sh("git", "worktree", "add", "-q", "-b", "pol-wt", str(pol_wt), cwd=pol)
+
+        def edit(path, sid="e1"):
+            return check("--hook", "edit", event={"session_id": sid, "cwd": str(pol), "hook_event_name": "PreToolUse",
+                                                  "tool_name": "Write", "tool_input": {"file_path": str(path)}}, cwd=pol)
+
+        code, out = edit(pol / "src" / "new.py")  # a file, and folder, not made yet
+        assert code == 2 and "is in the main checkout" in out and "nudge" in out, out
+        assert edit(pol / "src" / "new.py") == (0, "") and edit(pol / "x.py", "e2")[0] == 2
+        assert edit(pol_wt / "x.py")[0] == 0 and edit(Path(tmp, "outside.txt"))[0] == 0
+        check("--hook", "end", event={"session_id": "e1"})
+        assert edit(pol / "x.py")[0] == 2, "a session's end didn't forget its nudge"
+        (pol / ".kip").mkdir()
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"worktrees": "off"}}')
+        assert edit(pol / "x.py", "e3") == (0, "")
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"worktrees": "required", "stages": []}}')
+        assert edit(pol / "x.py", "e4")[0] == edit(pol / "x.py", "e4")[0] == 2
+        assert edit(pol_wt / "x.py", "e4")[0] == 0
+        # Every edit pays for this hook: a linked worktree's file, or one outside a repo, costs one git call.
+        counted, calls = Path(tmp, "counted-git"), Path(tmp, "git-calls")
+        counted.mkdir()
+        real_git = shutil.which("git")
+        (counted / "git").write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexec "{real_git}" "$@"\n')
+        (counted / "git").chmod(0o755)
+        for path in (pol_wt / "x.py", Path(tmp, "outside.txt")):
+            calls.unlink(missing_ok=True)
+            assert check("--hook", "edit", event={"session_id": "e5", "tool_name": "Write", "tool_input": {
+                "file_path": str(path)}}, cwd=pol, extra_env={"PATH": f"{counted}:{os.environ['PATH']}"})[0] == 0
+            assert len(calls.read_text().splitlines()) == 1, (path, calls.read_text())
+        mover_pol = {"session_id": "pol-s", "cwd": str(pol)}
+        check("--hook", "start", event=mover_pol, cwd=pol)
+        assert check("--hook", "stop", event=mover_pol, cwd=pol)[0] == 0
+        (pol / "made-here.txt").write_text("1\n")
+        code, out = check("--hook", "stop", event=mover_pol, cwd=pol)
+        assert code == 2 and "workflow.worktrees is required" in out, out
+        check("--hook", "start", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)
+        assert "workflow.worktrees" not in check("--hook", "stop", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)[1]
+        sh("git", "worktree", "remove", "--force", str(pol_wt), cwd=pol)
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
         for name in ("start-merged", "start-dropped"):

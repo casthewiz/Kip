@@ -14,6 +14,7 @@
           "Stop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook stop"}]}],
           "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]},
                          {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]},
+                         {"matcher": "Edit|MultiEdit|Write|NotebookEdit", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook edit"}]},
                          {"matcher": "*", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook tool"}]}],
           "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook prompt"}]}],
           "SessionEnd": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook end"}]}]
@@ -74,7 +75,7 @@
     "github-issue": {"type": "github-issue", "requires": {"cmd": ["gh"]}}
   },
   "default_destination": "local",
-  "workflow": {"stages": ["tidy", "review"], "checks": {}},
+  "workflow": {"stages": ["tidy", "review"], "checks": {}, "worktrees": "nudge"},
   "dashboard": {"conversation": true},
   "setup": {
     "playwright": {
