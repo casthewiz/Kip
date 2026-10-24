@@ -108,7 +108,6 @@ def load_sink(name):
     sys.exit(f"no sink module {module} for {name}; available: {', '.join(sink_names())}")
 
 
-@functools.lru_cache(maxsize=None)
 def main_checkout():
     """The main checkout's folder, from a worktree too; None outside a clone with a .git folder."""
     common = git("rev-parse", "--git-common-dir")
@@ -116,13 +115,9 @@ def main_checkout():
     return common.resolve().parent if common and common.name == ".git" else None
 
 
+@functools.lru_cache(maxsize=None)
 def repo_name():
     """The main checkout's folder name, so a worktree's runs are its repository's."""
-    return _repo_name(os.getcwd())
-
-
-@functools.lru_cache(maxsize=None)
-def _repo_name(cwd):  # verdict() asks for every claim; the dashboard asks for every claim of every run
     main = main_checkout()
     if main:
         return main.name
@@ -237,12 +232,14 @@ def branch_run():
 
 
 def speaks_for(rec, branch):
-    """The run belongs to the branch now under this name: it started after the branch was created, or the
-    branch carries the commit it started on (not one the base branch has too). A branch whose reflog
-    lost its creation counts as the old one."""
+    """The run belongs to the branch now under this name: it started after the branch was created, the branch
+    was checked out again from its own remote branch, or it carries the commit the run started on (not one the
+    base branch has too). A branch whose reflog lost its creation, or a run without a start time, counts as the old one."""
     first = ((git("reflog", "show", "--format=%ct %gs", f"refs/heads/{branch}", "--") or "").splitlines() or [""])[-1]
     at, _, how = first.partition(" ")
-    if not how.startswith("branch: Created") or datetime.datetime.fromisoformat(rec["created_at"]).timestamp() >= int(at):
+    if not how.startswith("branch: Created") or not rec.get("created_at") \
+            or re.fullmatch(rf"branch: Created from refs/remotes/[^/]+/{re.escape(branch)}", how) \
+            or datetime.datetime.fromisoformat(rec["created_at"]).timestamp() >= int(at):
         return True
     base = base_branch()
     return bool(rec["commit"]) and git("merge-base", "--is-ancestor", rec["commit"], f"refs/heads/{branch}") is not None and \
@@ -496,8 +493,7 @@ def cmd_run(a):
     for c in claims:
         if c.get("command") and cmd != c["command"]:
             not_a_check(c, f"settled by `{shlex.join(cmd)}`")
-    root = any(c.get("command") for c in claims) and git("rev-parse", "--show-toplevel")
-    cwd = root or os.getcwd()  # a required check runs at the root
+    cwd = (any(c.get("command") for c in claims) and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a check runs at the root
     try:
         r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         code, out = r.returncode, redact(r.stdout)
@@ -586,7 +582,8 @@ def settle(orphan=True):
     base, here = base_branch(), git("branch", "--show-current")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     live = set(re.findall(r"^branch refs/heads/(.+)$", git("worktree", "list", "--porcelain") or "", re.M))
-    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? ORDER BY rowid", (repo_name(),)).fetchall():
+    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
+                               "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
         rec = load(d)
         branch = rec.get("branch")
@@ -605,17 +602,15 @@ def settle(orphan=True):
             continue
         tip = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") or \
             git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}")
-        # messy-bun: a deleted branch counts as merged only by GitHub's merge message; squash merges get orphaned.
-        # "Gone" means gone from this clone, and runs are keyed by folder name, so sweep in the clone that made them.
+        # A deleted branch counts as merged by GitHub's merge message, or below, by gh's merged PRs.
+        # "Gone" means gone from this clone, so sweep in the clone that made them.
         merged = landed(rec, tip, base) if tip else \
             bool(base and git("log", base, "--merges", "-1", "--format=%h", f"--grep=from [^ ]*/{re.escape(branch)}$"))
         asks_gh = not merged and github_url()  # squash merges leave no ancestry to find
-        prs = merged_prs() if asks_gh else None
+        prs = merged_prs(branch) if asks_gh else None
         via = "merged"
         if prs:
-            created = datetime.datetime.fromisoformat(rec["created_at"])
-            pr = next((n for head, at, n in prs.get(branch, [])
-                       if (head == tip if tip else datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) > created)), None)
+            pr = next((n for head, at, n in prs if (head == tip if tip else gone_merged_by(rec, head, at))), None)
             merged, via = bool(pr), f"pr #{pr}"
         if merged:
             with mutate(d) as fresh:
@@ -627,23 +622,36 @@ def settle(orphan=True):
             yield f"orphaned {rid} ({branch}: branch gone)"
 
 
+def gone_merged_by(rec, head, at):
+    """A merged PR from a deleted branch's name is that branch's: it merged after the run started and, when this
+    clone has its commits, carries a commit the run's evidence ran on (a later branch can reuse the name)."""
+    created = rec.get("created_at")
+    if not (created and datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) > datetime.datetime.fromisoformat(created)):
+        return False
+    ran = {e["commit"] for c in rec["claims"] for e in c["evidence"] if e.get("commit")} - {rec.get("fork")}
+    return not (ran and git("cat-file", "-e", head) is not None) or \
+        any(git("merge-base", "--is-ancestor", c, head) is not None for c in ran)
+
+
 @functools.lru_cache(maxsize=None)
-def merged_prs():
-    """{branch: [(head, mergedAt, number)]} for this repo's merged GitHub PRs, or None when gh can't say."""
+def merged_prs(branch):
+    """[(head, mergedAt, number)] for this repo's merged GitHub PRs from branch, or None when gh can't say."""
     try:
-        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--limit", "500", "--json",
+        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
                             "headRefName,headRefOid,mergedAt,number"], capture_output=True, text=True, timeout=30)
-        prs = {}
-        for pr in json.loads(r.stdout) if r.returncode == 0 else None:
-            prs.setdefault(pr["headRefName"], []).append((pr["headRefOid"], pr["mergedAt"], pr["number"]))
-        return prs
+        if r.returncode != 0:
+            return None
+        return [(pr["headRefOid"], pr["mergedAt"], pr["number"]) for pr in json.loads(r.stdout) if pr["headRefName"] == branch]
     except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         return None
 
 
 def check_key(e):
-    """Runs of the same command in the same dir are one check; observations are one check."""
-    return (tuple(e["command"]), e.get("cwd")) if e.get("command") else ("observed",)
+    """Runs of the same command in the same dir are one check; observations are one check. A desk test's
+    KIP_OUT is a fresh temp folder its media lands in, not part of what it checks."""
+    if not e.get("command"):
+        return ("observed",)
+    return tuple(a for a in e["command"] if not a.startswith("KIP_OUT=")), e.get("cwd")
 
 
 def code_key(e):

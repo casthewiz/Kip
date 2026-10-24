@@ -265,6 +265,31 @@ def main():
         rc("render", "--run", str(remote))
         sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(spec), extra_env={"KIP_PLAYWRIGHT": str(pw)})
         assert len(list((remote / "specs").glob("c1-*.spec.ts"))) == 2
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(remote / snap), "--viewports", "mobile",
+           extra_env={"KIP_PLAYWRIGHT": str(pw)})  # re-running a copy runs that copy
+        assert len(list((remote / "specs").glob("c1-*.spec.ts"))) == 2
+        # Re-running a desk test on changed code refreshes its claim: the folder its media lands in isn't the check.
+        desk_repo = Path(tmp, "desk-fresh")
+        desk_repo.mkdir()
+        sh("git", "init", "-q", cwd=desk_repo)
+        (desk_repo / "a.txt").write_text("1\n")
+        sh("git", "add", ".", cwd=desk_repo)
+        sh("git", "commit", "-qm", "a", cwd=desk_repo)
+        local = Path(sh(sys.executable, str(SCRIPT), "init", cwd=desk_repo))
+        sh(sys.executable, str(SCRIPT), "claim", "desk test stays fresh", cwd=desk_repo)
+        (local / "specs" / "c1.spec.ts").write_text("// fresh\n")
+        for code in ("1\n", "2\n"):
+            (desk_repo / "a.txt").write_text(code)
+            sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(local / "specs" / "c1.spec.ts"),
+               "--viewports", "mobile", cwd=desk_repo, extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        row = next(x for x in sh(sys.executable, str(SCRIPT), "render", cwd=desk_repo).splitlines() if x.startswith("| c1 |"))
+        assert "✅ verified" in row, row
+        outside = Path(tmp, "e2e", "c1.spec.ts")  # a project's own spec runs where it is, relative imports and all
+        outside.parent.mkdir()
+        outside.write_text("// project spec\n")
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(outside), "--viewports", "mobile",
+           extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        assert str(outside.resolve()) in run_json(remote)["claims"][0]["evidence"][-1]["command"]
         (remote / snap).write_text("// tampered\n")
         assert f"hash mismatch for {snap}" in rc("render", "--run", str(remote), ok=False)
 
@@ -955,7 +980,7 @@ def main():
         # is a merged PR's head finishes, and so does a deleted one with a PR merged after its run started; a
         # branch that moved on after its PR merged stays open. Until gh answers, a deleted branch isn't orphaned.
         squashed, tips = {}, {}
-        for name in ("squash-kept", "squash-gone", "squash-moved"):
+        for name in ("squash-kept", "squash-gone", "squash-moved", "name-reused"):
             fsh("git", "checkout", "-q", "-b", name, base)
             squashed[name] = Path(frc("init")).name
             (fin / f"{name}.txt").write_text(name)
@@ -963,12 +988,19 @@ def main():
             fsh("git", "commit", "-qm", name)
             tips[name] = fsh("git", "rev-parse", "HEAD")
             fsh("git", "checkout", "-q", base)
+            if name == "name-reused":  # abandoned after evidence on its commit; a later branch of that name merged
+                frc("claim", "abandoned", "--run", squashed[name])
+                fsh("git", "checkout", "-q", name)
+                frc("run", "c1", "--", "true")
+                fsh("git", "checkout", "-q", base)
+                tips[name] = fsh("git", "rev-parse", "HEAD")
+                continue
             fsh("git", "merge", "-q", "--squash", name)
             fsh("git", "commit", "-qm", f"{name} (#9)")
         fsh("git", "checkout", "-q", "squash-moved")
         fsh("git", "commit", "-q", "--allow-empty", "-m", "after the merge")
         fsh("git", "checkout", "-q", base)
-        fsh("git", "branch", "-q", "-D", "squash-gone")
+        fsh("git", "branch", "-q", "-D", "squash-gone", "name-reused")
         fsh("git", "remote", "add", "origin", "https://github.com/me/fin.git")
         merged_prs = Path(tmp, "merged.json")
         merged_prs.write_text(json.dumps([{"headRefName": n, "headRefOid": tips[n], "mergedAt": "2999-01-01T00:00:00Z", "number": 9}
@@ -977,7 +1009,8 @@ def main():
         assert frc("sweep", extra_env=no_gh) == "", "settled squash merges without gh"
         out = frc("sweep", extra_env={**no_gh, "FAKE_MERGED_PRS": str(merged_prs)})
         state = {n: next((k for k in ("finished", "orphaned") if run_json(r).get(k)), "open") for n, r in squashed.items()}
-        assert state == {"squash-kept": "finished", "squash-gone": "finished", "squash-moved": "open"}, (state, out)
+        assert state == {"squash-kept": "finished", "squash-gone": "finished", "squash-moved": "open",
+                         "name-reused": "orphaned"}, (state, out)
         assert run_json(squashed["squash-kept"])["finished"]["via"] == "pr #9"
         fsh("git", "remote", "remove", "origin")
         # A branch recreated under an old name doesn't inherit the old branch's run (one started before it was
@@ -996,6 +1029,23 @@ def main():
         assert run_json(old)["orphaned"]["via"] == "branch recreated"
         assert Path(frc("init")).name == Path(frc("path")).name
         fsh("git", "checkout", "-q", base)
+        # Checked out again from its own remote branch, it's the same branch: the run (started before any commit,
+        # so on a commit the base branch has) still speaks for it. A run with no start time is never passed over.
+        fsh("git", "checkout", "-q", "-b", "again", base)
+        again = Path(frc("init")).name
+        kipdb("UPDATE runs SET created_at = '2000-01-01T00:00:00+00:00', "
+              "data = json_set(data, '$.created_at', '2000-01-01T00:00:00+00:00') WHERE id = ?", again)
+        fsh("git", "commit", "-q", "--allow-empty", "-m", "again")
+        fsh("git", "update-ref", "refs/remotes/origin/again", "HEAD")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "branch", "-q", "-D", "again")
+        fsh("git", "checkout", "-q", "-b", "again", "refs/remotes/origin/again")
+        assert Path(frc("path")).name == again and again not in frc("sweep")
+        kipdb("UPDATE runs SET data = json_remove(data, '$.created_at') WHERE id = ?", old)
+        fsh("git", "checkout", "-q", "reused")
+        assert Path(frc("path")).name != old, "a run without a start time crashed or took the branch"
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "update-ref", "-d", "refs/remotes/origin/again")
         # A worktree's runs belong to its repository, not its folder: sweeping the main checkout settles them
         # once the worktree is gone. Runs stored under a worktree's folder name before that still load and serve.
         wt2 = Path(tmp, "wt2-folder")
@@ -1097,7 +1147,7 @@ def main():
             ("orphaned", "manual", "done here", {"w1": 6, "w2": 4}, 2), p
         assert "no writer recorded" in listed[swept["still-open"]]["flags"], listed[swept["still-open"]]
         assert listed[swept["kept-merged"]]["state"] == "finished" and listed[swept["kept-merged"]]["via"] == "merged"
-        assert list(listed) == sorted(listed, key=lambda i: listed[i]["created_at"], reverse=True)
+        assert list(listed) == sorted(listed, key=lambda i: listed[i]["created_at"] or "", reverse=True)
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}

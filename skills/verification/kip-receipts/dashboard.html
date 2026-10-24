@@ -345,6 +345,7 @@ function zoom(src, alt) {
 }
 
 function renderDetail(full) {
+  delete $("detail").dataset.run;  // the Runs view's panel is gone once a session shows
   const r = rows.find(x => x.session === selected);
   if (!r) { $("detail").replaceChildren(h("p", { class: "empty" }, selected ? "That session isn't in the log." : "Pick a session.")); return; }
   const head = [
@@ -386,10 +387,11 @@ async function select(id) {
 }
 
 const short = sha => sha ? sha.slice(0, 7) : "—";
+const nWrites = n => `${n} write${n > 1 ? "s" : ""}`;
 
 function renderRuns() {
-  const flaggedOnly = $("activeOnly").checked;
-  const shown = runs.filter(x => !flaggedOnly || x.attention || x.id === runSelected);
+  const attentionOnly = $("activeOnly").checked;
+  const shown = runs.filter(x => !attentionOnly || x.attention || x.id === runSelected);
   $("list").replaceChildren(...(shown.length ? shown.map(x => h("button", {
       class: "card", "aria-current": x.id === runSelected ? "true" : "false", onclick: () => selectRun(x.id) },
     h("div", { class: "grow" },
@@ -400,7 +402,7 @@ function renderRuns() {
       h("div", { class: "row" }, h("span", { class: "sub grow" }, `${x.id} · ${x.level}`),
         h("span", { class: "when", "data-at": x.created_at }, ago(x.created_at))),
       h("div", { class: "row" }, tally(x.claims)))))
-    : [h("p", { class: "empty" }, flaggedOnly ? "No open run needs attention." : "No receipts runs yet.")]));
+    : [h("p", { class: "empty" }, attentionOnly ? "No open run needs attention." : "No receipts runs yet.")]));
 }
 
 const sessionLink = sid => h("a", { href: "#session=" + encodeURIComponent(sid), onclick: ev => { ev.preventDefault(); select(sid); } },
@@ -413,7 +415,7 @@ function renderRunDetail() {
   if (!x) { $("detail").replaceChildren(h("p", { class: "empty" }, runSelected ? "That run isn't in kip.db." : "Pick a run.")); return; }
   const how = x.state === "open" ? "" : ` · ${x.via || "how unknown"}${x.reason && x.via !== x.reason ? ": " + x.reason : ""}`;
   const writers = Object.entries(x.writers).sort((a, b) => b[1] - a[1]);
-  const head = [
+  const top = h("div", {},
     h("div", { class: "headline" }, h("div", { class: "grow" }, h("h2", {}, title(x)),
       h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how))),
     x.flags.length ? h("ul", { class: "flags", title: x.attention ? "" : "settled: these are history" },
@@ -421,17 +423,15 @@ function renderRunDetail() {
     h("div", { class: "segments" },
       segment("Commits", [["started on", x.commits.start], ["left the base at", x.commits.fork], ["published at", x.commits.published],
         ["finished at", x.commits.finished]].map(([what, sha]) => h("li", {}, h("span", { class: "grow" }, what), h("span", { class: "sha", title: sha || "" }, short(sha)))), ""),
-      segment("Wrote it", [...writers.map(([sid, n]) => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, `${n} write${n > 1 ? "s" : ""}`))),
-        x.unknown_writes ? h("li", {}, h("span", { class: "grow" }, "no session recorded"), h("span", { class: "n" }, `${x.unknown_writes} write${x.unknown_writes > 1 ? "s" : ""}`)) : null].filter(Boolean),
+      segment("Wrote it", [...writers.map(([sid, n]) => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, nWrites(n)))),
+        x.unknown_writes ? h("li", {}, h("span", { class: "grow" }, "no session recorded"), h("span", { class: "n" }, nWrites(x.unknown_writes))) : null].filter(Boolean),
         "No writes yet."),
       segment("Only on its branch", x.branch_only.map(sid => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, "wrote nothing"))),
-        "No session saw this run on its branch without writing to it.")),
-    h("div", { id: "review" })];
-  const keep = $("detail").dataset.run === x.id && $("review");
-  if (keep) return $("detail").firstChild.replaceWith(h("div", {}, head.slice(0, -1)));
+        "No session saw this run on its branch without writing to it.")));
+  if ($("detail").dataset.run === x.id && $("review")) return $("detail").firstChild.replaceWith(top);  // keep open claims
   $("detail").dataset.run = x.id;
-  $("detail").replaceChildren(h("div", {}, head.slice(0, -1)), head.at(-1));
-  renderUnits();
+  $("detail").replaceChildren(top, h("div", { id: "review" }));
+  if (review && review.id === x.id) renderUnits(); else openRun(x.id);
 }
 
 // The run's claims grouped by the kip-decompose unit each belongs to; claims without one come last.
@@ -478,7 +478,7 @@ function connect() {
   };
 }
 
-const filterKey = () => view === "runs" ? "kip.flaggedOnly" : "kip.activeOnly";
+const filterKey = () => view === "runs" ? "kip.attentionOnly" : "kip.activeOnly";
 function show(next) {
   view = next;
   $("activeOnly").checked = recall(filterKey()) === "1";
