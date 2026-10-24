@@ -76,7 +76,8 @@
     "github-issue": {"type": "github-issue", "requires": {"cmd": ["gh"]}}
   },
   "default_destination": "local",
-  "workflow": {"stages": ["tidy", "review"], "checks": {}, "worktrees": "nudge"},
+  "workflow": {"stages": ["tidy", "review"], "checks": {}, "worktrees": "nudge",
+               "skills": {"decompose": "required", "implement": "nudge", "tidy": "required"}},
   "dashboard": {"conversation": true},
   "setup": {
     "playwright": {

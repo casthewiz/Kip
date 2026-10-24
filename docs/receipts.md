@@ -14,6 +14,10 @@ claims, evidence the code has since outgrown, or failing
 [required checks](../skills/verification/kip-receipts/SKILL.md#required-checks),
 or without a receipts run, or open a PR with refuted claims or without its
 tidy and review [stages](../skills/verification/kip-receipts/SKILL.md#stages).
+Edits wait for `kip-decompose`, with one nudge toward `kip-messy-bun`, and a
+turn that changed code can't end before `kip-marie-kondo`
+([`workflow.skills`](configuration.md)); Cursor has no hook before an edit, so
+there only the stop holds it.
 Each session starts knowing where the branch's run stands; a run whose work has
 landed on the base branch is finished and drops out, and one set aside with
 `receipt.py orphan` (or `sweep`, for branches merged or deleted elsewhere) does

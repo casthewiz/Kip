@@ -27,7 +27,12 @@ before a turn can end or a PR open (default none). `workflow.worktrees`: how
 hard the gate steers edits off a main checkout and into linked worktrees:
 `nudge` (default) stops the first edit to a main checkout's file once a
 session, `required` stops every one and a stop after the session changed the
-main checkout, `off` never does. `workflow.worktree.setup`: a command
+main checkout, `off` never does. `workflow.skills`: which workflow skills
+the gate holds a session to, each `required`, `nudge` (once a session) or
+`off`: `decompose` (`kip-decompose`) and `implement` (`kip-messy-bun`) before
+its first edit in a repo, `decompose` and `tidy` (`kip-marie-kondo`) before a
+stop once it changed code (default `required`, `nudge`, `required`). A skill
+counts once the session calls it or reads its `SKILL.md`. `workflow.worktree.setup`: a command
 `kip.py worktree new` runs in each new worktree (say `npm ci`), after copying
 the gitignored files `.worktreeinclude` names. And `dashboard.conversation`:
 whether the session log keeps prompts and replies (default `true`).

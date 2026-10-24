@@ -89,7 +89,8 @@ def main():
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "CLAUDE_CODE_SESSION_ID"):
             env.pop(v, None)
         Path(tmp, "home").mkdir()
-        Path(tmp, "home", "config.json").write_text('{"setup": null}')  # this machine's setup isn't the test's
+        Path(tmp, "home", "config.json").write_text(  # this machine's setup isn't the test's; skill gates have their own test
+            '{"setup": null, "workflow": {"skills": null}}')
 
         def sh(*args, ok=True, extra_env=None, cwd=repo):
             r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
@@ -1267,7 +1268,16 @@ def main():
         (pol / ".kip" / "config.json").write_text('{"workflow": {"worktrees": "required", "stages": []}}')
         assert edit(pol / "x.py", "e4")[0] == edit(pol / "x.py", "e4")[0] == 2
         assert edit(pol_wt / "x.py", "e4")[0] == 0
-        # Every edit pays for this hook: a linked worktree's file, or one outside a repo, costs one git call.
+        def used(sid, tool, what):  # what the tool hook logs for a skill call, or for reading or editing a file
+            check("--hook", "tool", event={"session_id": sid, "tool_name": tool,
+                                           "tool_input": {"skill" if tool == "Skill" else "file_path": what}})
+
+        # Every edit pays for this hook: a linked worktree's file, or one outside a repo, costs one git call
+        # once the session has used the skills workflow.skills puts before edits.
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"worktrees": "required", "stages": [], '
+                                                  '"skills": {"decompose": "required", "implement": "nudge"}}}')
+        used("e5", "Skill", "kip-decompose")
+        used("e5", "Skill", "kip-messy-bun")
         counted, calls = Path(tmp, "counted-git"), Path(tmp, "git-calls")
         counted.mkdir()
         real_git = shutil.which("git")
@@ -1287,6 +1297,38 @@ def main():
         check("--hook", "start", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)
         assert "workflow.worktrees" not in check("--hook", "stop", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)[1]
         sh("git", "worktree", "remove", "--force", str(pol_wt), cwd=pol)
+        # workflow.skills: an edit in a repo waits for kip-decompose (required) and is nudged once toward kip-messy-bun;
+        # a stop after the session changed code waits for kip-marie-kondo, in one message with the run's own blocks.
+        # A Skill call or a read of its SKILL.md counts as using a skill; editing its SKILL.md doesn't.
+        (pol / ".kip" / "config.json").write_text(json.dumps({"workflow": {"stages": [], "worktrees": "off", "skills": {
+            "decompose": "required", "implement": "nudge", "tidy": "required"}}}))
+        code, out = edit(pol / "a.py", "sk")
+        assert code == 2 and "/kip-decompose" in out and "/kip-messy-bun" in out, out
+        code, out = edit(pol / "a.py", "sk")
+        assert code == 2 and "/kip-decompose" in out and "kip-messy-bun" not in out, "nudged messy-bun twice: " + out
+        used("sk", "Skill", "kip-decompose")
+        assert edit(pol / "a.py", "sk") == (0, "")
+        for name in ("kip-decompose", "kip-messy-bun"):
+            used("sk2", "Read", f"/x/skills/analysis/{name}/SKILL.md")
+        assert edit(pol / "a.py", "sk2") == (0, "")
+        used("sk3", "Edit", "/x/skills/analysis/kip-decompose/SKILL.md")
+        assert "/kip-decompose" in edit(pol / "a.py", "sk3")[1], "editing a skill counted as using it"
+        assert edit(Path(tmp, "outside.txt"), "sk3") == (0, ""), "gated a file outside a repo"
+        sk = {"session_id": "sk", "cwd": str(pol)}
+        check("--hook", "start", event=sk, cwd=pol)
+        assert check("--hook", "stop", event=sk, cwd=pol)[0] == 0, "gated a stop with no code changed"
+        (pol / "tidy-me.txt").write_text("1\n")
+        code, out = check("--hook", "stop", event=sk, cwd=pol)
+        assert code == 2 and "/kip-marie-kondo" in out and "no receipts run" in out and "/kip-decompose" not in out, out
+        assert check("--hook", "stop", event={**sk, "stop_hook_active": True}, cwd=pol)[0] == 0, "stop hook could loop"
+        used("sk", "Skill", "kip-marie-kondo")
+        assert "kip-marie-kondo" not in check("--hook", "stop", event=sk, cwd=pol)[1]
+        check("--hook", "end", event=sk)
+        assert "/kip-messy-bun" in edit(pol / "a.py", "sk")[1], "a session's end didn't forget its skill nudges"
+        assert "/kip-messy-bun" not in edit(pol / "a.py", "sk3")[1], "a session's end forgot another session's nudges"
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"skills": {"tidy": "sometimes"}}}')
+        assert "workflow.skills must map" in edit(pol / "a.py", "sk4")[1]
+        (pol / "tidy-me.txt").unlink()
         # Evidence against a local URL records the folder its server runs in. Served by another checkout of this
         # repo (worktrees share ports), it doesn't speak for the code it pinned: flagged, and it holds the gate.
         # Served from this checkout, or from outside any checkout of the repo, it counts.

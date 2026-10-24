@@ -125,6 +125,10 @@ def validate(cfg):
         sys.exit("workflow.stages must be a list of stage names")
     if cfg.get("workflow", {}).get("worktrees", "nudge") not in ("off", "nudge", "required"):
         sys.exit("workflow.worktrees must be off, nudge or required")
+    skills = cfg.get("workflow", {}).get("skills", {})
+    if not (isinstance(skills, dict) and set(skills) <= {"decompose", "implement", "tidy"}
+            and all(v in ("off", "nudge", "required") for v in skills.values())):
+        sys.exit("workflow.skills must map decompose, implement or tidy to off, nudge or required")
     worktree = cfg.get("workflow", {}).get("worktree", {})
     if not isinstance(worktree, dict):
         sys.exit("workflow.worktree must be an object, like {\"setup\": \"npm ci\"}")
