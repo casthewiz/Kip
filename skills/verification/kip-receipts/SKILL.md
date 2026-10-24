@@ -445,7 +445,9 @@ A run whose work was abandoned (a deleted branch, a session left paused) is
 **orphaned** with `receipt.py orphan [--reason TEXT]`: it leaves the dashboard,
 takes no more claims or evidence, and its branch counts as having no run, so
 the next PR or stop with changed code needs a fresh `init`. `receipt.py sweep`
-settles a repo's leftovers in one pass: runs whose branch merged are finished,
+settles a repo's leftovers in one pass: runs whose branch merged are finished
+(even while it's still checked out in a worktree, once that worktree is clean,
+and a worktree `kip.py worktree new` made is then removed),
 runs whose branch is gone unmerged are orphaned, and so are runs whose linked
 worktree was removed before anything was committed on its branch.
 

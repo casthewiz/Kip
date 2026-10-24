@@ -937,8 +937,8 @@ def main():
         # runs started after their branch's last commit included (from before init kept the fork point too),
         # deleted unmerged ones are orphaned, open and commitless ones stay; a second sweep changes nothing.
         swept = {}
-        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree", "late-merged",
-                     "legacy-late"):
+        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree", "wt-dirty", "wt-ahead",
+                     "kip-merged", "kip-dirty", "late-merged", "legacy-late"):
             fsh("git", "checkout", "-q", "-b", name, base)
             if "late" not in name:
                 swept[name] = Path(frc("init")).name
@@ -955,18 +955,40 @@ def main():
             fsh("git", "merge", "-q", "--no-ff", name, "-m", f"merge {name}")
         fsh("git", "merge", "-q", "--no-ff", "kept-merged", "-m", "merge kept-merged")
         fsh("git", "merge", "-q", "--no-ff", "gh-merged", "-m", "Merge pull request #2 from me/gh-merged")
-        fsh("git", "merge", "-q", "--no-ff", "in-a-worktree", "-m", "merge in-a-worktree")
+        # A merged branch still checked out in another worktree finishes once that worktree is clean: no
+        # uncommitted or untracked work, and no commits past the merge. One kip.py worktree new made is then
+        # removed, with its branch; a host's (anywhere else) and a dirty one are left alone.
+        folders = {n: fin / ".kip" / "worktrees" / n if n.startswith("kip-") else Path(tmp, n)
+                   for n in ("in-a-worktree", "wt-dirty", "wt-ahead", "kip-merged", "kip-dirty")}
+        for name, folder in folders.items():
+            fsh("git", "merge", "-q", "--no-ff", name, "-m", f"merge {name}")
+            fsh("git", "worktree", "add", "-q", str(folder), name)
+        for name in ("wt-dirty", "kip-dirty"):
+            (folders[name] / "new.txt").write_text("untracked\n")
+        sh("git", "commit", "-q", "--allow-empty", "-m", "after the merge", cwd=Path(tmp, "wt-ahead"))
         fsh("git", "branch", "-q", "-D", "gh-merged", "dropped")
-        fsh("git", "worktree", "add", "-q", str(Path(tmp, "wt")), "in-a-worktree")
         out = frc("sweep")
         state = {n: next((k for k in ("finished", "orphaned") if run_json(rid).get(k)), "open") for n, rid in swept.items()}
         assert state == {"kept-merged": "finished", "gh-merged": "finished", "dropped": "orphaned",
-                         "still-open": "open", "no-commits": "open", "in-a-worktree": "open", "late-merged": "finished",
+                         "still-open": "open", "no-commits": "open", "in-a-worktree": "finished", "wt-dirty": "open",
+                         "wt-ahead": "open", "kip-merged": "finished", "kip-dirty": "open", "late-merged": "finished",
                          "legacy-late": "finished"}, (state, out)
         assert f"orphaned {swept['dropped']} (dropped: branch gone)" in out, out
+        assert [n for n, f in folders.items() if not f.is_dir()] == ["kip-merged"], out
+        assert not fsh("git", "branch", "--list", "kip-merged") and fsh("git", "branch", "--list", "in-a-worktree"), out
         assert [run_json(swept[n])[k]["via"] for n, k in (("kept-merged", "finished"), ("dropped", "orphaned"))] == \
             ["merged", "branch gone"]
         assert frc("sweep") == "", "a second sweep changed something"
+        # The dashboard sweeps every repo with an open run on a timer, so one no session starts in still settles.
+        for name in ("wt-dirty", "kip-dirty"):
+            (folders[name] / "new.txt").unlink()
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0", "--settle", "1"],
+                                  env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: run_json(swept["wt-dirty"]).get("finished") and not folders["kip-dirty"].is_dir(), 20), \
+            "the dashboard didn't settle wt-dirty and kip-dirty"
+        server.terminate()
+        server.wait()
         # The gate on its own branch finishes a run started after the branch's last commit, once that's merged.
         fsh("git", "checkout", "-q", "-b", "late-gate", base)
         (fin / "late-gate.txt").write_text("1\n")

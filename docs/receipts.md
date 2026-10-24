@@ -33,6 +33,10 @@ Kip expects work to happen in linked worktrees, one per task or parallel
 unit: `kip.py worktree new NAME` makes one at `.kip/worktrees/NAME` on
 branch `kip/NAME`, copies the gitignored files `.worktreeinclude` names, and
 runs `workflow.worktree.setup` there; the host's own worktrees work the same.
+Once its branch merges and it has no uncommitted or untracked work, `sweep`
+(or the dashboard's hourly one) finishes its run, then removes a worktree Kip
+made, along with its branch; a host's worktrees are left to the host. More work
+starts a new worktree.
 Every run records the worktree it started in, and evidence is judged only
 where its code is checked out. A [plan](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan)
 hands each unit's claims to the unit's run (`--parent RUN --unit N`) and

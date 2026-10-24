@@ -65,6 +65,11 @@ folder is removed); a run's page names its plan or lists its unit runs, and a
 delegated claim links to the run that took it. A session's row shows the
 worktree its last gate fired in, when that isn't the main checkout.
 
+Sessions settle only the repo they start in, so the dashboard also runs
+`receipt.py sweep` hourly in each repo with an open run (`serve --settle
+SECONDS` changes how often; 0 turns it off): a merged run finishes even if no
+one opens that repo again.
+
 Flags mark what looks wrong: open on a branch that has merged, superseded by
 a newer run on its branch, no writer recorded, sessions linked only by branch,
 settled before Kip recorded how, a worktree removed with work not merged, and
