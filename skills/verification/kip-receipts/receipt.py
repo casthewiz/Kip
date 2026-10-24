@@ -72,8 +72,8 @@ FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image
               ".mp4": "video", ".webm": "video", ".mov": "video", ".zip": "trace"}
 
 
-def git(*args):
-    r = subprocess.run(["git", *args], capture_output=True, text=True)
+def git(*args, cwd=None):
+    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -109,12 +109,23 @@ def load_sink(name):
 
 
 @functools.lru_cache(maxsize=None)
-def repo_name():
-    """The main checkout's folder name, so a worktree's runs are its repository's."""
+def main_checkout():
+    """The main checkout's folder, from a worktree too; None outside a clone with a .git folder."""
     common = git("rev-parse", "--git-common-dir")
     common = common and Path.cwd() / common  # relative to here, when it isn't absolute
-    if common and common.name == ".git":
-        return common.resolve().parent.name
+    return common.resolve().parent if common and common.name == ".git" else None
+
+
+def repo_name():
+    """The main checkout's folder name, so a worktree's runs are its repository's."""
+    return _repo_name(os.getcwd())
+
+
+@functools.lru_cache(maxsize=None)
+def _repo_name(cwd):  # verdict() asks for every claim; the dashboard asks for every claim of every run
+    main = main_checkout()
+    if main:
+        return main.name
     top = git("rev-parse", "--show-toplevel")
     return Path(top).name if top else Path.cwd().name
 
@@ -448,6 +459,7 @@ def cmd_init(a):
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
              "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
+             "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
              "session": writer(), "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "stages": workflow.get("stages", []), "claims": checks})
     print(d)
@@ -1005,9 +1017,9 @@ def gate(a, hook):
     return True, f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(open_) + f"\nNext: {todo}."
 
 
-def base_branch():
-    ref = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    return ref or next((b for b in ("main", "master") if git("rev-parse", "--verify", "-q", b)), None)
+def base_branch(cwd=None):
+    ref = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", cwd=cwd)
+    return ref or next((b for b in ("main", "master") if git("rev-parse", "--verify", "-q", b, cwd=cwd)), None)
 
 
 def session_id(hook):
@@ -1022,14 +1034,14 @@ def session_start_state(hook):
     return row[0] if row else None
 
 
-def landed(rec, tip, base):
+def landed(rec, tip, base, cwd=None):
     """The run's branch is on the base branch: tip is in it and past where the branch left it, so a run
     started after the branch's last commit still counts. Runs from before init kept the fork point left it
     where their commit is on the base branch's own line (messy-bun: a fast-forwarded branch's old run stays open)."""
-    if not base or git("merge-base", "--is-ancestor", tip, base) is None:
+    if not base or git("merge-base", "--is-ancestor", tip, base, cwd=cwd) is None:
         return False
     fork = rec["fork"] if "fork" in rec else \
-        rec["commit"] if rec["commit"] in (git("rev-list", "--first-parent", base) or "").split() else None
+        rec["commit"] if rec["commit"] in (git("rev-list", "--first-parent", base, cwd=cwd) or "").split() else None
     return tip != fork
 
 
@@ -1348,6 +1360,60 @@ def run_detail(rec):
         for c in rec["claims"]]}
 
 
+def writes(rec):
+    """The session behind each write to a run (None where none was recorded): its start, each claim and piece
+    of evidence, each unverified or accept mark, and a manual orphaning."""
+    yield rec.get("session")
+    for c in rec["claims"]:
+        yield c.get("session")
+        yield from (e.get("session") for e in c["evidence"])
+        yield from (c[k] for k in ("unverified_by", "accepted_by") if k in c)
+    if "session" in (rec.get("orphaned") or {}):
+        yield rec["orphaned"]["session"]
+
+
+def open_on_merged(rec):
+    """An open run whose branch, in the checkout it started in, is on the base branch: nothing has settled it."""
+    co = rec.get("checkout")
+    if not (co and rec.get("branch") and Path(co).is_dir()):
+        return False
+    tip = git("rev-parse", "-q", "--verify", f"refs/heads/{rec['branch']}", cwd=co)
+    return bool(tip) and landed(rec, tip, base_branch(co), co)
+
+
+def triage(seen):
+    """Every run as the Runs view lists it, newest first: its state and how it settled, its commits, who wrote it,
+    which sessions only shared its branch when a hook fired (seen: run id -> session ids), and what looks wrong."""
+    out, newest = [], {}
+    for (rid,) in db().execute("SELECT id FROM runs ORDER BY created_at DESC, rowid DESC").fetchall():
+        rec = load(rid)
+        settled = rec.get("orphaned") or rec.get("finished")
+        state = "orphaned" if rec.get("orphaned") else "finished" if rec.get("finished") else "open"
+        writers, unknown = {}, 0
+        for sid in writes(rec):
+            if sid:
+                writers[sid] = writers.get(sid, 0) + 1
+            else:
+                unknown += 1
+        branch_only = sorted(seen.get(rid, set()) - set(writers))
+        key = (rec["repo"], rec.get("branch"))
+        flags = [f for f, on in (
+            ("open on a merged branch", state == "open" and open_on_merged(rec)),
+            ("superseded by a newer run on its branch", state == "open" and key in newest),
+            ("no writer recorded", not writers),
+            ("sessions linked only by branch", branch_only),
+            ("settled before Kip recorded how", settled and "via" not in settled)) if on]
+        newest.setdefault(key, rid)
+        out.append({**run_summary(rec), "repo": rec["repo"], "created_at": rec.get("created_at"), "state": state,
+                    "via": settled and settled.get("via"), "reason": (rec.get("orphaned") or {}).get("reason"),
+                    "commits": {"start": rec.get("commit"), "fork": rec.get("fork"), "published": rec.get("head"),
+                                "finished": (rec.get("finished") or {}).get("head")},
+                    "units": sorted({str(c["unit"]) for c in rec["claims"] if c.get("unit")}),
+                    "writers": writers, "unknown_writes": unknown, "branch_only": branch_only, "flags": flags,
+                    "attention": state == "open" and bool(flags)})  # a settled run's flags are history
+    return out
+
+
 @functools.lru_cache(maxsize=256)
 def hashed(path, mtime_ns, ctime_ns, size):
     """A file's sha256, worked out again only when it's touched (ctime too: a copy can keep mtime): a video
@@ -1455,6 +1521,7 @@ def cmd_serve(a):
         def do_GET(self):
             if (self.headers.get("Host") or "").rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
                 return self.send('{"error": "wrong host"}', code=403)  # a rebound DNS name; not this machine's page
+            live["busy"] = time.time()  # a server answering requests isn't idle
             path = self.path.split("?")[0]
             one = re.fullmatch(r"/api/sessions/([\w.-]+)", path)
             run = re.fullmatch(r"/api/runs/([\w-]+)", path)
@@ -1464,6 +1531,15 @@ def cmd_serve(a):
                 self.send(page, "text/html")
             elif mascot:
                 self.send((MASCOT / mascot[1]).read_text(), "image/svg+xml")
+            elif path == "/api/runs":
+                with lock:
+                    seen = {}
+                    for sid, r in rows.items():
+                        for p in r["runs"]:
+                            seen.setdefault(Path(p).name, set()).add(sid)
+                with reading:
+                    body = json.dumps(triage(seen), ensure_ascii=False)
+                self.send(body)
             elif path == "/api/sessions":
                 with lock:
                     snapshot = copy.deepcopy(rows)

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kip sessions</title>
+<title>Kip</title>
 <link rel="icon" href="/kip-waiting.svg" type="image/svg+xml">
 <style>
 :root {
@@ -117,6 +117,16 @@ a { color: var(--accent); }
 dialog#zoom { border: 0; padding: 0; background: none; max-width: 96vw; max-height: 96vh; }
 dialog#zoom::backdrop { background: rgb(0 0 0 / .75); }
 dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoom-out; }
+.tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.tabs button { font: inherit; font-size: 13px; border: 0; background: none; color: var(--dim); padding: 4px 12px; cursor: pointer; }
+.tabs button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.state { font-size: 11px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; flex: none; }
+.state.open { background: var(--accent-soft); color: var(--accent); }
+.state.finished { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.state.orphaned { background: var(--line); color: var(--dim); }
+.loop.past { background: var(--line); color: var(--dim); font-weight: 400; }
+.flags { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.sha { font-family: var(--mono); font-size: 12px; }
 @keyframes flash { from { background: var(--accent-soft); } to { background: transparent; } }
 @media (max-width: 760px) {
   main { grid-template-columns: 1fr; }
@@ -131,19 +141,22 @@ dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoo
 </head>
 <body>
 <header>
-  <h1>Kip sessions</h1>
-  <label class="toggle"><input type="checkbox" id="activeOnly"> Active only</label>
+  <h1>Kip</h1>
+  <nav class="tabs" aria-label="View"><button id="tabSessions">Sessions</button><button id="tabRuns">Runs</button></nav>
+  <label class="toggle"><input type="checkbox" id="activeOnly"> <span id="filterText">Active only</span></label>
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting</span></span>
 </header>
 <main>
-  <nav id="list" aria-label="Sessions"></nav>
+  <nav id="list" aria-label="List"></nav>
   <section id="detail"><p class="empty">Pick a session.</p></section>
   <dialog id="zoom"><img alt=""></dialog>
 </main>
 <script>
 const STAGES = ["decompose", "implement", "tidy", "review", "receipts"];
 const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "prompt", response: "reply" };
-let rows = [], selected = decodeURIComponent((location.hash.match(/session=([^&]+)/) || [])[1] || ""), events = [];
+const fromHash = key => decodeURIComponent((location.hash.match(new RegExp(key + "=([^&]+)")) || [])[1] || "");
+let rows = [], selected = fromHash("session"), events = [];
+let runs = [], runSelected = fromHash("run"), view = runSelected || location.hash === "#runs" ? "runs" : "sessions";
 const $ = id => document.getElementById(id);
 
 function h(tag, attrs, ...kids) {
@@ -200,6 +213,10 @@ function mascot(r, size) {
 }
 
 function renderList() {
+  $("tabSessions").setAttribute("aria-pressed", view === "sessions");
+  $("tabRuns").setAttribute("aria-pressed", view === "runs");
+  $("filterText").textContent = view === "runs" ? "Needs attention" : "Active only";
+  if (view === "runs") return renderRuns();
   const activeOnly = $("activeOnly").checked;
   const shown = rows.filter(r => !activeOnly || r.active || r.session === selected);
   $("list").replaceChildren(...(shown.length ? shown.map(r => h("button", {
@@ -313,12 +330,12 @@ function renderReview() {
 
 // Fetch a run for review; redraw only when it changed, so a playing video or an open claim survives live updates.
 async function openRun(id) {
-  if (!review || review.id !== id) { review = { id }; renderDetail(); renderReview(); }
+  if (!review || review.id !== id) { review = { id }; if (view === "sessions") { renderDetail(); renderReview(); } }
   let body;
   try { body = await (await fetch("/api/runs/" + encodeURIComponent(id))).text(); } catch (_) { return; }
   if (review?.id !== id || body === review.body) return;
   try { review = { id, body, data: JSON.parse(body) }; } catch (_) { return; }
-  renderReview();
+  if (view === "runs") renderUnits(); else renderReview();
 }
 
 function zoom(src, alt) {
@@ -349,12 +366,14 @@ function renderDetail(full) {
 async function refresh() {
   try {
     rows = await (await fetch("/api/sessions")).json();
+    if (view === "runs") runs = await (await fetch("/api/runs")).json();
     renderList();
-    if (selected) renderDetail();
+    if (view === "runs") renderRunDetail(); else if (selected) renderDetail();
   } catch (_) {}
 }
 
 async function select(id) {
+  view = "sessions";
   selected = id;
   review = null;
   history.replaceState(null, "", "#session=" + encodeURIComponent(id));
@@ -363,6 +382,77 @@ async function select(id) {
   renderDetail(true);
   const r = rows.find(x => x.session === id), latest = r && r.run && r.run.split("/").pop();
   if (latest && r.runs.some(x => x.id === latest)) openRun(latest);
+  if (matchMedia("(max-width: 760px)").matches) $("detail").scrollIntoView({ behavior: "smooth" });
+}
+
+const short = sha => sha ? sha.slice(0, 7) : "—";
+
+function renderRuns() {
+  const flaggedOnly = $("activeOnly").checked;
+  const shown = runs.filter(x => !flaggedOnly || x.attention || x.id === runSelected);
+  $("list").replaceChildren(...(shown.length ? shown.map(x => h("button", {
+      class: "card", "aria-current": x.id === runSelected ? "true" : "false", onclick: () => selectRun(x.id) },
+    h("div", { class: "grow" },
+      h("div", { class: "row" },
+        h("div", { class: "grow title" }, title(x)),
+        x.flags.length ? h("span", { class: "loop" + (x.attention ? "" : " past"), title: x.flags.join("\n") }, "⚑ " + x.flags.length) : null,
+        h("span", { class: `state ${x.state}` }, x.state)),
+      h("div", { class: "row" }, h("span", { class: "sub grow" }, `${x.id} · ${x.level}`),
+        h("span", { class: "when", "data-at": x.created_at }, ago(x.created_at))),
+      h("div", { class: "row" }, tally(x.claims)))))
+    : [h("p", { class: "empty" }, flaggedOnly ? "No open run needs attention." : "No receipts runs yet.")]));
+}
+
+const sessionLink = sid => h("a", { href: "#session=" + encodeURIComponent(sid), onclick: ev => { ev.preventDefault(); select(sid); } },
+  sid.slice(0, 8));
+
+// A run for triage: how it stands and settled, the commits it covers, who wrote it and who only shared its branch,
+// then its claims by unit.
+function renderRunDetail() {
+  const x = runs.find(r => r.id === runSelected);
+  if (!x) { $("detail").replaceChildren(h("p", { class: "empty" }, runSelected ? "That run isn't in kip.db." : "Pick a run.")); return; }
+  const how = x.state === "open" ? "" : ` · ${x.via || "how unknown"}${x.reason && x.via !== x.reason ? ": " + x.reason : ""}`;
+  const writers = Object.entries(x.writers).sort((a, b) => b[1] - a[1]);
+  const head = [
+    h("div", { class: "headline" }, h("div", { class: "grow" }, h("h2", {}, title(x)),
+      h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how))),
+    x.flags.length ? h("ul", { class: "flags", title: x.attention ? "" : "settled: these are history" },
+      x.flags.map(f => h("li", { class: "loop" + (x.attention ? "" : " past") }, f))) : null,
+    h("div", { class: "segments" },
+      segment("Commits", [["started on", x.commits.start], ["left the base at", x.commits.fork], ["published at", x.commits.published],
+        ["finished at", x.commits.finished]].map(([what, sha]) => h("li", {}, h("span", { class: "grow" }, what), h("span", { class: "sha", title: sha || "" }, short(sha)))), ""),
+      segment("Wrote it", [...writers.map(([sid, n]) => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, `${n} write${n > 1 ? "s" : ""}`))),
+        x.unknown_writes ? h("li", {}, h("span", { class: "grow" }, "no session recorded"), h("span", { class: "n" }, `${x.unknown_writes} write${x.unknown_writes > 1 ? "s" : ""}`)) : null].filter(Boolean),
+        "No writes yet."),
+      segment("Only on its branch", x.branch_only.map(sid => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, "wrote nothing"))),
+        "No session saw this run on its branch without writing to it.")),
+    h("div", { id: "review" })];
+  const keep = $("detail").dataset.run === x.id && $("review");
+  if (keep) return $("detail").firstChild.replaceWith(h("div", {}, head.slice(0, -1)));
+  $("detail").dataset.run = x.id;
+  $("detail").replaceChildren(h("div", {}, head.slice(0, -1)), head.at(-1));
+  renderUnits();
+}
+
+// The run's claims grouped by the kip-decompose unit each belongs to; claims without one come last.
+function renderUnits() {
+  const el = $("review");
+  if (!el || !review || review.id !== runSelected || !review.data) return;
+  const expanded = new Set([...el.querySelectorAll("details[open]")].map(d => d.dataset.claim)), groups = new Map();
+  for (const c of review.data.claims) groups.set(c.unit || "", [...(groups.get(c.unit || "") || []), c]);
+  const order = [...groups.keys()].sort((a, b) => !a - !b || a.localeCompare(b, undefined, { numeric: true }));
+  el.replaceChildren(...(order.length ? order.map(u => [h("h3", {}, u ? "Unit " + u : "No unit"), groups.get(u).map(c => claimItem(c, expanded.has(c.id)))]).flat(2)
+    : [h("p", { class: "none" }, "No claims yet.")]));
+}
+
+async function selectRun(id) {
+  view = "runs";
+  runSelected = id;
+  history.replaceState(null, "", "#run=" + encodeURIComponent(id));
+  if (!runs.length) runs = await (await fetch("/api/runs")).json();
+  renderList();
+  renderRunDetail();
+  await openRun(id);
   if (matchMedia("(max-width: 760px)").matches) $("detail").scrollIntoView({ behavior: "smooth" });
 }
 
@@ -377,7 +467,8 @@ function connect() {
   es.onerror = () => { $("conn").classList.remove("live"); $("connText").textContent = "reconnecting"; };
   es.onmessage = m => {
     let e; try { e = JSON.parse(m.data); } catch (_) { return; }
-    if (String(e.session) === selected) {
+    if (view === "runs" && review) openRun(review.id);
+    else if (String(e.session) === selected) {
       if (review) openRun(review.id);
       events.push(e);
       const tl = $("timeline");
@@ -387,10 +478,19 @@ function connect() {
   };
 }
 
-$("activeOnly").checked = recall("kip.activeOnly") === "1";
-$("activeOnly").addEventListener("change", () => { remember("kip.activeOnly", $("activeOnly").checked ? "1" : "0"); renderList(); });
+const filterKey = () => view === "runs" ? "kip.flaggedOnly" : "kip.activeOnly";
+function show(next) {
+  view = next;
+  $("activeOnly").checked = recall(filterKey()) === "1";
+  if (next === "runs") { history.replaceState(null, "", runSelected ? "#run=" + encodeURIComponent(runSelected) : "#runs"); refresh(); }
+  else if (selected) select(selected); else { history.replaceState(null, "", "#"); renderList(); renderDetail(true); }
+}
+$("tabSessions").addEventListener("click", () => show("sessions"));
+$("tabRuns").addEventListener("click", () => show("runs"));
+$("activeOnly").checked = recall(filterKey()) === "1";
+$("activeOnly").addEventListener("change", () => { remember(filterKey(), $("activeOnly").checked ? "1" : "0"); renderList(); });
 setInterval(() => document.querySelectorAll("[data-at]").forEach(el => el.textContent = ago(el.dataset.at)), 15000);
-refresh().then(() => selected && select(selected));
+refresh().then(() => view === "runs" ? runSelected && selectRun(runSelected) : selected && select(selected));
 connect();
 </script>
 </body>

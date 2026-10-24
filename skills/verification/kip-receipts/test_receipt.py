@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Self-check for receipt.py and the sink interface: python3 test_receipt.py"""
 import datetime
+import hashlib
 import json
 import os
 import queue
@@ -234,7 +235,9 @@ def main():
         assert ev[0]["command"][:2] == ["env", "BASE_URL=https://broken.example.test"], ev[0]["command"]
         assert "--project=mobile" in ev[0]["command"] and "KIP_LEVEL=ultra" in ev[0]["command"], ev[0]["command"]
         inputs = {i["path"]: i["inside_run"] for i in ev[0]["inputs"]}
-        assert inputs.get("specs/c1.spec.ts") is True and inputs.get(str(pw.resolve())) is False, inputs
+        ran = hashlib.sha256(b"// spec\n").hexdigest()[:12]
+        snap = f"specs/c1-{ran}.spec.ts"  # the spec as it ran, kept by its content
+        assert inputs.get(snap) is True and inputs.get(str(pw.resolve())) is False, inputs
         names = [Path(f["path"]).name for f in files]
         assert "c1f1-c1e1-signup-mobile-test-finished-1.png" in names, names
         assert sorted(f["type"] for f in files) == ["image"] * 5 + ["video"] * 5, files
@@ -256,8 +259,14 @@ def main():
         assert any(c.startswith('KIP_VIEWPORTS={"mobile":{"browserName":"chromium"') for c in cmd), cmd
         assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        # Editing the spec after a run leaves its evidence alone (the next run keeps its own copy); altering a
+        # copy the evidence ran is tampering.
         spec.write_text("// edited after the run\n")
-        assert "hash mismatch for specs/c1.spec.ts" in rc("render", "--run", str(remote), ok=False)
+        rc("render", "--run", str(remote))
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(spec), extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        assert len(list((remote / "specs").glob("c1-*.spec.ts"))) == 2
+        (remote / snap).write_text("// tampered\n")
+        assert f"hash mismatch for {snap}" in rc("render", "--run", str(remote), ok=False)
 
         # Gate: kip-decompose plans claims into a run; host hooks block finishing once work has
         # landed while a claim is unaddressed, and block opening a PR while one is refuted.
@@ -976,7 +985,8 @@ def main():
         fsh("git", "checkout", "-q", "-b", "reused", base)
         old = Path(frc("init")).name
         frc("claim", "old promise")
-        kipdb("UPDATE runs SET data = json_set(data, '$.created_at', '2000-01-01T00:00:00+00:00') WHERE id = ?", old)
+        kipdb("UPDATE runs SET created_at = '2000-01-01T00:00:00+00:00', "
+              "data = json_set(data, '$.created_at', '2000-01-01T00:00:00+00:00') WHERE id = ?", old)
         fsh("git", "checkout", "-q", base)
         fsh("git", "branch", "-q", "-D", "reused")
         fsh("git", "checkout", "-q", "-b", "reused", base)
@@ -1056,6 +1066,38 @@ def main():
         assert "✅ verified" in frc("render", "--run", prov).split("| c3 |")[1].split("\n")[0]
         assert frc("orphan", "--reason", "done here", extra_env=w2) and run_json(prov)["orphaned"]["session"] == "w2"
         fsh("git", "checkout", "-q", base)
+        # /api/runs, for triage: every run with its state and how it settled, its commits, the sessions that wrote
+        # it and those only on its branch when a hook fired, and flags for what looks wrong.
+        fsh("git", "checkout", "-q", "-b", "triage", base)
+        tw = {"CLAUDE_CODE_SESSION_ID": "tw"}
+        tri = Path(frc("init", extra_env=tw)).name
+        frc("claim", "t is 1", "--unit", "2", extra_env=tw)
+        check("--hook", "stop", event={"session_id": "tb", "cwd": str(fin)}, cwd=fin)  # on the branch, wrote nothing
+        (fin / "t.txt").write_text("1\n")
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "t")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "triage", "-m", "merge triage")  # no hook since: nothing settled it
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        listed = {x["id"]: x for x in json.loads(get(port, "/api/runs"))}
+        server.terminate()
+        server.wait()
+        t = listed[tri]
+        assert (t["repo"], t["branch"], t["state"], t["writers"], t["unknown_writes"], t["branch_only"], t["units"]) == \
+            ("fin", "triage", "open", {"tw": 2}, 0, ["tb"], ["2"]), t
+        assert t["commits"]["start"] == t["commits"]["fork"] and t["commits"]["finished"] is None, t["commits"]
+        assert {"open on a merged branch", "sessions linked only by branch"} <= set(t["flags"]) and t["attention"], t
+        km = listed[swept["kept-merged"]]
+        assert km["flags"] == ["no writer recorded"] and not km["attention"], km  # settled: history, not a to-do
+        p = listed[prov]
+        assert (p["state"], p["via"], p["reason"], p["writers"], p["unknown_writes"]) == \
+            ("orphaned", "manual", "done here", {"w1": 6, "w2": 4}, 2), p
+        assert "no writer recorded" in listed[swept["still-open"]]["flags"], listed[swept["still-open"]]
+        assert listed[swept["kept-merged"]]["state"] == "finished" and listed[swept["kept-merged"]]["via"] == "merged"
+        assert list(listed) == sorted(listed, key=lambda i: listed[i]["created_at"], reverse=True)
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}
