@@ -766,7 +766,7 @@ def main():
         # Re-runs: the latest run of each check decides it. A failure clears only when the same, unchanged
         # check passes on changed code, and that red-then-green also shows the check can fail.
         flag, check_sh = Path(tmp, "flag"), Path(tmp, "check.sh")
-        rc("init", "--level", "ultra")
+        rerun = Path(rc("init", "--level", "ultra"))
         for text in ("fixed", "flaky", "changed check", "gamed", "regressed"):
             rc("claim", text)
         rc("claim", "can't verify yet", "--level", "full")
@@ -814,6 +814,18 @@ def main():
         rc("run", "c3", "--red", "--", "sh", str(check_sh))
         (repo / "app.py").write_text('print("fixed again")\n')
         assert verdicts()["c3"] == "✅ verified", verdicts()
+        # A desk test runs its spec as a copy named by content: a revised spec is the same check, changed.
+        rc("claim", "revised spec", "--level", "full")
+        old_spec, new_spec = (rerun / "specs" / f"c9-{h * 12}.spec.ts" for h in "ab")
+        old_spec.write_text("grep -q nope app.py\n")
+        new_spec.write_text("grep -q again app.py\n")
+        rc("run", "c9", "--", "sh", str(old_spec))
+        rc("run", "c9", "--", "sh", str(new_spec))
+        assert verdicts()["c9"].startswith("⚠️ check changed after failing"), verdicts()
+        (repo / "app.py").write_text('print("fixed")\n')
+        rc("run", "c9", "--red", "--", "sh", str(new_spec))
+        (repo / "app.py").write_text('print("fixed again")\n')
+        assert verdicts()["c9"] == "✅ verified", verdicts()
         remote = rc("init", "--target", "https://staging.example.test")
         rc("claim", "staging fixed")
         rc("run", "c1", "--", *has_flag)
