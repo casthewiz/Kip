@@ -496,7 +496,7 @@ def cmd_init(a):
     d = ROOT / repo_name() / rid
     workflow = kip.load().get("workflow", {})
     checks = [] if a.target else [  # required checks are this checkout's, not a remote site's
-        new_claim(f"c{i}", f"`{name}` passes", check=name, command=cmd if isinstance(cmd, list) else ["sh", "-c", cmd])
+        new_claim(f"c{i}", f"`{name}` passes", check=name, command=kip.argv(cmd))
         for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
     base = base_branch()
     rec = {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
@@ -1469,7 +1469,7 @@ def log_prompt(hook):
 def log_gate(event, hook, blocked, msg):
     try:
         d = branch_run()
-        append_event(hook, hook=event, repo=repo_name(), github=github_url(), branch=git("branch", "--show-current"),
+        append_event(hook, hook=event, repo=repo_name(), github=github_url(), branch=here()[0],
                      worktree=here()[1], linked=linked(), run=str(d) if d else None, blocked=blocked, message=msg)
     except Exception:
         pass
