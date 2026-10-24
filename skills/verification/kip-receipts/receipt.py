@@ -33,7 +33,7 @@
                                                             that needs one (subagent: one in its own worktree), or
                                                             (edit) a main checkout's file is edited against
                                                             workflow.worktrees
-  receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (install's service or a start hook launches it)
+  receipt.py serve [--port N] [--idle S] [--settle S]       live dashboard on 127.0.0.1 (install's service or a start hook launches it)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
 
@@ -673,15 +673,22 @@ def worktrees(cwd=None):
     return out
 
 
+def dirty(folder, trees):
+    """A checkout has uncommitted or untracked work (or git can't say), not counting linked worktrees inside it."""
+    nested = [f":(exclude){os.path.relpath(f, folder)}" for f in trees if f.startswith(folder + os.sep)]
+    return git("status", "--porcelain", "--", ".", *nested, cwd=folder) != ""
+
+
 def settle(orphan=True):
     """Settle this repo's runs that no checkout will finish: finished once their branch merged into the base
     branch, orphaned (if orphan) once it's gone without merging, or once the linked worktree it started in is
-    gone and its branch never got a commit. The current branch finishes as the gate would. Yields a line per run
-    settled."""
+    gone and its branch never got a commit. The current branch finishes as the gate would; one checked out in
+    another worktree finishes here once that worktree is clean, and a worktree `kip.py worktree new` made is
+    then removed. Yields a line per run settled."""
     base, here = base_branch(), git("branch", "--show-current")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     trees = worktrees()
-    live = set(filter(None, trees.values()))
+    ours = main_checkout() and os.path.realpath(main_checkout() / ".kip" / "worktrees")  # kip.py worktree new's
     for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
                                "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
@@ -698,8 +705,9 @@ def settle(orphan=True):
             if finish_if_done(d, rec):
                 yield f"finished {rid} ({branch}: merged)"
             continue
-        if branch in live:  # checked out elsewhere: that checkout's hooks finish it, uncommitted work and all
-            continue
+        folder = next((f for f, b in trees.items() if b == branch), None)
+        if folder and dirty(folder, trees):
+            continue  # checked out elsewhere with work under way: that checkout's hooks finish it
         tip = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") or \
             git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}")
         # A deleted branch counts as merged by GitHub's merge message, or below, by gh's merged PRs.
@@ -716,6 +724,11 @@ def settle(orphan=True):
             with mutate(d) as fresh:
                 fresh["finished"] = {"at": now, "head": tip, "fingerprint": None, "via": via}
             yield f"finished {rid} ({branch}: merged)"
+            # Kip made it, so Kip removes it; a host's worktrees are the host's. Opening a new one is cheap.
+            if folder and os.path.dirname(folder) == ours and git("worktree", "remove", folder) is not None:
+                del trees[folder]
+                git("branch", "-q", "-d", branch)  # refused after a squash merge: the branch stays
+                yield f"removed worktree {folder}"
         elif orphan and not tip and not (asks_gh and prs is None):  # on GitHub, only once gh has answered
             with mutate(d) as fresh:
                 fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
@@ -1843,6 +1856,17 @@ def cmd_serve(a):
                 offsets.pop(p, None)
                 partial.pop(p, None)
 
+    def settle_repos():
+        """Sweep each repo with an open run from its checkout, in the background: sessions settle only the repo
+        they start in, so a repo no one opens again would keep its merged runs open."""
+        with reading:
+            checkouts = db().execute("SELECT DISTINCT json_extract(data, '$.checkout') FROM runs WHERE "
+                                     "json_extract(data, '$.finished') IS NULL AND json_extract(data, '$.orphaned') IS NULL").fetchall()
+        for (co,) in checkouts:
+            if co and Path(co).is_dir():
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "sweep"], cwd=co,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def poll():
         for p in sorted(EVENTS.glob("*.jsonl")):
             size = p.stat().st_size
@@ -1867,12 +1891,15 @@ def cmd_serve(a):
                     live["busy"] = time.time()
 
     def follow():
-        swept = time.time()
+        swept = settled = time.time()
         while True:
             time.sleep(0.25)
             if time.time() - swept > 3600:
                 sweep()
                 swept = time.time()
+            if a.settle and time.time() - settled > a.settle:
+                settle_repos()
+                settled = time.time()
             poll()
 
     class Handler(BaseHTTPRequestHandler):
@@ -2173,6 +2200,8 @@ def main():
     s.add_argument("--port", type=int, default=PORT)
     s.add_argument("--idle", type=float, default=float(os.environ.get("KIP_DASHBOARD_IDLE", 1800)),
                    help="seconds with no events and no open pages before it exits; 0 never does")
+    s.add_argument("--settle", type=float, default=3600,
+                   help="seconds between sweeps of every repo with an open run; 0 never sweeps")
     s.set_defaults(fn=cmd_serve)
 
     # Split off the wrapped command ourselves; argparse.REMAINDER swallows run's own flags.
