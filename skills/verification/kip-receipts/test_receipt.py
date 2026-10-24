@@ -84,7 +84,7 @@ def main():
                "FAKE_B_URL": "https://b.test", "FAKE_API_TOKEN": "supersecret123",
                "FAKE_SINK_LOG": str(sink_log), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "KIP_DASHBOARD": "0"}
-        for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+        for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "CLAUDE_CODE_SESSION_ID"):
             env.pop(v, None)
         Path(tmp, "home").mkdir()
         Path(tmp, "home", "config.json").write_text('{"setup": null}')  # this machine's setup isn't the test's
@@ -873,7 +873,8 @@ def main():
         fsh("git", "commit", "-qam", "seven")
         assert "has run" in check("--hook", "start", event={"session_id": "f6", "cwd": str(fin)}, cwd=fin)[1]
         assert frc("orphan", "--reason", "went another way").startswith("orphaned ")
-        assert json.loads(frc("json"))["orphaned"] | {"at": None} == {"at": None, "reason": "went another way", "via": "manual"}
+        assert json.loads(frc("json"))["orphaned"] | {"at": None} == {"at": None, "reason": "went another way", "via": "manual",
+                                                                       "session": None}
         assert check("--hook", "start", event={"session_id": "f7", "cwd": str(fin)}, cwd=fin) == (0, "")
         code, out = check("--hook", "pr", event=pr_event, cwd=fin)
         assert code == 2 and "no receipts run" in out, out
@@ -1023,6 +1024,25 @@ def main():
         check("--hook", "start", event={"session_id": "f12", "cwd": str(fin)}, cwd=fin)
         assert run_json(started["start-merged"])["finished"]["via"] == "merged"
         assert run_json(started["start-dropped"])["orphaned"]["via"] == "branch gone"
+        # Each write records the session that made it, from the shell the agent runs it in; none recorded is null.
+        fsh("git", "checkout", "-q", "-b", "provenance", base)
+        w1, w2 = {"CLAUDE_CODE_SESSION_ID": "w1"}, {"CLAUDE_CODE_SESSION_ID": "w2"}
+        prov = Path(frc("init", extra_env=w1)).name
+        frc("claim", "one", extra_env=w1)
+        frc("claim", "two", extra_env=w2)
+        frc("claim", "three")
+        frc("run", "c1", "--", "true", extra_env=w2)
+        frc("observe", "c1", "--passed", "looked", extra_env=w1)
+        frc("unverified", "c2", "can't", extra_env=w1)
+        frc("accept", "c2", extra_env=w2)
+        frc("unverified", "c3", "nobody")
+        rec = run_json(prov)
+        c1, c2, c3 = rec["claims"]
+        assert (rec["session"], c1["session"], c2["session"], c3["session"]) == ("w1", "w1", "w2", None), rec
+        assert [e["session"] for e in c1["evidence"]] == ["w2", "w1"], c1["evidence"]
+        assert (c2["unverified_by"], c2["accepted_by"], c3["unverified_by"]) == ("w1", "w2", None), (c2, c3)
+        assert frc("orphan", "--reason", "done here", extra_env=w2) and run_json(prov)["orphaned"]["session"] == "w2"
+        fsh("git", "checkout", "-q", base)
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}

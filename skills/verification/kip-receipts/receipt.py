@@ -125,6 +125,11 @@ def github_url():
     return m and f"https://github.com/{m[1]}"
 
 
+def writer():
+    """The agent session running this command, from its shell; None where the host doesn't say (Cursor)."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -374,7 +379,7 @@ def code_state(d, rec, eid):
 
 def new_evidence(d, rec, c, **fields):
     eid = f"{c['id']}e{len(c['evidence']) + 1}"
-    e = {"id": eid, **fields, **code_state(d, rec, eid)}
+    e = {"id": eid, **fields, "session": writer(), **code_state(d, rec, eid)}
     c["evidence"].append(e)
     c["unverified"] = None  # evidence supersedes an earlier "can't verify"
     return e
@@ -443,7 +448,7 @@ def cmd_init(a):
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
              "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
-             "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
+             "session": writer(), "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "stages": workflow.get("stages", []), "claims": checks})
     print(d)
 
@@ -458,7 +463,7 @@ def cmd_claim(a):
 
 
 def new_claim(cid, text, **fields):
-    return {"id": cid, "text": text, "unit": None, "provider": None, "level": None, "stage": None,
+    return {"id": cid, "text": text, "unit": None, "provider": None, "level": None, "stage": None, "session": writer(),
             **fields, "evidence": [], "files": [], "unverified": None}
 
 
@@ -528,7 +533,7 @@ def cmd_unverified(a):
     with mutate(adding_to(a)) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "marked unverified")
-        c["unverified"] = a.reason
+        c["unverified"], c["unverified_by"] = a.reason, writer()
 
 
 def cmd_accept(a):
@@ -537,14 +542,14 @@ def cmd_accept(a):
         c = find_claim(rec, a.claim)
         if not c["unverified"]:
             sys.exit(f"{c['id']} isn't marked unverified; only an unverified claim can be accepted")
-        c["accepted"] = a.reason or True
+        c["accepted"], c["accepted_by"] = a.reason or True, writer()
 
 
 def cmd_orphan(a):
     """Set a run aside whose work was abandoned: it leaves the dashboard and stops speaking for its branch."""
     with mutate(run_dir(a)) as rec:
         rec["orphaned"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                           "reason": a.reason, "via": "manual"}
+                           "reason": a.reason, "via": "manual", "session": writer()}
     print(f"orphaned {rec['id']}")
 
 
