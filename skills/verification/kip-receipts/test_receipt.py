@@ -1099,6 +1099,28 @@ def main():
         fsh("git", "merge", "-q", "--no-ff", "in-wt2", "-m", "merge in-wt2")
         fsh("git", "worktree", "remove", str(wt2))
         assert f"finished {wt_run.name} (in-wt2: merged)" in frc("sweep")
+        # A run whose linked worktree is gone (removed, or its folder deleted) is orphaned once its branch never got
+        # a commit: its uncommitted work went with the folder. One whose branch has commits waits to merge or go.
+        gone = {}
+        for name in ("wt-empty", "wt-deleted", "wt-committed"):
+            folder = Path(tmp, f"{name}-folder")
+            fsh("git", "worktree", "add", "-q", "-b", name, str(folder), base)
+            gone[name] = Path(sh(sys.executable, str(SCRIPT), "init", cwd=folder)).name
+            (folder / "work.txt").write_text(name)
+            if name == "wt-committed":
+                sh("git", "add", ".", cwd=folder)
+                sh("git", "commit", "-qm", name, cwd=folder)
+            if name == "wt-deleted":
+                shutil.rmtree(folder)
+            else:
+                fsh("git", "worktree", "remove", "--force", str(folder))
+        out = frc("sweep")
+        assert [run_json(gone[n]).get("orphaned", {}).get("via") for n in gone] == \
+            ["worktree removed", "worktree removed", None], (out, gone)
+        assert f"orphaned {gone['wt-empty']} (wt-empty: worktree removed)" in out, out
+        fsh("git", "worktree", "prune")
+        for name in gone:
+            fsh("git", "branch", "-q", "-D", name)
         Path(tmp, "store", "old-wt").mkdir()
         wt_run.rename(Path(tmp, "store", "old-wt", wt_run.name))
         kipdb("UPDATE runs SET repo = 'old-wt', data = json_set(data, '$.repo', 'old-wt') WHERE id = ?", wt_run.name)

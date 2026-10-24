@@ -594,13 +594,25 @@ def cmd_sweep(a):
         print(line)
 
 
+def worktrees():
+    """{folder: its branch, or None when detached} for each of this repo's worktrees whose folder still exists."""
+    out = {}
+    for block in (git("worktree", "list", "--porcelain") or "").split("\n\n"):
+        folder, branch = re.search(r"^worktree (.+)$", block, re.M), re.search(r"^branch refs/heads/(.+)$", block, re.M)
+        if folder and not re.search(r"^prunable", block, re.M):
+            out[os.path.realpath(folder[1])] = branch and branch[1]
+    return out
+
+
 def settle(orphan=True):
     """Settle this repo's runs that no checkout will finish: finished once their branch merged into the base
-    branch, orphaned (if orphan) once it's gone without merging. The current branch finishes as the gate would.
-    Yields a line per run settled."""
+    branch, orphaned (if orphan) once it's gone without merging, or once the linked worktree it started in is
+    gone and its branch never got a commit. The current branch finishes as the gate would. Yields a line per run
+    settled."""
     base, here = base_branch(), git("branch", "--show-current")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    live = set(re.findall(r"^branch refs/heads/(.+)$", git("worktree", "list", "--porcelain") or "", re.M))
+    trees = worktrees()
+    live = set(filter(None, trees.values()))
     for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
                                "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
@@ -639,6 +651,12 @@ def settle(orphan=True):
             with mutate(d) as fresh:
                 fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
             yield f"orphaned {rid} ({branch}: branch gone)"
+        elif orphan and rec.get("worktree") and os.path.realpath(rec["worktree"]) not in trees and \
+                git("rev-list", "--count", f"{rec.get('fork') or rec['commit']}..{tip}") == "0":
+            with mutate(d) as fresh:  # its uncommitted work went with the folder
+                fresh["orphaned"] = {"at": now, "reason": "its worktree was removed with nothing committed",
+                                     "via": "worktree removed"}
+            yield f"orphaned {rid} ({branch}: worktree removed)"
 
 
 def gone_merged_by(rec, head, at):
