@@ -1346,6 +1346,59 @@ def main():
         assert detail["claims"][1]["delegated"] == {"run": child, "claim": "c2"} and detail["claims"][0]["delegated"] is None
         assert (sessions["pol-s"]["worktree"], sessions["pol-s"]["linked"]) == (str(pol_wt.resolve()), True), sessions["pol-s"]
         sh("git", "worktree", "remove", "--force", str(srv_wt), cwd=pol)
+        # SubagentStop: a subagent in a worktree of its own (Claude Code's agent-<agent_id>) is gated like a session
+        # there: changed code needs a run on its branch, then its claims addressed. One sharing its parent's checkout,
+        # main or the parent's worktree, is never blocked, even with the parent's run open; nor is a re-stop.
+        sub = Path(tmp, "sub")
+        sub.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "sub"], ["checkout", "-q", "-b", "parent-work"]):
+            sh("git", *cmd, cwd=sub)
+        (sub / ".kip").mkdir()
+        (sub / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
+        parent = {"session_id": "sub-s"}
+        check("--hook", "start", event={**parent, "cwd": str(sub)}, cwd=sub)
+        sh(sys.executable, str(SCRIPT), "init", cwd=sub)
+        sh(sys.executable, str(SCRIPT), "claim", "parent's open claim", cwd=sub)
+        (sub / "parent.txt").write_text("mid-task\n")
+        agent_wt, parent_wt = Path(tmp, "agent-abc123"), Path(tmp, "parent-wt")
+        sh("git", "worktree", "add", "-q", "-b", "worktree-agent-abc123", str(agent_wt), cwd=sub)
+        sh("git", "worktree", "add", "-q", "-b", "parent-wt", str(parent_wt), cwd=sub)
+
+        def subagent_stop(cwd, agent="abc123", **extra):
+            return check("--hook", "subagent", event={**parent, "agent_id": agent, "agent_type": "iso", "cwd": str(cwd),
+                                                      "hook_event_name": "SubagentStop", **extra}, cwd=cwd)
+
+        assert subagent_stop(sub) == (0, "check: subagent shares its parent's checkout")
+        assert subagent_stop(agent_wt)[0] == 0, "an isolated subagent that changed nothing was blocked"
+        (agent_wt / "made.txt").write_text("x\n")
+        (parent_wt / "edit.txt").write_text("x\n")
+        assert subagent_stop(parent_wt, agent="other")[0] == 0, "a subagent in its parent's worktree was blocked"
+        code, out = subagent_stop(agent_wt)
+        assert code == 2 and "this session changed code, but there's no receipts run" in out, out
+        assert subagent_stop(agent_wt, stop_hook_active=True)[0] == 0
+        sh(sys.executable, str(SCRIPT), "init", cwd=agent_wt)
+        sh(sys.executable, str(SCRIPT), "claim", "made.txt exists", cwd=agent_wt)
+        code, out = subagent_stop(agent_wt)
+        assert code == 2 and "c1 ⚠️ unverified: made.txt exists" in out, out
+        sh(sys.executable, str(SCRIPT), "run", "c1", "--", "test", "-f", "made.txt", cwd=agent_wt)
+        assert subagent_stop(agent_wt)[0] == 0
+        for folder in (agent_wt, parent_wt):
+            sh("git", "worktree", "remove", "--force", str(folder), cwd=sub)
+        # A host's worktree made inside the checkout, unignored (`claude --worktree` and isolated subagents put
+        # theirs in .claude/worktrees/), is another checkout: it isn't this checkout's change.
+        nest = Path(tmp, "nest")
+        nest.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "nest"]):
+            sh("git", *cmd, cwd=nest)
+        (nest / "untracked-before.txt").write_text("already here\n")
+        nester = {"session_id": "nest-s", "cwd": str(nest)}
+        check("--hook", "start", event=nester, cwd=nest)
+        sh("git", "worktree", "add", "-q", "-b", "worktree-agent-n1", str(nest / ".claude" / "worktrees" / "agent-n1"), cwd=nest)
+        (nest / ".claude" / "worktrees" / "agent-n1" / "inside.txt").write_text("the subagent's\n")
+        assert check("--hook", "stop", event=nester, cwd=nest) == (0, "check: no receipt run for this branch"), \
+            "a nested worktree counted as the main checkout's change"
+        (nest / "real-change.txt").write_text("mine\n")
+        assert check("--hook", "stop", event=nester, cwd=nest)[0] == 2
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
         for name in ("start-merged", "start-dropped"):

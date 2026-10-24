@@ -33,8 +33,10 @@ Every run records the worktree it started in, and evidence is judged only
 where its code is checked out. A [plan](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan)
 hands each unit's claims to the unit's run (`--parent RUN --unit N`) and
 shows their verdicts. The gate steers edits off a main checkout
-(`workflow.worktrees`), and evidence against a dev server running another
-checkout's code is flagged.
+(`workflow.worktrees`), holds a worktree-isolated subagent's stop to the same
+rules as a session's in its worktree, and flags evidence against a dev server
+running another checkout's code. A host's worktrees made inside the checkout
+(`.claude/worktrees/`) never count as that checkout's changes.
 
 ## Storage
 

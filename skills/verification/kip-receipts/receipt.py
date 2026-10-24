@@ -27,10 +27,12 @@
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
                                                             --migrate creates or upgrades it and imports JSON runs
-  receipt.py check [--hook start|stop|pr|edit|tool|prompt|response|end] exit 2 if this branch's run has open
-                                                            claims and the code changed since init, or there's
-                                                            no run for work that needs one, or (edit) a file in
-                                                            the main checkout is edited against workflow.worktrees
+  receipt.py check [--hook start|stop|subagent|pr|edit|tool|prompt|response|end]
+                                                            exit 2 if this branch's run has open claims and the
+                                                            code changed since init, or there's no run for work
+                                                            that needs one (subagent: one in its own worktree), or
+                                                            (edit) a main checkout's file is edited against
+                                                            workflow.worktrees
   receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (install's service or a start hook launches it)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
@@ -361,13 +363,17 @@ def find_claim(rec, cid):
 
 def staged(*commands):
     """Run git commands on the working tree, new files included, staged through a copy of the index
-    (so unchanged files aren't rehashed) and never touching the real one."""
+    (so unchanged files aren't rehashed) and never touching the real one. Linked worktrees inside it (a host's
+    .claude/worktrees, say) are other checkouts, not new files of this one."""
+    top = here()[1] and os.path.realpath(here()[1])
+    nested = [os.path.relpath(f, top) for f in worktrees() if top and f.startswith(top + os.sep)] if top else []
     with tempfile.TemporaryDirectory() as t:
         index, env = Path(t, "index"), {**os.environ, "GIT_INDEX_FILE": str(Path(t, "index"))}
         real = git("rev-parse", "--git-path", "index")
         if real and Path(real).exists():
             shutil.copy2(real, index)
-        subprocess.run(["git", "add", "-A"], env=env, capture_output=True)
+        subprocess.run(["git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
+                       env=env, capture_output=True)
         runs = [subprocess.run(["git", *args], env=env, capture_output=True) for args in commands]
     return [r.stdout if r.returncode == 0 else b"" for r in runs]  # bytes: new files needn't be UTF-8
 
@@ -1158,6 +1164,16 @@ def opens_pr(hook):
 NUDGED = "check: already nudged this turn"
 
 
+def subagent_gate(a, hook):
+    """A subagent's stop, gated like a session's only in a worktree of its own (Claude Code names it
+    agent-<agent_id>): one sharing its parent's checkout works toward the parent's run, which the parent's stop
+    judges, so blocking it there would hold up ordinary subagents mid-task."""
+    top = here()[1]
+    if not (top and hook.get("agent_id") and Path(top).name == f"agent-{hook['agent_id']}"):
+        return False, "check: subagent shares its parent's checkout"
+    return gate(argparse.Namespace(**{**vars(a), "hook": "stop"}), hook)
+
+
 def worktree_policy():
     """workflow.worktrees: off, nudge (the first edit to a main checkout in a session is stopped once), or
     required (every one is, and a stop after this session changed a main checkout)."""
@@ -1941,13 +1957,13 @@ def cmd_check(a):
         if cwd:
             os.chdir(cwd)
         blocked, msg = (False, session_start(hook)) if a.hook == "start" else \
-            edit_gate(hook) if a.hook == "edit" else gate(a, hook)
+            edit_gate(hook) if a.hook == "edit" else subagent_gate(a, hook) if a.hook == "subagent" else gate(a, hook)
     except Exception as err:  # hosts let a crashed hook through, so a broken gate blocks instead, once per turn
         if not a.hook:
             raise
         hook = hook if isinstance(hook, dict) else {}
         blocked = opens_pr(hook) if a.hook == "pr" else \
-            a.hook == "stop" and not (hook.get("stop_hook_active") or hook.get("loop_count"))
+            a.hook in ("stop", "subagent") and not (hook.get("stop_hook_active") or hook.get("loop_count"))
         msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
                "Fix it or tell the user; don't work around it.")
     if a.hook == "stop":  # Claude Code's reply; Cursor sends its own on afterAgentResponse
@@ -2065,7 +2081,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "pr", "edit", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "subagent", "pr", "edit", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 

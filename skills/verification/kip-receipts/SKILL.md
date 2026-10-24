@@ -426,6 +426,12 @@ default to the latest run on the current branch.
   (`required`, which also blocks a stop after the session changed the main
   checkout), or never (`off`). Move the work to a worktree; don't work
   around it.
+- **Subagents**: a worktree-isolated subagent (Claude Code's
+  `isolation: worktree`, in `.claude/worktrees/agent-<id>`) is gated at its
+  stop like a session in that worktree: changed code needs a run there (often
+  `init --parent <plan run> --unit N`), with its claims addressed. A subagent
+  sharing its parent's checkout is never blocked; the parent's stop judges
+  that work.
 
 A run is **finished** once commits made since its `init` are on the base
 branch (`origin`'s default branch: pushed, or the feature branch merged and
