@@ -48,7 +48,8 @@ exactly that. The spec should:
 Everything in full, plus:
 - Falsifiability: `desktest.py --red` against a baseline that lacks the
   behavior (the base branch's dev server, prod when the change is on
-  staging). Scope it with `--viewports` to where the baseline is actually
+  staging). It pairs with the green runs by claim, spec, and viewport, not
+  URL. Scope it with `--viewports` to where the baseline is actually
   broken: a mobile-only layout bug passes on desktop, so `--red` there
   would correctly report "check can't fail".
 - Keyboard-only path through the interaction, and an accessibility scan

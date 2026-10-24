@@ -250,7 +250,9 @@ def main():
         assert "desktest mobile https://broken.example.test (exit 1)<br>" in table_row, table_row
         assert "`env " not in table_row, "full commands belong in the details, not the table"
         assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
-        assert "❌ refuted" in md, md
+        # A desk test is one check per spec and viewport, whatever its URL: mobile failed on one host and
+        # passed on another, and nothing pins either host's code.
+        assert "⚠️ passed after failing, code not pinned" in md, md
         # Viewports come from config: a project that only cares about mobile drops the others.
         (repo / ".kip" / "config.json").write_text(json.dumps(
             {**PROJECT_CONFIG, "evidence": {"frontend": {"viewports": {"tablet": None, "desktop": None}}}}))
@@ -826,6 +828,16 @@ def main():
         rc("run", "c9", "--red", "--", "sh", str(new_spec))
         (repo / "app.py").write_text('print("fixed again")\n')
         assert verdicts()["c9"] == "✅ verified", verdicts()
+        # Its --red runs against a baseline server at another URL and still pairs with the greens on the change's.
+        rc("claim", "red on a baseline URL", "--level", "full")
+        old_spec, new_spec = (rerun / "specs" / f"c10-{h * 12}.spec.ts" for h in "cd")
+        old_spec.write_text("grep -q nope app.py\n")
+        new_spec.write_text('case "$BASE_URL" in *baseline*) exit 1;; esac\n')
+        rc("run", "c10", "--", "env", "BASE_URL=https://change.test", "sh", str(old_spec))
+        rc("run", "c10", "--", "env", "BASE_URL=https://change.test", "sh", str(new_spec))
+        assert verdicts()["c10"].startswith("⚠️ check changed after failing"), verdicts()
+        rc("run", "c10", "--red", "--", "env", "BASE_URL=https://baseline.test", "sh", str(new_spec))
+        assert verdicts()["c10"] == "✅ verified", verdicts()
         remote = rc("init", "--target", "https://staging.example.test")
         rc("claim", "staging fixed")
         rc("run", "c1", "--", *has_flag)
