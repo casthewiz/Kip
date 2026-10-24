@@ -908,7 +908,7 @@ def main():
         fsh("git", "commit", "-qam", "seven")
         assert "has run" in check("--hook", "start", event={"session_id": "f6", "cwd": str(fin)}, cwd=fin)[1]
         assert frc("orphan", "--reason", "went another way").startswith("orphaned ")
-        assert json.loads(frc("json"))["orphaned"] | {"at": None} == {"at": None, "reason": "went another way", "via": "manual",
+        assert {**json.loads(frc("json"))["orphaned"], "at": None} == {"at": None, "reason": "went another way", "via": "manual",
                                                                        "session": None}
         assert check("--hook", "start", event={"session_id": "f7", "cwd": str(fin)}, cwd=fin) == (0, "")
         code, out = check("--hook", "pr", event=pr_event, cwd=fin)
