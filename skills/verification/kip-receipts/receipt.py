@@ -6,7 +6,7 @@
                                                             start a run (local only by default), print its dir
   receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
-  receipt.py run CLAIM [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
+  receipt.py run CLAIM... [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
                                                             run CMD (a required check's own command if omitted),
                                                             record the result, attach media from DIR
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
@@ -72,8 +72,8 @@ FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image
               ".mp4": "video", ".webm": "video", ".mov": "video", ".zip": "trace"}
 
 
-def git(*args):
-    r = subprocess.run(["git", *args], capture_output=True, text=True)
+def git(*args, cwd=None):
+    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -108,8 +108,19 @@ def load_sink(name):
     sys.exit(f"no sink module {module} for {name}; available: {', '.join(sink_names())}")
 
 
+def main_checkout():
+    """The main checkout's folder, from a worktree too; None outside a clone with a .git folder."""
+    common = git("rev-parse", "--git-common-dir")
+    common = common and Path.cwd() / common  # relative to here, when it isn't absolute
+    return common.resolve().parent if common and common.name == ".git" else None
+
+
 @functools.lru_cache(maxsize=None)
 def repo_name():
+    """The main checkout's folder name, so a worktree's runs are its repository's."""
+    main = main_checkout()
+    if main:
+        return main.name
     top = git("rev-parse", "--show-toplevel")
     return Path(top).name if top else Path.cwd().name
 
@@ -118,6 +129,11 @@ def github_url():
     """This checkout's GitHub page, from its origin remote; None when it isn't on GitHub."""
     m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", git("remote", "get-url", "origin") or "")
     return m and f"https://github.com/{m[1]}"
+
+
+def writer():
+    """The agent session running this command, from its shell; None where the host doesn't say (Cursor)."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
 
 def sha256(path):
@@ -205,10 +221,29 @@ def dumps(x):
 
 
 def branch_run():
-    """This branch's newest run: the last one started on it (rowid order; saving a run never moves it)."""
-    row = db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
-                       (repo_name(), git("branch", "--show-current"))).fetchone()
-    return ROOT / row[0] / row[1] if row else None
+    """This branch's newest run: the last one started on it (rowid order; saving a run never moves it), passing
+    over runs a branch of the same name left behind."""
+    branch = git("branch", "--show-current")
+    for repo, rid in db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
+                                  (repo_name(), branch)).fetchall():
+        if not branch or speaks_for(load(ROOT / repo / rid), branch):
+            return ROOT / repo / rid
+    return None
+
+
+def speaks_for(rec, branch):
+    """The run belongs to the branch now under this name: it started after the branch was created, the branch
+    was checked out again from its own remote branch, or it carries the commit the run started on (not one the
+    base branch has too). A branch whose reflog lost its creation, or a run without a start time, counts as the old one."""
+    first = ((git("reflog", "show", "--format=%ct %gs", f"refs/heads/{branch}", "--") or "").splitlines() or [""])[-1]
+    at, _, how = first.partition(" ")
+    if not how.startswith("branch: Created") or not rec.get("created_at") \
+            or re.fullmatch(rf"branch: Created from refs/remotes/[^/]+/{re.escape(branch)}", how) \
+            or datetime.datetime.fromisoformat(rec["created_at"]).timestamp() >= int(at):
+        return True
+    base = base_branch()
+    return bool(rec["commit"]) and git("merge-base", "--is-ancestor", rec["commit"], f"refs/heads/{branch}") is not None and \
+        not (base and git("merge-base", "--is-ancestor", rec["commit"], base) is not None)
 
 
 def run_path(run):
@@ -352,7 +387,7 @@ def code_state(d, rec, eid):
 
 def new_evidence(d, rec, c, **fields):
     eid = f"{c['id']}e{len(c['evidence']) + 1}"
-    e = {"id": eid, **fields, **code_state(d, rec, eid)}
+    e = {"id": eid, **fields, "session": writer(), **code_state(d, rec, eid)}
     c["evidence"].append(e)
     c["unverified"] = None  # evidence supersedes an earlier "can't verify"
     return e
@@ -417,9 +452,12 @@ def cmd_init(a):
     checks = [] if a.target else [  # required checks are this checkout's, not a remote site's
         new_claim(f"c{i}", f"`{name}` passes", check=name, command=cmd if isinstance(cmd, list) else ["sh", "-c", cmd])
         for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
+    base = base_branch()
     save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
              "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
-             "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
+             "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
+             "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
+             "session": writer(), "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
              "stages": workflow.get("stages", []), "claims": checks})
     print(d)
 
@@ -434,7 +472,7 @@ def cmd_claim(a):
 
 
 def new_claim(cid, text, **fields):
-    return {"id": cid, "text": text, "unit": None, "provider": None, "level": None, "stage": None,
+    return {"id": cid, "text": text, "unit": None, "provider": None, "level": None, "stage": None, "session": writer(),
             **fields, "evidence": [], "files": [], "unverified": None}
 
 
@@ -446,39 +484,47 @@ def not_a_check(c, how):
 
 
 def cmd_run(a):
+    """Run one command and record it as evidence for each claim given; they share its log."""
     d = adding_to(a)
-    c = find_claim(load(d), a.claim)
-    cmd = a.cmd or c.get("command")
+    claims = [find_claim(load(d), cid) for cid in a.claims]
+    cmd = a.cmd or next((c["command"] for c in claims if c.get("command")), None)
     if not cmd:
-        sys.exit("usage: receipt.py run CLAIM [--red] [--static] -- CMD ...")
-    if c.get("command") and cmd != c["command"]:
-        not_a_check(c, f"settled by `{shlex.join(cmd)}`")
-    cwd = (c.get("command") and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a required check runs at the root
+        sys.exit("usage: receipt.py run CLAIM... [--red] [--static] -- CMD ...")
+    for c in claims:
+        if c.get("command") and cmd != c["command"]:
+            not_a_check(c, f"settled by `{shlex.join(cmd)}`")
+    cwd = (any(c.get("command") for c in claims) and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a check runs at the root
     try:
         r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         code, out = r.returncode, redact(r.stdout)
     except OSError as err:
         code, out = 127, f"{cmd[0]}: {err.strerror}\n"
     passed = code != 0 if a.red else code == 0
-    collected = []
+    collected, log = [], None
     with mutate(d) as rec:  # after the command, so a long check never holds the write lock
-        c = find_claim(rec, a.claim)
-        e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
-                         label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
-                         passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
-        log = d / "files" / f"{e['id']}.log"
-        log.write_text(out)
-        e["log"] = {"path": f"files/{log.name}", "sha256": sha256(log)}
-        if a.collect and Path(a.collect).is_dir():
-            root = Path(a.collect)
-            for p in sorted(root.rglob("*")):
-                kind = FILE_TYPES.get(p.suffix.lower())
-                if p.is_file() and kind:
-                    name = f"{e['id']}-" + "-".join(p.relative_to(root).parts)
-                    collected.append(attach_file(d, c, p, kind, name).name)
+        ids = []
+        for cid in a.claims:
+            c = find_claim(rec, cid)
+            e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
+                             label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
+                             passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
+            if not log:
+                path = d / "files" / f"{e['id']}.log"
+                path.write_text(out)
+                log = {"path": f"files/{path.name}", "sha256": sha256(path)}
+            e["log"] = dict(log)
+            ids.append(e["id"])
+            if a.collect and Path(a.collect).is_dir():
+                media = Path(a.collect)
+                for p in sorted(media.rglob("*")):
+                    kind = FILE_TYPES.get(p.suffix.lower())
+                    if p.is_file() and kind:
+                        name = f"{e['id']}-" + "-".join(p.relative_to(media).parts)
+                        collected.append(attach_file(d, c, p, kind, name).name)
     expected = "expected failure" if a.red else "expected success"
-    print(f"{e['id']}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
-          + (f", collected {len(collected)} file(s)" if a.collect else ""))
+    for eid in ids:
+        print(f"{eid}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
+              + (f", collected {len(collected)} file(s)" if a.collect else ""))
 
 
 def cmd_observe(a):
@@ -504,7 +550,7 @@ def cmd_unverified(a):
     with mutate(adding_to(a)) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "marked unverified")
-        c["unverified"] = a.reason
+        c["unverified"], c["unverified_by"] = a.reason, writer()
 
 
 def cmd_accept(a):
@@ -513,14 +559,14 @@ def cmd_accept(a):
         c = find_claim(rec, a.claim)
         if not c["unverified"]:
             sys.exit(f"{c['id']} isn't marked unverified; only an unverified claim can be accepted")
-        c["accepted"] = a.reason or True
+        c["accepted"], c["accepted_by"] = a.reason or True, writer()
 
 
 def cmd_orphan(a):
     """Set a run aside whose work was abandoned: it leaves the dashboard and stops speaking for its branch."""
     with mutate(run_dir(a)) as rec:
         rec["orphaned"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                           "reason": a.reason}
+                           "reason": a.reason, "via": "manual", "session": writer()}
     print(f"orphaned {rec['id']}")
 
 
@@ -536,11 +582,17 @@ def settle(orphan=True):
     base, here = base_branch(), git("branch", "--show-current")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     live = set(re.findall(r"^branch refs/heads/(.+)$", git("worktree", "list", "--porcelain") or "", re.M))
-    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? ORDER BY rowid", (repo_name(),)).fetchall():
+    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
+                               "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
         rec = load(d)
         branch = rec.get("branch")
         if rec.get("finished") or rec.get("orphaned") or not branch:
+            continue
+        if orphan and git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") and not speaks_for(rec, branch):
+            with mutate(d) as fresh:
+                fresh["orphaned"] = {"at": now, "reason": "its branch was recreated", "via": "branch recreated"}
+            yield f"orphaned {rid} ({branch}: branch recreated)"
             continue
         if branch == here:
             if finish_if_done(d, rec):
@@ -550,23 +602,56 @@ def settle(orphan=True):
             continue
         tip = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") or \
             git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}")
-        # messy-bun: a deleted branch counts as merged only by GitHub's merge message; squash merges get orphaned.
-        # "Gone" means gone from this clone, and runs are keyed by folder name, so sweep in the clone that made them.
-        merged = bool(base) and git("merge-base", "--is-ancestor", tip, base) is not None and tip != rec["commit"] if tip else \
+        # A deleted branch counts as merged by GitHub's merge message, or below, by gh's merged PRs.
+        # "Gone" means gone from this clone, so sweep in the clone that made them.
+        merged = landed(rec, tip, base) if tip else \
             bool(base and git("log", base, "--merges", "-1", "--format=%h", f"--grep=from [^ ]*/{re.escape(branch)}$"))
+        asks_gh = not merged and github_url()  # squash merges leave no ancestry to find
+        prs = merged_prs(branch) if asks_gh else None
+        via = "merged"
+        if prs:
+            pr = next((n for head, at, n in prs if (head == tip if tip else gone_merged_by(rec, head, at))), None)
+            merged, via = bool(pr), f"pr #{pr}"
         if merged:
             with mutate(d) as fresh:
-                fresh["finished"] = {"at": now, "head": tip, "fingerprint": None}
+                fresh["finished"] = {"at": now, "head": tip, "fingerprint": None, "via": via}
             yield f"finished {rid} ({branch}: merged)"
-        elif orphan and not tip:
+        elif orphan and not tip and not (asks_gh and prs is None):  # on GitHub, only once gh has answered
             with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch is gone"}
+                fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
             yield f"orphaned {rid} ({branch}: branch gone)"
 
 
+def gone_merged_by(rec, head, at):
+    """A merged PR from a deleted branch's name is that branch's: it merged after the run started and, when this
+    clone has its commits, carries a commit the run's evidence ran on (a later branch can reuse the name)."""
+    created = rec.get("created_at")
+    if not (created and datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) > datetime.datetime.fromisoformat(created)):
+        return False
+    ran = {e["commit"] for c in rec["claims"] for e in c["evidence"] if e.get("commit")} - {rec.get("fork")}
+    return not (ran and git("cat-file", "-e", head) is not None) or \
+        any(git("merge-base", "--is-ancestor", c, head) is not None for c in ran)
+
+
+@functools.lru_cache(maxsize=None)
+def merged_prs(branch):
+    """[(head, mergedAt, number)] for this repo's merged GitHub PRs from branch, or None when gh can't say."""
+    try:
+        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
+                            "headRefName,headRefOid,mergedAt,number"], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        return [(pr["headRefOid"], pr["mergedAt"], pr["number"]) for pr in json.loads(r.stdout) if pr["headRefName"] == branch]
+    except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
+        return None
+
+
 def check_key(e):
-    """Runs of the same command in the same dir are one check; observations are one check."""
-    return (tuple(e["command"]), e.get("cwd")) if e.get("command") else ("observed",)
+    """Runs of the same command in the same dir are one check; observations are one check. A desk test's
+    KIP_OUT is a fresh temp folder its media lands in, not part of what it checks."""
+    if not e.get("command"):
+        return ("observed",)
+    return tuple(a for a in e["command"] if not a.startswith("KIP_OUT=")), e.get("cwd")
 
 
 def code_key(e):
@@ -940,9 +1025,9 @@ def gate(a, hook):
     return True, f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(open_) + f"\nNext: {todo}."
 
 
-def base_branch():
-    ref = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    return ref or next((b for b in ("main", "master") if git("rev-parse", "--verify", "-q", b)), None)
+def base_branch(cwd=None):
+    ref = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", cwd=cwd)
+    return ref or next((b for b in ("main", "master") if git("rev-parse", "--verify", "-q", b, cwd=cwd)), None)
 
 
 def session_id(hook):
@@ -957,15 +1042,25 @@ def session_start_state(hook):
     return row[0] if row else None
 
 
+def landed(rec, tip, base, cwd=None):
+    """The run's branch is on the base branch: tip is in it and past where the branch left it, so a run
+    started after the branch's last commit still counts. Runs from before init kept the fork point left it
+    where their commit is on the base branch's own line (messy-bun: a fast-forwarded branch's old run stays open)."""
+    if not base or git("merge-base", "--is-ancestor", tip, base, cwd=cwd) is None:
+        return False
+    fork = rec["fork"] if "fork" in rec else \
+        rec["commit"] if rec["commit"] in (git("rev-list", "--first-parent", base, cwd=cwd) or "").split() else None
+    return tip != fork
+
+
 def finish_if_done(d, rec):
-    """Mark a run finished once commits made since its init are on the base branch and nothing
-    changed since, so its old claims stop speaking for new work. True if it just finished."""
+    """Mark a run finished once its branch is on the base branch and nothing changed since, so its old
+    claims stop speaking for new work. True if it just finished."""
     head, base = git("rev-parse", "HEAD"), base_branch()
-    if head == rec["commit"] or not base or git("merge-base", "--is-ancestor", "HEAD", base) is None \
-            or worktree_diff():
+    if not landed(rec, head, base) or worktree_diff():
         return False
     rec["finished"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                       "head": head, "fingerprint": fingerprint()}
+                       "head": head, "fingerprint": fingerprint(), "via": "checkout"}
     with mutate(d) as fresh:
         fresh["finished"] = rec["finished"]
     return True
@@ -1039,6 +1134,7 @@ def run_status(hook):
         state = session_state()  # git runs outside the write lock
         with tx() as con:  # a resumed session keeps the state it first started from
             con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)", (repo_name(), session_id(hook), state))
+    list(settle())  # merged and deleted branches, so no one has to remember `sweep`
     d = branch_run()
     rec = load(d) if d else None
     if not rec or rec.get("finished") or rec.get("orphaned") or finish_if_done(d, rec):
@@ -1272,6 +1368,60 @@ def run_detail(rec):
         for c in rec["claims"]]}
 
 
+def writes(rec):
+    """The session behind each write to a run (None where none was recorded): its start, each claim and piece
+    of evidence, each unverified or accept mark, and a manual orphaning."""
+    yield rec.get("session")
+    for c in rec["claims"]:
+        yield c.get("session")
+        yield from (e.get("session") for e in c["evidence"])
+        yield from (c[k] for k in ("unverified_by", "accepted_by") if k in c)
+    if "session" in (rec.get("orphaned") or {}):
+        yield rec["orphaned"]["session"]
+
+
+def open_on_merged(rec):
+    """An open run whose branch, in the checkout it started in, is on the base branch: nothing has settled it."""
+    co = rec.get("checkout")
+    if not (co and rec.get("branch") and Path(co).is_dir()):
+        return False
+    tip = git("rev-parse", "-q", "--verify", f"refs/heads/{rec['branch']}", cwd=co)
+    return bool(tip) and landed(rec, tip, base_branch(co), co)
+
+
+def triage(seen):
+    """Every run as the Runs view lists it, newest first: its state and how it settled, its commits, who wrote it,
+    which sessions only shared its branch when a hook fired (seen: run id -> session ids), and what looks wrong."""
+    out, newest = [], {}
+    for (rid,) in db().execute("SELECT id FROM runs ORDER BY created_at DESC, rowid DESC").fetchall():
+        rec = load(rid)
+        settled = rec.get("orphaned") or rec.get("finished")
+        state = "orphaned" if rec.get("orphaned") else "finished" if rec.get("finished") else "open"
+        writers, unknown = {}, 0
+        for sid in writes(rec):
+            if sid:
+                writers[sid] = writers.get(sid, 0) + 1
+            else:
+                unknown += 1
+        branch_only = sorted(seen.get(rid, set()) - set(writers))
+        key = (rec["repo"], rec.get("branch"))
+        flags = [f for f, on in (
+            ("open on a merged branch", state == "open" and open_on_merged(rec)),
+            ("superseded by a newer run on its branch", state == "open" and key in newest),
+            ("no writer recorded", not writers),
+            ("sessions linked only by branch", branch_only),
+            ("settled before Kip recorded how", settled and "via" not in settled)) if on]
+        newest.setdefault(key, rid)
+        out.append({**run_summary(rec), "repo": rec["repo"], "created_at": rec.get("created_at"), "state": state,
+                    "via": settled and settled.get("via"), "reason": (rec.get("orphaned") or {}).get("reason"),
+                    "commits": {"start": rec.get("commit"), "fork": rec.get("fork"), "published": rec.get("head"),
+                                "finished": (rec.get("finished") or {}).get("head")},
+                    "units": sorted({str(c["unit"]) for c in rec["claims"] if c.get("unit")}),
+                    "writers": writers, "unknown_writes": unknown, "branch_only": branch_only, "flags": flags,
+                    "attention": state == "open" and bool(flags)})  # a settled run's flags are history
+    return out
+
+
 @functools.lru_cache(maxsize=256)
 def hashed(path, mtime_ns, ctime_ns, size):
     """A file's sha256, worked out again only when it's touched (ctime too: a copy can keep mtime): a video
@@ -1379,6 +1529,7 @@ def cmd_serve(a):
         def do_GET(self):
             if (self.headers.get("Host") or "").rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
                 return self.send('{"error": "wrong host"}', code=403)  # a rebound DNS name; not this machine's page
+            live["busy"] = time.time()  # a server answering requests isn't idle
             path = self.path.split("?")[0]
             one = re.fullmatch(r"/api/sessions/([\w.-]+)", path)
             run = re.fullmatch(r"/api/runs/([\w-]+)", path)
@@ -1388,6 +1539,15 @@ def cmd_serve(a):
                 self.send(page, "text/html")
             elif mascot:
                 self.send((MASCOT / mascot[1]).read_text(), "image/svg+xml")
+            elif path == "/api/runs":
+                with lock:
+                    seen = {}
+                    for sid, r in rows.items():
+                        for p in r["runs"]:
+                            seen.setdefault(Path(p).name, set()).add(sid)
+                with reading:
+                    body = json.dumps(triage(seen), ensure_ascii=False)
+                self.send(body)
             elif path == "/api/sessions":
                 with lock:
                     snapshot = copy.deepcopy(rows)
@@ -1575,7 +1735,7 @@ def main():
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("run", parents=[common])
-    s.add_argument("claim")
+    s.add_argument("claims", nargs="+", metavar="CLAIM", help="one or more claims this command is evidence for")
     s.add_argument("--red", action="store_true", help="falsifiability run: expected to fail")
     s.add_argument("--static", action="store_true", help="typecheck/lint/grep, not behavior")
     s.add_argument("--collect", help="after the run, attach every image, video, and trace under this dir")

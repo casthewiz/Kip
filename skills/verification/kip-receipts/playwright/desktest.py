@@ -18,6 +18,7 @@ never the machine's default Node; run setup.sh once. Overrides: $KIP_NODE
 executable to run as-is, used by the self-check).
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -88,6 +89,19 @@ def main():
     if not claim:
         sys.exit(f"unknown claim {a.claim}")
     level = claim.get("level") or rec["level"]
+    # A spec kept in the run's specs/ runs as a copy named by its content, so the evidence pins the spec as it
+    # ran: editing it later makes a new copy instead of breaking the hash of evidence already recorded. A spec
+    # elsewhere (a project's own, with relative imports) runs where it is.
+    run_dir = Path(subprocess.run([sys.executable, str(RECEIPT), "path", *run_args],
+                                  capture_output=True, text=True, check=True).stdout.strip()).resolve()
+    if spec.parent == run_dir / "specs":
+        body = spec.read_bytes()
+        digest = hashlib.sha256(body).hexdigest()[:12]
+        stem, dot, rest = spec.name.partition(".")
+        if not stem.endswith(f"-{digest}"):  # a copy already is the spec as it runs
+            spec = spec.with_name(f"{stem}-{digest}{dot}{rest}")
+            if not spec.exists():
+                spec.write_bytes(body)
 
     failed = False
     for vp in viewports:

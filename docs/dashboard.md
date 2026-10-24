@@ -46,5 +46,21 @@ splits what it touched into segments:
   every claim's verdict, its evidence (command, exit, excerpt, commit, log and
   patch), and its screenshots and videos inline.
 
+## Runs
+
+The **Runs** tab lists every receipts run, newest first, for triage: whether
+it's open, finished or orphaned, and how it settled (`checkout`, `merged`,
+`pr #N`, `branch gone`, `branch recreated`, `manual`). A run's page shows the
+commits it covers (where it started, where its branch left the base branch,
+where it was published and finished), the sessions that wrote to it, the
+sessions that only shared its branch when a hook fired, and its claims grouped
+by `kip-decompose` unit.
+
+Flags mark what looks wrong: open on a branch that has merged, superseded by
+a newer run on its branch, no writer recorded, sessions linked only by branch,
+and settled before Kip recorded how. Only an open run's flags need attention,
+which is what **Needs attention** filters to; a settled run's flags are
+history, shown muted.
+
 The dashboard serves only files a run recorded, and only while their hashes
 still match.

@@ -13,7 +13,7 @@ The upload alone posts nothing.
 |---|---|
 | Page | `https://github.com/<owner>/<repo>/pull/<number>` (`gh pr view <number> --json url`) |
 | Comment textarea | `#new_comment_field` (`textarea[name="comment[body]"]`) |
-| File input | `#fc-new_comment_field` in `form#new_comment_form` (`#new_comment_form input[type=file]`); `find` names it a "file" button |
+| File input | `#fc-new_comment_field` in `form#new_comment_form` (`#new_comment_form input[type=file]`), `hidden`, so `find` may not see it (below) |
 | Upload placeholder | `Uploading…` in the textarea until done (a small PNG finishes at once) |
 | Image result | `<img width="…" height="…" alt="<name>" src="https://github.com/user-attachments/assets/<uuid>" />` in the textarea |
 | Video result | the bare `https://github.com/user-attachments/assets/<uuid>` URL |
@@ -23,6 +23,12 @@ Accepted: PNG, JPG, GIF and SVG images; MP4, MOV and WEBM videos; text files
 such as `.log` and `.txt` (they come back as a link). Make a big or other
 video an MP4 under 10 MB first (`ffmpeg -i in -vf scale=1280:-2 -crf 28 out.mp4`).
 
+- Find the file input: it carries the `hidden` attribute, so an
+  accessibility-tree `find` can miss it and return the "Attach files"
+  button instead, which `set_files` rejects ("not a file input"). `eval`
+  `hidden = false` and an `aria-label` on `#fc-new_comment_field`, then
+  `find` that label; the ref takes `set_files` for every file after. It
+  posts nothing and is gone on reload.
 - Read the URL by polling `eval` of the textarea's value until it matches
   `https://github.com/user-attachments/[^\s"')]+`.
 - Clear it after: `eval` setting the textarea's value to `''` and
@@ -35,6 +41,7 @@ video an MP4 under 10 MB first (`ffmpeg -i in -vf scale=1280:-2 -crf 28 out.mp4`
 Never call GitHub's internal upload endpoint directly or read the session
 cookie: the cookie is a credential and the endpoint is undocumented.
 
-Last verified: 2026-10-19, on casthewiz/Kip#10 (public repo) through Claude
-in Chrome: a PNG uploaded and rendered in the PR body at its real size for a
-signed-in viewer; no comment posted. Video not yet checked.
+Last verified: 2026-10-23, on casthewiz/Kip#23 (public repo) through Claude
+in Chrome: `find` missed the hidden file input until it was unhidden; six PNGs
+then uploaded one after another through one ref and rendered in the PR body at
+their real sizes for a signed-in viewer; no comment posted. Video not yet checked.

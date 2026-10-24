@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Self-check for receipt.py and the sink interface: python3 test_receipt.py"""
 import datetime
+import hashlib
 import json
 import os
 import queue
@@ -56,6 +57,7 @@ case "$1 $2" in
             echo \'{{"id": 99, "html_url": "https://github.test/issues/7#issuecomment-99"}}\';;
   "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
   "pr edit") cat > "$FAKE_PR_BODY";;
+  "pr list") [ -n "$FAKE_MERGED_PRS" ] || exit 1; cat "$FAKE_MERGED_PRS";;
   *) echo "unexpected: gh $*" >&2; exit 1;;
 esac
 '''
@@ -83,7 +85,7 @@ def main():
                "FAKE_B_URL": "https://b.test", "FAKE_API_TOKEN": "supersecret123",
                "FAKE_SINK_LOG": str(sink_log), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "KIP_DASHBOARD": "0"}
-        for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+        for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "CLAUDE_CODE_SESSION_ID"):
             env.pop(v, None)
         Path(tmp, "home").mkdir()
         Path(tmp, "home", "config.json").write_text('{"setup": null}')  # this machine's setup isn't the test's
@@ -233,7 +235,9 @@ def main():
         assert ev[0]["command"][:2] == ["env", "BASE_URL=https://broken.example.test"], ev[0]["command"]
         assert "--project=mobile" in ev[0]["command"] and "KIP_LEVEL=ultra" in ev[0]["command"], ev[0]["command"]
         inputs = {i["path"]: i["inside_run"] for i in ev[0]["inputs"]}
-        assert inputs.get("specs/c1.spec.ts") is True and inputs.get(str(pw.resolve())) is False, inputs
+        ran = hashlib.sha256(b"// spec\n").hexdigest()[:12]
+        snap = f"specs/c1-{ran}.spec.ts"  # the spec as it ran, kept by its content
+        assert inputs.get(snap) is True and inputs.get(str(pw.resolve())) is False, inputs
         names = [Path(f["path"]).name for f in files]
         assert "c1f1-c1e1-signup-mobile-test-finished-1.png" in names, names
         assert sorted(f["type"] for f in files) == ["image"] * 5 + ["video"] * 5, files
@@ -255,8 +259,39 @@ def main():
         assert any(c.startswith('KIP_VIEWPORTS={"mobile":{"browserName":"chromium"') for c in cmd), cmd
         assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        # Editing the spec after a run leaves its evidence alone (the next run keeps its own copy); altering a
+        # copy the evidence ran is tampering.
         spec.write_text("// edited after the run\n")
-        assert "hash mismatch for specs/c1.spec.ts" in rc("render", "--run", str(remote), ok=False)
+        rc("render", "--run", str(remote))
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(spec), extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        assert len(list((remote / "specs").glob("c1-*.spec.ts"))) == 2
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(remote / snap), "--viewports", "mobile",
+           extra_env={"KIP_PLAYWRIGHT": str(pw)})  # re-running a copy runs that copy
+        assert len(list((remote / "specs").glob("c1-*.spec.ts"))) == 2
+        # Re-running a desk test on changed code refreshes its claim: the folder its media lands in isn't the check.
+        desk_repo = Path(tmp, "desk-fresh")
+        desk_repo.mkdir()
+        sh("git", "init", "-q", cwd=desk_repo)
+        (desk_repo / "a.txt").write_text("1\n")
+        sh("git", "add", ".", cwd=desk_repo)
+        sh("git", "commit", "-qm", "a", cwd=desk_repo)
+        local = Path(sh(sys.executable, str(SCRIPT), "init", cwd=desk_repo))
+        sh(sys.executable, str(SCRIPT), "claim", "desk test stays fresh", cwd=desk_repo)
+        (local / "specs" / "c1.spec.ts").write_text("// fresh\n")
+        for code in ("1\n", "2\n"):
+            (desk_repo / "a.txt").write_text(code)
+            sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(local / "specs" / "c1.spec.ts"),
+               "--viewports", "mobile", cwd=desk_repo, extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        row = next(x for x in sh(sys.executable, str(SCRIPT), "render", cwd=desk_repo).splitlines() if x.startswith("| c1 |"))
+        assert "✅ verified" in row, row
+        outside = Path(tmp, "e2e", "c1.spec.ts")  # a project's own spec runs where it is, relative imports and all
+        outside.parent.mkdir()
+        outside.write_text("// project spec\n")
+        sh(sys.executable, str(DESKTEST), "c1", "https://staging.example.test", str(outside), "--viewports", "mobile",
+           extra_env={"KIP_PLAYWRIGHT": str(pw)})
+        assert str(outside.resolve()) in run_json(remote)["claims"][0]["evidence"][-1]["command"]
+        (remote / snap).write_text("// tampered\n")
+        assert f"hash mismatch for {snap}" in rc("render", "--run", str(remote), ok=False)
 
         # Gate: kip-decompose plans claims into a run; host hooks block finishing once work has
         # landed while a claim is unaddressed, and block opening a PR while one is refuted.
@@ -872,7 +907,8 @@ def main():
         fsh("git", "commit", "-qam", "seven")
         assert "has run" in check("--hook", "start", event={"session_id": "f6", "cwd": str(fin)}, cwd=fin)[1]
         assert frc("orphan", "--reason", "went another way").startswith("orphaned ")
-        assert json.loads(frc("json"))["orphaned"]["reason"] == "went another way"
+        assert json.loads(frc("json"))["orphaned"] | {"at": None} == {"at": None, "reason": "went another way", "via": "manual",
+                                                                       "session": None}
         assert check("--hook", "start", event={"session_id": "f7", "cwd": str(fin)}, cwd=fin) == (0, "")
         code, out = check("--hook", "pr", event=pr_event, cwd=fin)
         assert code == 2 and "no receipts run" in out, out
@@ -896,16 +932,25 @@ def main():
         assert "f9" not in rows and [x["id"] for x in rows["f5"]["runs"]] == [fresh], rows.get("f5")
         assert "c1 ⚠️ unverified: a is 7, again" in rows["f5"]["open"]["unaddressed"], rows["f5"]["open"]
         # Sweep settles runs no checkout will: merged branches (kept, or deleted after a GitHub merge) finish,
+        # runs started after their branch's last commit included (from before init kept the fork point too),
         # deleted unmerged ones are orphaned, open and commitless ones stay; a second sweep changes nothing.
         swept = {}
-        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree"):
+        for name in ("kept-merged", "gh-merged", "dropped", "still-open", "no-commits", "in-a-worktree", "late-merged",
+                     "legacy-late"):
             fsh("git", "checkout", "-q", "-b", name, base)
-            swept[name] = Path(frc("init")).name
+            if "late" not in name:
+                swept[name] = Path(frc("init")).name
             if name != "no-commits":
                 (fin / f"{name}.txt").write_text(name)
                 fsh("git", "add", ".")
                 fsh("git", "commit", "-qm", name)
+            if "late" in name:
+                swept[name] = Path(frc("init")).name
+        assert run_json(swept["late-merged"])["fork"] == fsh("git", "rev-parse", base)
+        kipdb("UPDATE runs SET data = json_remove(data, '$.fork') WHERE id = ?", swept["legacy-late"])
         fsh("git", "checkout", "-q", base)
+        for name in ("late-merged", "legacy-late"):
+            fsh("git", "merge", "-q", "--no-ff", name, "-m", f"merge {name}")
         fsh("git", "merge", "-q", "--no-ff", "kept-merged", "-m", "merge kept-merged")
         fsh("git", "merge", "-q", "--no-ff", "gh-merged", "-m", "Merge pull request #2 from me/gh-merged")
         fsh("git", "merge", "-q", "--no-ff", "in-a-worktree", "-m", "merge in-a-worktree")
@@ -914,10 +959,195 @@ def main():
         out = frc("sweep")
         state = {n: next((k for k in ("finished", "orphaned") if run_json(rid).get(k)), "open") for n, rid in swept.items()}
         assert state == {"kept-merged": "finished", "gh-merged": "finished", "dropped": "orphaned",
-                         "still-open": "open", "no-commits": "open", "in-a-worktree": "open"}, (state, out)
+                         "still-open": "open", "no-commits": "open", "in-a-worktree": "open", "late-merged": "finished",
+                         "legacy-late": "finished"}, (state, out)
         assert f"orphaned {swept['dropped']} (dropped: branch gone)" in out, out
+        assert [run_json(swept[n])[k]["via"] for n, k in (("kept-merged", "finished"), ("dropped", "orphaned"))] == \
+            ["merged", "branch gone"]
         assert frc("sweep") == "", "a second sweep changed something"
+        # The gate on its own branch finishes a run started after the branch's last commit, once that's merged.
+        fsh("git", "checkout", "-q", "-b", "late-gate", base)
+        (fin / "late-gate.txt").write_text("1\n")
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "late-gate")
+        late_gate = Path(frc("init")).name
         fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "late-gate", "-m", "merge late-gate")
+        fsh("git", "checkout", "-q", "late-gate")
+        assert "is finished" in check("--hook", "stop", event={}, cwd=fin)[1] and run_json(late_gate)["finished"]["via"] == "checkout"
+        fsh("git", "checkout", "-q", base)
+        # Squash merges leave no ancestry, so on GitHub sweep asks gh which PRs merged: a kept branch whose tip
+        # is a merged PR's head finishes, and so does a deleted one with a PR merged after its run started; a
+        # branch that moved on after its PR merged stays open. Until gh answers, a deleted branch isn't orphaned.
+        squashed, tips = {}, {}
+        for name in ("squash-kept", "squash-gone", "squash-moved", "name-reused"):
+            fsh("git", "checkout", "-q", "-b", name, base)
+            squashed[name] = Path(frc("init")).name
+            (fin / f"{name}.txt").write_text(name)
+            fsh("git", "add", ".")
+            fsh("git", "commit", "-qm", name)
+            tips[name] = fsh("git", "rev-parse", "HEAD")
+            fsh("git", "checkout", "-q", base)
+            if name == "name-reused":  # abandoned after evidence on its commit; a later branch of that name merged
+                frc("claim", "abandoned", "--run", squashed[name])
+                fsh("git", "checkout", "-q", name)
+                frc("run", "c1", "--", "true")
+                fsh("git", "checkout", "-q", base)
+                tips[name] = fsh("git", "rev-parse", "HEAD")
+                continue
+            fsh("git", "merge", "-q", "--squash", name)
+            fsh("git", "commit", "-qm", f"{name} (#9)")
+        fsh("git", "checkout", "-q", "squash-moved")
+        fsh("git", "commit", "-q", "--allow-empty", "-m", "after the merge")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "branch", "-q", "-D", "squash-gone", "name-reused")
+        fsh("git", "remote", "add", "origin", "https://github.com/me/fin.git")
+        merged_prs = Path(tmp, "merged.json")
+        merged_prs.write_text(json.dumps([{"headRefName": n, "headRefOid": tips[n], "mergedAt": "2999-01-01T00:00:00Z", "number": 9}
+                                          for n in squashed]))
+        no_gh = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}"}  # FAKE_MERGED_PRS unset: gh fails
+        assert frc("sweep", extra_env=no_gh) == "", "settled squash merges without gh"
+        out = frc("sweep", extra_env={**no_gh, "FAKE_MERGED_PRS": str(merged_prs)})
+        state = {n: next((k for k in ("finished", "orphaned") if run_json(r).get(k)), "open") for n, r in squashed.items()}
+        assert state == {"squash-kept": "finished", "squash-gone": "finished", "squash-moved": "open",
+                         "name-reused": "orphaned"}, (state, out)
+        assert run_json(squashed["squash-kept"])["finished"]["via"] == "pr #9"
+        fsh("git", "remote", "remove", "origin")
+        # A branch recreated under an old name doesn't inherit the old branch's run (one started before it was
+        # created, on commits it lacks); sweep orphans that run. A run started on the new branch is its own.
+        fsh("git", "checkout", "-q", "-b", "reused", base)
+        old = Path(frc("init")).name
+        frc("claim", "old promise")
+        kipdb("UPDATE runs SET created_at = '2000-01-01T00:00:00+00:00', "
+              "data = json_set(data, '$.created_at', '2000-01-01T00:00:00+00:00') WHERE id = ?", old)
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "branch", "-q", "-D", "reused")
+        fsh("git", "checkout", "-q", "-b", "reused", base)
+        assert "no receipt run for this branch" in frc("path", ok=False)
+        out = frc("sweep")
+        assert f"orphaned {old} (reused: branch recreated)" in out, out
+        assert run_json(old)["orphaned"]["via"] == "branch recreated"
+        assert Path(frc("init")).name == Path(frc("path")).name
+        fsh("git", "checkout", "-q", base)
+        # Checked out again from its own remote branch, it's the same branch: the run (started before any commit,
+        # so on a commit the base branch has) still speaks for it. A run with no start time is never passed over.
+        fsh("git", "checkout", "-q", "-b", "again", base)
+        again = Path(frc("init")).name
+        kipdb("UPDATE runs SET created_at = '2000-01-01T00:00:00+00:00', "
+              "data = json_set(data, '$.created_at', '2000-01-01T00:00:00+00:00') WHERE id = ?", again)
+        fsh("git", "commit", "-q", "--allow-empty", "-m", "again")
+        fsh("git", "update-ref", "refs/remotes/origin/again", "HEAD")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "branch", "-q", "-D", "again")
+        fsh("git", "checkout", "-q", "-b", "again", "refs/remotes/origin/again")
+        assert Path(frc("path")).name == again and again not in frc("sweep")
+        kipdb("UPDATE runs SET data = json_remove(data, '$.created_at') WHERE id = ?", old)
+        fsh("git", "checkout", "-q", "reused")
+        assert Path(frc("path")).name != old, "a run without a start time crashed or took the branch"
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "update-ref", "-d", "refs/remotes/origin/again")
+        # A worktree's runs belong to its repository, not its folder: sweeping the main checkout settles them
+        # once the worktree is gone. Runs stored under a worktree's folder name before that still load and serve.
+        wt2 = Path(tmp, "wt2-folder")
+        fsh("git", "worktree", "add", "-q", "-b", "in-wt2", str(wt2), base)
+        wt_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=wt2))
+        assert wt_run.parent.name == "fin" and run_json(wt_run.name)["repo"] == "fin", wt_run
+        (wt2 / "wt2.txt").write_text("1\n")
+        sh("git", "add", ".", cwd=wt2)
+        sh("git", "commit", "-qm", "wt2", cwd=wt2)
+        fsh("git", "merge", "-q", "--no-ff", "in-wt2", "-m", "merge in-wt2")
+        fsh("git", "worktree", "remove", str(wt2))
+        assert f"finished {wt_run.name} (in-wt2: merged)" in frc("sweep")
+        Path(tmp, "store", "old-wt").mkdir()
+        wt_run.rename(Path(tmp, "store", "old-wt", wt_run.name))
+        kipdb("UPDATE runs SET repo = 'old-wt', data = json_set(data, '$.repo', 'old-wt') WHERE id = ?", wt_run.name)
+        assert "old-wt @" in frc("render", "--run", wt_run.name)
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        served = json.loads(get(port, f"/api/runs/{wt_run.name}"))
+        server.terminate()
+        server.wait()
+        assert served["id"] == wt_run.name and served["finished"], served
+        # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
+        started = {}
+        for name in ("start-merged", "start-dropped"):
+            fsh("git", "checkout", "-q", "-b", name, base)
+            started[name] = Path(frc("init")).name
+            (fin / f"{name}.txt").write_text(name)
+            fsh("git", "add", ".")
+            fsh("git", "commit", "-qm", name)
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "start-merged", "-m", "merge start-merged")
+        fsh("git", "branch", "-q", "-D", "start-dropped")
+        check("--hook", "start", event={"session_id": "f12", "cwd": str(fin)}, cwd=fin)
+        assert run_json(started["start-merged"])["finished"]["via"] == "merged"
+        assert run_json(started["start-dropped"])["orphaned"]["via"] == "branch gone"
+        # Each write records the session that made it, from the shell the agent runs it in; none recorded is null.
+        fsh("git", "checkout", "-q", "-b", "provenance", base)
+        w1, w2 = {"CLAUDE_CODE_SESSION_ID": "w1"}, {"CLAUDE_CODE_SESSION_ID": "w2"}
+        prov = Path(frc("init", extra_env=w1)).name
+        frc("claim", "one", extra_env=w1)
+        frc("claim", "two", extra_env=w2)
+        frc("claim", "three")
+        frc("run", "c1", "--", "true", extra_env=w2)
+        frc("observe", "c1", "--passed", "looked", extra_env=w1)
+        frc("unverified", "c2", "can't", extra_env=w1)
+        frc("accept", "c2", extra_env=w2)
+        frc("unverified", "c3", "nobody")
+        rec = run_json(prov)
+        c1, c2, c3 = rec["claims"]
+        assert (rec["session"], c1["session"], c2["session"], c3["session"]) == ("w1", "w1", "w2", None), rec
+        assert [e["session"] for e in c1["evidence"]] == ["w2", "w1"], c1["evidence"]
+        assert (c2["unverified_by"], c2["accepted_by"], c3["unverified_by"]) == ("w1", "w2", None), (c2, c3)
+        # One command can be evidence for several claims: it runs once, and each claim gets its own evidence
+        # sharing that log. An unknown claim stops it before anything runs.
+        count = Path(tmp, "ran-once")
+        once = ["sh", "-c", f"echo ran >> '{count}'"]
+        assert "unknown claim c9" in frc("run", "c1", "c9", "--", *once, ok=False) and not count.exists()
+        out = frc("run", "c1", "c3", "--", *once, extra_env=w1)
+        assert count.read_text() == "ran\n" and out.splitlines() == [
+            "c1e3: exit 0 (expected success) -> pass", "c3e1: exit 0 (expected success) -> pass"], out
+        c1, _, c3 = run_json(prov)["claims"]
+        shared = [c1["evidence"][-1], c3["evidence"][-1]]
+        assert {(e["command"][0], e["log"]["path"], e["log"]["sha256"], e["session"]) for e in shared} == \
+            {("sh", "files/c1e3.log", shared[0]["log"]["sha256"], "w1")} and c3["unverified"] is None, shared
+        assert "✅ verified" in frc("render", "--run", prov).split("| c3 |")[1].split("\n")[0]
+        assert frc("orphan", "--reason", "done here", extra_env=w2) and run_json(prov)["orphaned"]["session"] == "w2"
+        fsh("git", "checkout", "-q", base)
+        # /api/runs, for triage: every run with its state and how it settled, its commits, the sessions that wrote
+        # it and those only on its branch when a hook fired, and flags for what looks wrong.
+        fsh("git", "checkout", "-q", "-b", "triage", base)
+        tw = {"CLAUDE_CODE_SESSION_ID": "tw"}
+        tri = Path(frc("init", extra_env=tw)).name
+        frc("claim", "t is 1", "--unit", "2", extra_env=tw)
+        check("--hook", "stop", event={"session_id": "tb", "cwd": str(fin)}, cwd=fin)  # on the branch, wrote nothing
+        (fin / "t.txt").write_text("1\n")
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "t")
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "triage", "-m", "merge triage")  # no hook since: nothing settled it
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        listed = {x["id"]: x for x in json.loads(get(port, "/api/runs"))}
+        server.terminate()
+        server.wait()
+        t = listed[tri]
+        assert (t["repo"], t["branch"], t["state"], t["writers"], t["unknown_writes"], t["branch_only"], t["units"]) == \
+            ("fin", "triage", "open", {"tw": 2}, 0, ["tb"], ["2"]), t
+        assert t["commits"]["start"] == t["commits"]["fork"] and t["commits"]["finished"] is None, t["commits"]
+        assert {"open on a merged branch", "sessions linked only by branch"} <= set(t["flags"]) and t["attention"], t
+        km = listed[swept["kept-merged"]]
+        assert km["flags"] == ["no writer recorded"] and not km["attention"], km  # settled: history, not a to-do
+        p = listed[prov]
+        assert (p["state"], p["via"], p["reason"], p["writers"], p["unknown_writes"]) == \
+            ("orphaned", "manual", "done here", {"w1": 6, "w2": 4}, 2), p
+        assert "no writer recorded" in listed[swept["still-open"]]["flags"], listed[swept["still-open"]]
+        assert listed[swept["kept-merged"]]["state"] == "finished" and listed[swept["kept-merged"]]["via"] == "merged"
+        assert list(listed) == sorted(listed, key=lambda i: listed[i]["created_at"] or "", reverse=True)
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}
