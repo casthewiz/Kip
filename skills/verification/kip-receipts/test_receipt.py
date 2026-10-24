@@ -1130,6 +1130,7 @@ def main():
         mv_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=moved)).name
         Path(tmp, "elsewhere").mkdir()
         moved = moved.rename(Path(tmp, "elsewhere", "mv-before"))  # same name, so the same repo, in a new place
+        sh("git", "checkout", "-q", "-b", "mv-other", cwd=moved)  # sweep leaves the checked-out branch to the gate
         sh(sys.executable, str(SCRIPT), "sweep", cwd=moved)
         assert not run_json(mv_run).get("orphaned"), run_json(mv_run)
         Path(tmp, "store", "old-wt").mkdir()
