@@ -1122,6 +1122,15 @@ def main():
         fsh("git", "worktree", "prune")
         for name in gone:
             fsh("git", "branch", "-q", "-D", name)
+        # Only a linked worktree can be removed: a repo whose folder moved keeps its main checkout's runs.
+        moved = Path(tmp, "mv-before")
+        moved.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "mv"], ["checkout", "-q", "-b", "mv-work"]):
+            sh("git", *cmd, cwd=moved)
+        mv_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=moved)).name
+        moved = moved.rename(Path(tmp, "mv-after"))
+        sh(sys.executable, str(SCRIPT), "sweep", cwd=moved)
+        assert not run_json(mv_run).get("orphaned"), run_json(mv_run)
         Path(tmp, "store", "old-wt").mkdir()
         wt_run.rename(Path(tmp, "store", "old-wt", wt_run.name))
         kipdb("UPDATE runs SET repo = 'old-wt', data = json_set(data, '$.repo', 'old-wt') WHERE id = ?", wt_run.name)
@@ -1151,7 +1160,12 @@ def main():
         Path(tmp, "store", "fin", stray).rename(Path(tmp, "store", "nowhere", stray))
         kipdb("UPDATE runs SET repo = 'nowhere', branch = 'no-such-branch', data = json_set(data, '$.repo', 'nowhere') "
               "WHERE id = ?", stray)
+        base_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=fin)).name
+        Path(tmp, "store", "a-clone").mkdir()
+        Path(tmp, "store", "fin", base_run).rename(Path(tmp, "store", "a-clone", base_run))
+        kipdb("UPDATE runs SET repo = 'a-clone', data = json_set(data, '$.repo', 'a-clone') WHERE id = ?", base_run)
         out = frc("db", "--migrate")
+        assert run_json(base_run)["repo"] == "a-clone" and run_json(base_run)["branch"] == base, (out, run_json(base_run))
         assert f"re-homed {wt_run.name}: old-wt -> fin" in out and f"re-homed {sib_runs[1]}: sib-wt -> sib" in out, out
         assert "nowhere" not in out and run_json(stray)["repo"] == "nowhere", out
         assert run_json(wt_run.name)["checkout"] == str(fin.resolve()) and "fin @" in frc("render", "--run", wt_run.name)
@@ -1182,6 +1196,7 @@ def main():
         assert "--parent needs --unit" in urc(u1, "init", "--parent", plan_run, ok=False)
         assert "no open claims for unit 9" in urc(u1, "init", "--parent", plan_run, "--unit", "9", ok=False)
         assert len(kipdb("SELECT id FROM runs")) == runs_before, "a refused init left a run"
+        assert "is this checkout's own run" in frc("init", "--parent", plan_run, "--unit", "1", ok=False)
         child = Path(urc(u1, "init", "--parent", plan_run, "--unit", "1")).name
         crec, prec = run_json(child), run_json(plan_run)
         assert (crec["parent"], crec["unit"], crec["level"]) == (plan_run, "1", "full"), crec
@@ -1240,6 +1255,8 @@ def main():
         assert code == 2 and "is in the main checkout" in out and "nudge" in out, out
         assert edit(pol / "src" / "new.py") == (0, "") and edit(pol / "x.py", "e2")[0] == 2
         assert edit(pol_wt / "x.py")[0] == 0 and edit(Path(tmp, "outside.txt"))[0] == 0
+        assert check("--hook", "edit", event={"tool_name": "Write", "tool_input": {"file_path": str(pol / "y.py")}},
+                     cwd=pol)[0] == 0, "nudged an edit with no session to nudge once"
         check("--hook", "end", event={"session_id": "e1"})
         assert edit(pol / "x.py")[0] == 2, "a session's end didn't forget its nudge"
         (pol / ".kip").mkdir()

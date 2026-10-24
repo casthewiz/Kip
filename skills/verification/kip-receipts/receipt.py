@@ -454,7 +454,7 @@ def served(cmd):
     if not url:
         return None
     pid = (quiet("lsof", "-nP", f"-iTCP:{url[1]}", "-sTCP:LISTEN", "-t").split() or
-           re.findall(r"pid=(\d+)", quiet("ss", "-ltnpH", f"sport = :{url[1]}")) or [None])[0]
+           re.findall(r"pid=(\d+)", quiet("ss", "-ltnpH", "sport", "=", f":{url[1]}")) or [None])[0]
     cwd = pid and (os.path.realpath(f"/proc/{pid}/cwd") if Path(f"/proc/{pid}/cwd").exists() else
                    next((l[1:] for l in quiet("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn").splitlines()
                          if l.startswith("n")), None))
@@ -517,6 +517,9 @@ def cmd_init(a):
     if not a.unit:
         sys.exit("--parent needs --unit: the plan's unit this run works on")
     with mutate(adding_to(argparse.Namespace(run=a.parent))) as plan:
+        if holds(plan):  # this run would become the branch's run in its place
+            sys.exit(f"run {plan['id']} is this checkout's own run; take unit {a.unit} over from the unit's worktree "
+                     f"(`kip.py worktree new NAME --parent {plan['id']} --unit {a.unit}`)")
         taken = [c for c in plan["claims"] if str(c.get("unit")) == a.unit and not delegate(c)
                  and not (c["evidence"] or c["files"] or c["unverified"])]
         if not taken:
@@ -709,7 +712,8 @@ def settle(orphan=True):
             with mutate(d) as fresh:
                 fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
             yield f"orphaned {rid} ({branch}: branch gone)"
-        elif orphan and rec.get("worktree") and os.path.realpath(rec["worktree"]) not in trees and \
+        elif orphan and rec.get("worktree") not in (None, rec.get("checkout")) and Path(rec.get("checkout") or "").is_dir() \
+                and os.path.realpath(rec["worktree"]) not in trees and \
                 git("rev-list", "--count", f"{rec.get('fork') or rec['commit']}..{tip}") == "0":
             with mutate(d) as fresh:  # its uncommitted work went with the folder
                 fresh["orphaned"] = {"at": now, "reason": "its worktree was removed with nothing committed",
@@ -866,9 +870,10 @@ def evidence_meta(e, code):
     return " · ".join(meta)
 
 
-def handed(c, code):
-    """Where a delegated claim's evidence is: its unit run, claim, and the branch and commit it was checked on."""
-    x, rec = delegate(c)
+def handed(to, code):
+    """Where a delegated claim's evidence is (to: its delegate()): its unit run, claim, and the branch and commit
+    it was checked on."""
+    x, rec = to
     at = next((e["commit"] for e in reversed(x["evidence"]) if e.get("commit")), rec["commit"])
     return f"delegated to {code(rec['id'])} {x['id']} ({rec['branch'] or 'detached'} @ {code((at or '?')[:7])})"
 
@@ -891,7 +896,8 @@ def render_markdown(rec, sink=None, bare_video=False):
            "|---|" + ("---|" if units else "") + "---|---|---|---|"]
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
-        ev = cell(handed(c, code)) if delegate(c) else "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
+        to = delegate(c)
+        ev = cell(handed(to, code)) if to else "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
         unit = f" {cell(c.get('unit') or '—')} |" if units else ""
         out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
     for c in rec["claims"]:
@@ -933,7 +939,8 @@ def render_jira(rec, sink=None):
            "||#||" + ("Unit||" if units else "") + "Claim||Provider||Evidence||Verdict||"]
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
-        ev = cell(handed(c, code)) if delegate(c) else " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
+        to = delegate(c)
+        ev = cell(handed(to, code)) if to else " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
         unit = f"{cell(c.get('unit') or '—')}|" if units else ""
         out.append(f"|{c['id']}|{unit}{cell(c['text'])}|{c['provider'] or 'generic'}|{ev}|{cell(v)}|")
     for c in rec["claims"]:
@@ -1099,7 +1106,8 @@ def rehome():
     for rid, repo, branch, commit in con.execute(
             "SELECT id, repo, branch, json_extract(data, '$.commit') FROM runs WHERE repo NOT IN (%s) ORDER BY rowid"
             % ",".join("?" * len(mains)), [m.name for m in mains]).fetchall():
-        hits = [m for m in mains if repo in folders[m] or branch and commit and
+        hits = [m for m in mains if repo in folders[m] or branch and commit and  # a base branch is in every clone
+                branch != (base_branch(m) or "").split("/")[-1] and
                 git("rev-parse", "-q", "--verify", f"refs/heads/{branch}", cwd=m) and
                 git("cat-file", "-e", f"{commit}^{{commit}}", cwd=m) is not None]
         if len(hits) != 1:
@@ -1180,10 +1188,13 @@ def edit_gate(hook):
         return False, ""
     os.chdir(folder)
     policy, sid = worktree_policy(), session_id(hook)
-    if policy == "off" or policy == "nudge" and sid and (NUDGES / sid).exists():
+    if policy == "off" or policy == "nudge" and (not sid or (NUDGES / sid).exists()):  # no session: nothing to nudge once
         return False, ""
-    if policy == "nudge" and sid:
+    if policy == "nudge":
         NUDGES.mkdir(parents=True, exist_ok=True)
+        for old in NUDGES.iterdir():  # a session that never reached its end hook
+            if old.stat().st_mtime < datetime.datetime.now().timestamp() - KEEP_DAYS * 86400:
+                old.unlink(missing_ok=True)
         (NUDGES / sid).touch()
     return True, use_a_worktree(path) + (" This is a nudge, once a session: retrying edits here anyway."
                                          if policy == "nudge" else "")
@@ -1247,9 +1258,10 @@ def session_start_state(hook):
     """The code as this session found it in this worktree; for a linked worktree it entered after starting
     elsewhere, the worktree as it was created; None for a session Kip didn't see start."""
     states, top = session_states(hook), here()[1] or ""
-    if top in states or "" in states:  # '': recorded by a Kip that didn't keep starts per worktree
-        return states.get(top, states.get(""))
-    return worktree_created() if states and linked() else None
+    if top in states:
+        return states[top]
+    return (worktree_created() if states and linked() else None) or \
+        states.get("")  # recorded by a Kip that didn't keep starts per worktree
 
 
 def linked():
@@ -1358,7 +1370,7 @@ def run_status(hook):
     top = here()[1]
     if not top:
         return ""
-    if session_id(hook) and not {top, ""} & set(session_states(hook)):
+    if session_id(hook) and top not in session_states(hook):
         state = session_state()  # git runs outside the write lock
         with tx() as con:  # a resumed session keeps the state it first started from
             con.execute("INSERT OR IGNORE INTO session_starts VALUES (?, ?, ?, ?)",
@@ -1636,7 +1648,7 @@ def triage(seen):
         rec = load(rid)
         summary = run_summary(rec)
         wt = rec.get("worktree")
-        tree = wt and {"path": wt, "linked": wt != rec.get("checkout"), "live": Path(wt).is_dir()}
+        tree = wt and {"path": wt, "linked": bool(rec.get("checkout")) and wt != rec["checkout"], "live": Path(wt).is_dir()}
         settled = rec.get("orphaned") or rec.get("finished")
         state = "orphaned" if rec.get("orphaned") else "finished" if rec.get("finished") else "open"
         writers, unknown = {}, 0

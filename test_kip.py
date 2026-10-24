@@ -69,6 +69,7 @@ def main():
                          ({"workflow": {"checks": ["make test"]}}, "workflow.checks must map check names"),
                          ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command"),
                          ({"workflow": {"worktrees": "always"}}, "workflow.worktrees must be off, nudge or required"),
+                         ({"workflow": {"worktree": "kip"}}, "workflow.worktree must be an object"),
                          ({"dashboard": {"conversation": "no"}}, "dashboard.conversation must be true or false"),
                          ({"setup": {"x": {"about": "a"}}}, "setup.x needs about, run, and requires")]:
             write(repo / ".kip" / "config.json", bad)
