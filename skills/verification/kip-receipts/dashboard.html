@@ -34,7 +34,6 @@ main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; min-heigh
 .card:hover { background: var(--panel); }
 .card[aria-current="true"] { background: var(--accent-soft); }
 .card.idle { opacity: .55; }
-.card.unit { padding-left: 28px; }
 .chip.tree { background: var(--line); color: var(--dim); }
 .chip.tree.gone { text-decoration: line-through; }
 .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -409,14 +408,14 @@ async function select(id) {
 const short = sha => sha ? sha.slice(0, 7) : "—";
 const nWrites = n => `${n} write${n > 1 ? "s" : ""}`;
 
-// Runs newest first, each plan's unit runs right under it.
+// Runs newest first, each plan's unit runs right under it, theirs under them.
 function renderRuns() {
   const attentionOnly = $("activeOnly").checked, byId = new Map(runs.map(x => [x.id, x]));
-  const tops = runs.filter(x => !byId.has(x.parent));
-  const ordered = tops.flatMap(x => [x, ...x.children.map(id => byId.get(id)).filter(Boolean)]);
-  const shown = ordered.filter(x => !attentionOnly || x.attention || x.id === runSelected);
-  $("list").replaceChildren(...(shown.length ? shown.map(x => h("button", {
-      class: "card" + (byId.has(x.parent) ? " unit" : ""), "aria-current": x.id === runSelected ? "true" : "false",
+  const nest = (x, depth) => [[x, depth], ...x.children.map(id => byId.get(id)).filter(Boolean).flatMap(c => nest(c, depth + 1))];
+  const ordered = runs.filter(x => !byId.has(x.parent)).flatMap(x => nest(x, 0));
+  const shown = ordered.filter(([x]) => !attentionOnly || x.attention || x.id === runSelected);
+  $("list").replaceChildren(...(shown.length ? shown.map(([x, depth]) => h("button", {
+      class: "card", style: depth ? `padding-left: ${16 + 12 * depth}px` : null, "aria-current": x.id === runSelected ? "true" : "false",
       onclick: () => selectRun(x.id) },
     mascot(runMood(x), 40),
     h("div", { class: "grow" },
@@ -433,7 +432,7 @@ function renderRuns() {
 
 const runLink = id => h("a", { href: "#run=" + encodeURIComponent(id), onclick: ev => { ev.preventDefault(); selectRun(id); } }, id);
 
-// A plan's unit runs, or the plan a unit run works for: each with its state, worktree and claims.
+// The plan a unit run works for, then its own unit runs: each with its state, worktree and claims.
 function planItems(x) {
   const item = id => {
     const r = runs.find(y => y.id === id);
@@ -441,7 +440,7 @@ function planItems(x) {
       r && r.worktree && r.worktree.linked ? treeChip(r.worktree.path, r.worktree.live) : null,
       r ? h("span", { class: `state ${r.state}` }, r.state) : null, r ? tally(r.claims) : null);
   };
-  return x.parent ? [h("li", {}, h("span", { class: "grow" }, `unit ${x.unit} of plan `, runLink(x.parent)))] : x.children.map(item);
+  return [x.parent && h("li", {}, h("span", { class: "grow" }, `unit ${x.unit} of plan `, runLink(x.parent))), ...x.children.map(item)].filter(Boolean);
 }
 
 const sessionLink = sid => h("a", { href: "#session=" + encodeURIComponent(sid), onclick: ev => { ev.preventDefault(); select(sid); } },
