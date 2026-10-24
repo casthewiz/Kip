@@ -34,6 +34,9 @@ main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; min-heigh
 .card:hover { background: var(--panel); }
 .card[aria-current="true"] { background: var(--accent-soft); }
 .card.idle { opacity: .55; }
+.card.unit { padding-left: 28px; }
+.chip.tree { background: var(--line); color: var(--dim); }
+.chip.tree.gone { text-decoration: line-through; }
 .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .grow { flex: 1; min-width: 0; }
 .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -229,12 +232,19 @@ function renderList() {
         h("div", { class: "grow title" }, title(r)),
         r.blocked ? h("span", { class: "loop", title: "stops in a row the gate blocked" }, "↻ " + r.blocked) : null,
         r.stage ? h("span", { class: "chip" }, r.stage) : null),
-      h("div", { class: "row" }, h("span", { class: "sub grow" }, `${r.host || "?"} · ${r.session.slice(0, 8)}`), h("span", { class: "when", "data-at": r.last }, ago(r.last))),
+      h("div", { class: "row" }, h("span", { class: "sub grow" }, `${r.host || "?"} · ${r.session.slice(0, 8)}`),
+        r.linked ? treeChip(r.worktree) : null, h("span", { class: "when", "data-at": r.last }, ago(r.last))),
       r.tool ? h("div", { class: "tool" }, r.tool) : null)))
     : [h("p", { class: "empty" }, "No sessions yet. They appear as agents run.")]));
 }
 
 const cut = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+
+// A linked worktree by its folder's name, struck through once that folder is gone; nothing for a main checkout.
+function treeChip(path, live = true) {
+  return path ? h("span", { class: "chip tree" + (live ? "" : " gone"), title: (live ? "worktree " : "removed worktree ") + path },
+    "⎇ " + path.split("/").pop()) : null;
+}
 
 // As few characters as say what a row did: the tool and the gist of its input, or the first line of the rest.
 function gist(e, text) {
@@ -307,8 +317,10 @@ function claimItem(c, open) {
   return h("details", { class: "claim", "data-claim": c.id, open: open ? "" : null },
     h("summary", {}, h("span", { class: "v " + tone(c.verdict) }, c.verdict.split(":")[0]), h("span", { class: "cid" }, c.id),
       h("span", { class: "grow" }, c.text, " ", h("span", { class: "tags" }, tags.filter(Boolean).join(" · ")))),
+    c.delegated ? h("p", { class: "meta" }, "handed to ", runLink(c.delegated.run), " as " + c.delegated.claim) : null,
+    c.delegated_from ? h("p", { class: "meta" }, "from plan ", runLink(c.delegated_from.run), " " + c.delegated_from.claim) : null,
     c.unverified || c.verdict.includes(":") ? h("p", { class: "meta" }, c.unverified ? "unverified: " + c.unverified + (c.accepted ? " (accepted)" : "") : c.verdict) : null,
-    c.evidence.length ? h("ul", { class: "evidence" }, c.evidence.map(e => h("li", {},
+    c.delegated ? null : c.evidence.length ? h("ul", { class: "evidence" }, c.evidence.map(e => h("li", {},
       h("span", { class: "v " + (e.passed ? "ok" : "bad") }, (e.phase === "red" ? "red · " : "") + (e.passed ? "passed" : "failed")), " ",
       e.label ? h("strong", {}, e.label) : null,
       h("code", { class: "cmd", title: "click to show all", onclick: ev => ev.currentTarget.classList.toggle("open") }, e.summary),
@@ -389,20 +401,38 @@ async function select(id) {
 const short = sha => sha ? sha.slice(0, 7) : "—";
 const nWrites = n => `${n} write${n > 1 ? "s" : ""}`;
 
+// Runs newest first, each plan's unit runs right under it.
 function renderRuns() {
-  const attentionOnly = $("activeOnly").checked;
-  const shown = runs.filter(x => !attentionOnly || x.attention || x.id === runSelected);
+  const attentionOnly = $("activeOnly").checked, byId = new Map(runs.map(x => [x.id, x]));
+  const tops = runs.filter(x => !byId.has(x.parent));
+  const ordered = tops.flatMap(x => [x, ...x.children.map(id => byId.get(id)).filter(Boolean)]);
+  const shown = ordered.filter(x => !attentionOnly || x.attention || x.id === runSelected);
   $("list").replaceChildren(...(shown.length ? shown.map(x => h("button", {
-      class: "card", "aria-current": x.id === runSelected ? "true" : "false", onclick: () => selectRun(x.id) },
+      class: "card" + (byId.has(x.parent) ? " unit" : ""), "aria-current": x.id === runSelected ? "true" : "false",
+      onclick: () => selectRun(x.id) },
     h("div", { class: "grow" },
       h("div", { class: "row" },
         h("div", { class: "grow title" }, title(x)),
         x.flags.length ? h("span", { class: "loop" + (x.attention ? "" : " past"), title: x.flags.join("\n") }, "⚑ " + x.flags.length) : null,
         h("span", { class: `state ${x.state}` }, x.state)),
-      h("div", { class: "row" }, h("span", { class: "sub grow" }, `${x.id} · ${x.level}`),
+      h("div", { class: "row" }, h("span", { class: "sub grow" }, `${x.unit ? "unit " + x.unit + " · " : ""}${x.id} · ${x.level}`),
+        x.worktree && x.worktree.linked ? treeChip(x.worktree.path, x.worktree.live) : null,
         h("span", { class: "when", "data-at": x.created_at }, ago(x.created_at))),
       h("div", { class: "row" }, tally(x.claims)))))
     : [h("p", { class: "empty" }, attentionOnly ? "No open run needs attention." : "No receipts runs yet.")]));
+}
+
+const runLink = id => h("a", { href: "#run=" + encodeURIComponent(id), onclick: ev => { ev.preventDefault(); selectRun(id); } }, id);
+
+// A plan's unit runs, or the plan a unit run works for: each with its state, worktree and claims.
+function planItems(x) {
+  const item = id => {
+    const r = runs.find(y => y.id === id);
+    return h("li", {}, h("span", { class: "grow" }, r && r.unit ? "unit " + r.unit + " · " : "", runLink(id), r ? " · " + (r.branch || "detached") : ""),
+      r && r.worktree && r.worktree.linked ? treeChip(r.worktree.path, r.worktree.live) : null,
+      r ? h("span", { class: `state ${r.state}` }, r.state) : null, r ? tally(r.claims) : null);
+  };
+  return x.parent ? [h("li", {}, h("span", { class: "grow" }, `unit ${x.unit} of plan `, runLink(x.parent)))] : x.children.map(item);
 }
 
 const sessionLink = sid => h("a", { href: "#session=" + encodeURIComponent(sid), onclick: ev => { ev.preventDefault(); select(sid); } },
@@ -417,7 +447,8 @@ function renderRunDetail() {
   const writers = Object.entries(x.writers).sort((a, b) => b[1] - a[1]);
   const top = h("div", {},
     h("div", { class: "headline" }, h("div", { class: "grow" }, h("h2", {}, title(x)),
-      h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how))),
+      h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how,
+        x.worktree && x.worktree.linked ? [" · ", treeChip(x.worktree.path, x.worktree.live)] : null))),
     x.flags.length ? h("ul", { class: "flags", title: x.attention ? "" : "settled: these are history" },
       x.flags.map(f => h("li", { class: "loop" + (x.attention ? "" : " past") }, f))) : null,
     h("div", { class: "segments" },
@@ -426,6 +457,7 @@ function renderRunDetail() {
       segment("Wrote it", [...writers.map(([sid, n]) => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, nWrites(n)))),
         x.unknown_writes ? h("li", {}, h("span", { class: "grow" }, "no session recorded"), h("span", { class: "n" }, nWrites(x.unknown_writes))) : null].filter(Boolean),
         "No writes yet."),
+      segment(x.parent ? "Plan" : "Unit runs", planItems(x), "Not part of a plan."),
       segment("Only on its branch", x.branch_only.map(sid => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, "wrote nothing"))),
         "No session saw this run on its branch without writing to it.")));
   if ($("detail").dataset.run === x.id && $("review")) return $("detail").firstChild.replaceWith(top);  // keep open claims

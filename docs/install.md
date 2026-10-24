@@ -35,6 +35,12 @@ isn't Kip's is left alone. Options:
 - `--no-conversation` / `--conversation`: whether the
   [session log](dashboard.md#session-log) keeps prompts and replies.
 
+Run a user `install` from Kip's main checkout, not a linked worktree: what it
+links would vanish with the worktree, so it refuses and names the main
+checkout's command (`KIP_INSTALL_FROM_WORKTREE=1` installs from one anyway).
+`install` also moves runs an older Kip stored under a worktree's folder name
+to their repository.
+
 `python3 kip.py uninstall` (same options) undoes all of it: Kip's links,
 rules, and hooks go, and your own settings, rules, and hooks stay.
 

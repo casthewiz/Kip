@@ -19,8 +19,12 @@ The upload alone posts nothing.
 | Video result | the bare `https://github.com/user-attachments/assets/<uuid>` URL |
 | Rendered image | `src` rewritten to a signed `https://private-user-images.githubusercontent.com/…` URL |
 
-Accepted: PNG, JPG, GIF and SVG images; MP4, MOV and WEBM videos; text files
-such as `.log` and `.txt` (they come back as a link). Make a big or other
+Accepted: PNG, JPG, GIF and SVG images; MP4, MOV and WEBM videos; text files,
+which come back as a `https://github.com/user-attachments/files/<id>/<name>`
+link. A `.log` set through Claude in Chrome's `file_upload` is refused ("We
+don't support that file type", the form gets `is-bad-file`) though GitHub lists
+LOG, likely for the MIME type it's sent with: upload a byte-identical `.txt`
+copy and record that URL against the run's `.log`. Make a big or other
 video an MP4 under 10 MB first (`ffmpeg -i in -vf scale=1280:-2 -crf 28 out.mp4`).
 
 - Find the file input: it carries the `hidden` attribute, so an
@@ -41,7 +45,8 @@ video an MP4 under 10 MB first (`ffmpeg -i in -vf scale=1280:-2 -crf 28 out.mp4`
 Never call GitHub's internal upload endpoint directly or read the session
 cookie: the cookie is a credential and the endpoint is undocumented.
 
-Last verified: 2026-10-23, on casthewiz/Kip#23 (public repo) through Claude
-in Chrome: `find` missed the hidden file input until it was unhidden; six PNGs
-then uploaded one after another through one ref and rendered in the PR body at
-their real sizes for a signed-in viewer; no comment posted. Video not yet checked.
+Last verified: 2026-10-24, on casthewiz/Kip#24 (public repo) through Claude
+in Chrome: unhiding the file input still needed; four JPGs uploaded through one
+ref and rendered in the PR body (`naturalWidth` 800); two `.log` files were
+refused and went up as `.txt` copies, linked; no comment posted. Video not yet
+checked.

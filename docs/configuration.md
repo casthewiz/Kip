@@ -23,7 +23,13 @@ Plus `workflow.stages`: the [stages](../skills/verification/kip-receipts/SKILL.m
 a PR needs a claim for (default `["tidy", "review"]`; `[]` turns it off), and
 `workflow.checks`: [required checks](../skills/verification/kip-receipts/SKILL.md#required-checks),
 commands like `{"tests": "npm test"}` that must pass on the current code
-before a turn can end or a PR open (default none). And `dashboard.conversation`:
+before a turn can end or a PR open (default none). `workflow.worktrees`: how
+hard the gate steers edits off a main checkout and into linked worktrees:
+`nudge` (default) stops the first edit to a main checkout's file once a
+session, `required` stops every one and a stop after the session changed the
+main checkout, `off` never does. `workflow.worktree.setup`: a command
+`kip.py worktree new` runs in each new worktree (say `npm ci`), after copying
+the gitignored files `.worktreeinclude` names. And `dashboard.conversation`:
 whether the session log keeps prompts and replies (default `true`).
 
 Every surface can declare `requires` (`env`, `cmd`, `file`), which doctor

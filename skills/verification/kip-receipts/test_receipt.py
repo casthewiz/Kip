@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import queue
 import shutil
 import socket
@@ -907,7 +908,7 @@ def main():
         fsh("git", "commit", "-qam", "seven")
         assert "has run" in check("--hook", "start", event={"session_id": "f6", "cwd": str(fin)}, cwd=fin)[1]
         assert frc("orphan", "--reason", "went another way").startswith("orphaned ")
-        assert json.loads(frc("json"))["orphaned"] | {"at": None} == {"at": None, "reason": "went another way", "via": "manual",
+        assert {**json.loads(frc("json"))["orphaned"], "at": None} == {"at": None, "reason": "went another way", "via": "manual",
                                                                        "session": None}
         assert check("--hook", "start", event={"session_id": "f7", "cwd": str(fin)}, cwd=fin) == (0, "")
         code, out = check("--hook", "pr", event=pr_event, cwd=fin)
@@ -1052,12 +1053,86 @@ def main():
         fsh("git", "worktree", "add", "-q", "-b", "in-wt2", str(wt2), base)
         wt_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=wt2))
         assert wt_run.parent.name == "fin" and run_json(wt_run.name)["repo"] == "fin", wt_run
+
+        def wrc(*args, **kw):
+            return sh(sys.executable, str(SCRIPT), *args, cwd=wt2, **kw)
+
+        # A run knows the worktree it started in, and only the checkout holding its code judges its evidence stale:
+        # a sibling checkout's own changes don't, the run's worktree's do.
+        assert run_json(wt_run.name)["worktree"] == str(wt2.resolve()), run_json(wt_run.name)
+        wrc("claim", "wt2 works")
+        wrc("run", "c1", "--", "true")
+        (fin / "dirty.txt").write_text("the main checkout's own change\n")
+        assert "stale" not in frc("render", "--run", wt_run.name)
+        (fin / "dirty.txt").unlink()
         (wt2 / "wt2.txt").write_text("1\n")
+        assert "stale" in wrc("render")
         sh("git", "add", ".", cwd=wt2)
         sh("git", "commit", "-qm", "wt2", cwd=wt2)
+        # On a detached HEAD, a worktree's branchless run is its own, never a sibling worktree's.
+        sh("git", "checkout", "-q", "--detach", cwd=wt2)
+        detached = Path(wrc("init")).name
+        assert Path(wrc("path")).name == detached and not run_json(detached)["branch"]
+        fsh("git", "checkout", "-q", "--detach")
+        assert "no receipt run" in frc("path", ok=False)
+        fsh("git", "checkout", "-q", base)
+        # A session's start is kept per worktree. One that started in a main checkout with uncommitted edits and
+        # moved into a worktree made after it started is judged there from the worktree as it was created:
+        # nothing done there yet passes, an edit or a commit there needs a run, the main checkout's edits don't count.
+        mover, wt3 = {"session_id": "mover"}, Path(tmp, "wt3-folder")
+        (fin / "left-behind.txt").write_text("main checkout's edit\n")
+        check("--hook", "start", event={**mover, "cwd": str(fin)}, cwd=fin)
+        fsh("git", "worktree", "add", "-q", "-b", "in-wt3", str(wt3), base)
+        assert check("--hook", "stop", event={**mover, "cwd": str(wt3)}, cwd=wt3)[0] == 0
+        (wt3 / "wt3.txt").write_text("1\n")
+        code, out = check("--hook", "stop", event={**mover, "cwd": str(wt3)}, cwd=wt3)
+        assert code == 2 and "this session changed code" in out, out
+        sh("git", "add", ".", cwd=wt3)
+        sh("git", "commit", "-qm", "wt3", cwd=wt3)
+        code, out = check("--hook", "stop", event={**mover, "cwd": str(wt3)}, cwd=wt3)
+        assert code == 2 and "this session changed code" in out, out
+        assert check("--hook", "start", event={**mover, "cwd": str(wt3)}, cwd=wt3)[0] == 0
+        assert {w for (w,) in kipdb("SELECT worktree FROM session_starts WHERE id = 'mover'")} == \
+            {str(fin.resolve()), str(wt3.resolve())}
+        (fin / "left-behind.txt").unlink()
+        fsh("git", "worktree", "remove", "--force", str(wt3))
+        fsh("git", "branch", "-q", "-D", "in-wt3")
         fsh("git", "merge", "-q", "--no-ff", "in-wt2", "-m", "merge in-wt2")
         fsh("git", "worktree", "remove", str(wt2))
         assert f"finished {wt_run.name} (in-wt2: merged)" in frc("sweep")
+        # A run whose linked worktree is gone (removed, or its folder deleted) is orphaned once its branch never got
+        # a commit: its uncommitted work went with the folder. One whose branch has commits waits to merge or go.
+        gone = {}
+        for name in ("wt-empty", "wt-deleted", "wt-committed"):
+            folder = Path(tmp, f"{name}-folder")
+            fsh("git", "worktree", "add", "-q", "-b", name, str(folder), base)
+            gone[name] = Path(sh(sys.executable, str(SCRIPT), "init", cwd=folder)).name
+            (folder / "work.txt").write_text(name)
+            if name == "wt-committed":
+                sh("git", "add", ".", cwd=folder)
+                sh("git", "commit", "-qm", name, cwd=folder)
+            if name == "wt-deleted":
+                shutil.rmtree(folder)
+            else:
+                fsh("git", "worktree", "remove", "--force", str(folder))
+        out = frc("sweep")
+        assert [run_json(gone[n]).get("orphaned", {}).get("via") for n in gone] == \
+            ["worktree removed", "worktree removed", None], (out, gone)
+        assert f"orphaned {gone['wt-empty']} (wt-empty: worktree removed)" in out, out
+        fsh("git", "worktree", "prune")
+        for name in gone:
+            fsh("git", "branch", "-q", "-D", name)
+        # Only a linked worktree can be removed: a repo whose folder moved keeps its main checkout's runs.
+        moved = Path(tmp, "mv-before")
+        moved.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "mv"], ["checkout", "-q", "-b", "mv-work"]):
+            sh("git", *cmd, cwd=moved)
+        mv_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=moved)).name
+        Path(tmp, "elsewhere").mkdir()
+        moved = moved.rename(Path(tmp, "elsewhere", "mv-before"))  # same name, so the same repo, in a new place
+        sh("git", "checkout", "-q", "-b", "mv-other", cwd=moved)  # sweep leaves the checked-out branch to the gate
+        sh(sys.executable, str(SCRIPT), "sweep", cwd=moved)
+        assert not run_json(mv_run).get("orphaned"), run_json(mv_run)
         Path(tmp, "store", "old-wt").mkdir()
         wt_run.rename(Path(tmp, "store", "old-wt", wt_run.name))
         kipdb("UPDATE runs SET repo = 'old-wt', data = json_set(data, '$.repo', 'old-wt') WHERE id = ?", wt_run.name)
@@ -1070,6 +1145,260 @@ def main():
         server.terminate()
         server.wait()
         assert served["id"] == wt_run.name and served["finished"], served
+        # `db --migrate` moves such runs to their repository: the one main checkout with the run's branch and commit,
+        # or with a live worktree of that folder name, looking in recorded checkouts and their siblings named like a
+        # stored repo. Its files move too and still verify; one no checkout claims stays where it is.
+        sib, sib_wt = Path(tmp, "sib"), Path(tmp, "sib-wt")
+        sib.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "sib"], ["worktree", "add", "-q", "--detach", str(sib_wt)]):
+            sh("git", *cmd, cwd=sib)
+        sib_runs = [Path(sh(sys.executable, str(SCRIPT), "init", cwd=c)).name for c in (sib, sib_wt)]
+        kipdb("UPDATE runs SET data = json_remove(data, '$.checkout') WHERE repo = 'sib'")
+        Path(tmp, "store", "sib-wt").mkdir()
+        Path(tmp, "store", "sib", sib_runs[1]).rename(Path(tmp, "store", "sib-wt", sib_runs[1]))
+        kipdb("UPDATE runs SET repo = 'sib-wt', data = json_set(data, '$.repo', 'sib-wt') WHERE id = ?", sib_runs[1])
+        stray = Path(frc("init")).name
+        Path(tmp, "store", "nowhere").mkdir()
+        Path(tmp, "store", "fin", stray).rename(Path(tmp, "store", "nowhere", stray))
+        kipdb("UPDATE runs SET repo = 'nowhere', branch = 'no-such-branch', data = json_set(data, '$.repo', 'nowhere') "
+              "WHERE id = ?", stray)
+        base_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=fin)).name
+        Path(tmp, "store", "a-clone").mkdir()
+        Path(tmp, "store", "fin", base_run).rename(Path(tmp, "store", "a-clone", base_run))
+        kipdb("UPDATE runs SET repo = 'a-clone', data = json_set(data, '$.repo', 'a-clone') WHERE id = ?", base_run)
+        out = frc("db", "--migrate")
+        assert run_json(base_run)["repo"] == "a-clone" and run_json(base_run)["branch"] == base, (out, run_json(base_run))
+        assert f"re-homed {wt_run.name}: old-wt -> fin" in out and f"re-homed {sib_runs[1]}: sib-wt -> sib" in out, out
+        assert "nowhere" not in out and run_json(stray)["repo"] == "nowhere", out
+        assert run_json(wt_run.name)["checkout"] == str(fin.resolve()) and "fin @" in frc("render", "--run", wt_run.name)
+        assert Path(frc("path", "--run", sib_runs[1])) == Path(tmp, "store", "sib", sib_runs[1]) and \
+            run_json(sib_runs[1])["repo"] == "sib"
+        assert "re-homed" not in frc("db", "--migrate")
+        sh("git", "worktree", "remove", str(sib_wt), cwd=sib)
+        # A plan run hands a unit's open claims to a run in that unit's worktree (`init --parent --unit`). The plan's
+        # verdicts for them are that run's, labeled with where they were checked, and it takes no evidence for them
+        # itself. Merging the unit back makes the plan's own required checks stale until they pass on the merged
+        # code, while the handed-over claims stay verified. An orphaned unit run hands its claims back.
+        fsh("git", "checkout", "-q", "-b", "plan", base)
+        (fin / ".kip").mkdir(exist_ok=True)
+        (fin / ".kip" / "config.json").write_text(json.dumps({"workflow": {"stages": [], "checks": {"tests": "test -f a.txt"}}}))
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "plan config")
+        plan_run = Path(frc("init")).name
+        for text, unit in (("u1 a", "1"), ("u1 b", "1"), ("u2 c", "2")):
+            frc("claim", text, "--unit", unit)
+        u1, u2 = Path(tmp, "u1-folder"), Path(tmp, "u2-folder")
+        fsh("git", "worktree", "add", "-q", "-b", "unit1", str(u1), "plan")
+        fsh("git", "worktree", "add", "-q", "-b", "unit2", str(u2), "plan")
+
+        def urc(folder, *args, **kw):
+            return sh(sys.executable, str(SCRIPT), *args, cwd=folder, **kw)
+
+        runs_before = len(kipdb("SELECT id FROM runs"))
+        assert "--parent needs --unit" in urc(u1, "init", "--parent", plan_run, ok=False)
+        assert "no open claims for unit 9" in urc(u1, "init", "--parent", plan_run, "--unit", "9", ok=False)
+        assert len(kipdb("SELECT id FROM runs")) == runs_before, "a refused init left a run"
+        assert "is this checkout's own run" in frc("init", "--parent", plan_run, "--unit", "1", ok=False)
+        child = Path(urc(u1, "init", "--parent", plan_run, "--unit", "1")).name
+        crec, prec = run_json(child), run_json(plan_run)
+        assert (crec["parent"], crec["unit"], crec["level"]) == (plan_run, "1", "full"), crec
+        assert [c["text"] for c in crec["claims"]] == ["`tests` passes", "u1 a", "u1 b"], crec["claims"]
+        assert [c.get("delegated") for c in prec["claims"]] == \
+            [None, {"run": child, "claim": "c2"}, {"run": child, "claim": "c3"}, None], prec["claims"]
+        assert crec["claims"][1]["delegated_from"] == {"run": plan_run, "claim": "c2"}
+        assert "no open claims for unit 1" in urc(u1, "init", "--parent", plan_run, "--unit", "1", ok=False)
+        assert f"was handed to run {child} as c2" in frc("run", "c2", "--", "true", ok=False)
+        assert f"was handed to run {child}" in frc("unverified", "c3", "later", ok=False)
+        plan_v = lambda: verdicts(("--run", plan_run))  # noqa: E731
+        assert plan_v()["c2"] == "⚠️ unverified", plan_v()
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "c2 ⚠️ unverified: u1 a" in out, out
+        (u1 / "u1.txt").write_text("1\n")
+        sh("git", "add", ".", cwd=u1)
+        sh("git", "commit", "-qm", "unit 1", cwd=u1)
+        urc(u1, "run", "c1")
+        urc(u1, "run", "c2", "c3", "--", "true")
+        unit_sha = sh("git", "rev-parse", "--short=7", "HEAD", cwd=u1)
+        frc("run", "c1")
+        assert plan_v()["c2"] == plan_v()["c3"] == "✅ verified", plan_v()
+        assert f"delegated to `{child}` c2 (unit1 @ `{unit_sha}`)" in frc("render", "--run", plan_run)
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "c4 ⚠️ unverified: u2 c" in out and not re.search(r"  c[123] ", out), out
+        fsh("git", "merge", "-q", "--no-ff", "unit1", "-m", "merge unit1")
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert "c1 ⚠️ stale" in out and not re.search(r"  c[23] ", out), out
+        frc("run", "c1")
+        assert "c1 " not in check("--hook", "pr", event=pr_event, cwd=fin)[1]
+        child2 = Path(urc(u2, "init", "--parent", plan_run, "--unit", "2")).name
+        assert run_json(plan_run)["claims"][3]["delegated"]["run"] == child2
+        urc(u2, "orphan", "--reason", "redo unit 2")
+        assert plan_v()["c4"] == "⚠️ unverified" and "c4 ⚠️ unverified" in check("--hook", "pr", event=pr_event, cwd=fin)[1]
+        child3 = Path(urc(u2, "init", "--parent", plan_run, "--unit", "2")).name
+        assert run_json(plan_run)["claims"][3]["delegated"]["run"] == child3 and child3 != child2
+        for folder, branch in ((u1, "unit1"), (u2, "unit2")):
+            fsh("git", "worktree", "remove", "--force", str(folder))
+            fsh("git", "branch", "-q", "-D", branch)
+        fsh("git", "checkout", "-q", base)
+        # workflow.worktrees: editing a main checkout's file is stopped once a session by default (nudge), every time
+        # when required, never when off. A linked worktree's files and files outside a repo always pass. Under
+        # required, a stop after this session changed the main checkout is blocked too.
+        pol = Path(tmp, "pol")
+        pol.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "pol"]):
+            sh("git", *cmd, cwd=pol)
+        pol_wt = Path(tmp, "pol-wt")
+        sh("git", "worktree", "add", "-q", "-b", "pol-wt", str(pol_wt), cwd=pol)
+
+        def edit(path, sid="e1"):
+            return check("--hook", "edit", event={"session_id": sid, "cwd": str(pol), "hook_event_name": "PreToolUse",
+                                                  "tool_name": "Write", "tool_input": {"file_path": str(path)}}, cwd=pol)
+
+        code, out = edit(pol / "src" / "new.py")  # a file, and folder, not made yet
+        assert code == 2 and "is in the main checkout" in out and "nudge" in out, out
+        assert edit(pol / "src" / "new.py") == (0, "") and edit(pol / "x.py", "e2")[0] == 2
+        assert edit(pol_wt / "x.py")[0] == 0 and edit(Path(tmp, "outside.txt"))[0] == 0
+        assert check("--hook", "edit", event={"tool_name": "Write", "tool_input": {"file_path": str(pol / "y.py")}},
+                     cwd=pol)[0] == 0, "nudged an edit with no session to nudge once"
+        check("--hook", "end", event={"session_id": "e1"})
+        assert edit(pol / "x.py")[0] == 2, "a session's end didn't forget its nudge"
+        (pol / ".kip").mkdir()
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"worktrees": "off"}}')
+        assert edit(pol / "x.py", "e3") == (0, "")
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"worktrees": "required", "stages": []}}')
+        assert edit(pol / "x.py", "e4")[0] == edit(pol / "x.py", "e4")[0] == 2
+        assert edit(pol_wt / "x.py", "e4")[0] == 0
+        # Every edit pays for this hook: a linked worktree's file, or one outside a repo, costs one git call.
+        counted, calls = Path(tmp, "counted-git"), Path(tmp, "git-calls")
+        counted.mkdir()
+        real_git = shutil.which("git")
+        (counted / "git").write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexec "{real_git}" "$@"\n')
+        (counted / "git").chmod(0o755)
+        for path in (pol_wt / "x.py", Path(tmp, "outside.txt")):
+            calls.unlink(missing_ok=True)
+            assert check("--hook", "edit", event={"session_id": "e5", "tool_name": "Write", "tool_input": {
+                "file_path": str(path)}}, cwd=pol, extra_env={"PATH": f"{counted}:{os.environ['PATH']}"})[0] == 0
+            assert len(calls.read_text().splitlines()) == 1, (path, calls.read_text())
+        mover_pol = {"session_id": "pol-s", "cwd": str(pol)}
+        check("--hook", "start", event=mover_pol, cwd=pol)
+        assert check("--hook", "stop", event=mover_pol, cwd=pol)[0] == 0
+        (pol / "made-here.txt").write_text("1\n")
+        code, out = check("--hook", "stop", event=mover_pol, cwd=pol)
+        assert code == 2 and "workflow.worktrees is required" in out, out
+        check("--hook", "start", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)
+        assert "workflow.worktrees" not in check("--hook", "stop", event={**mover_pol, "cwd": str(pol_wt)}, cwd=pol_wt)[1]
+        sh("git", "worktree", "remove", "--force", str(pol_wt), cwd=pol)
+        # Evidence against a local URL records the folder its server runs in. Served by another checkout of this
+        # repo (worktrees share ports), it doesn't speak for the code it pinned: flagged, and it holds the gate.
+        # Served from this checkout, or from outside any checkout of the repo, it counts.
+        srv_wt = Path(tmp, "srv-wt")
+        sh("git", "worktree", "add", "-q", "--detach", str(srv_wt), cwd=pol)
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"stages": []}}')
+        sh("git", "checkout", "-q", "-b", "srv", cwd=pol)
+        sh("git", "commit", "-q", "--allow-empty", "-m", "srv", cwd=pol)
+        srv_run = Path(sh(sys.executable, str(SCRIPT), "init", cwd=pol)).name
+        sh(sys.executable, str(SCRIPT), "claim", "the page loads", cwd=pol)
+
+        port = free_port()  # one URL throughout, as a dev server's would be: one check
+
+        def served_by(folder):
+            server = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"], cwd=folder,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            assert wait_until(lambda: listening(port), 10)
+            try:
+                sh(sys.executable, str(SCRIPT), "run", "c1", "--", sys.executable, "-c",
+                   f"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/')", cwd=pol)
+            finally:
+                server.terminate()
+                server.wait()
+            return run_json(srv_run)["claims"][0]["evidence"][-1]["served"], \
+                verdicts(("--run", srv_run))["c1"]
+
+        info, v = served_by(srv_wt)
+        assert info["checkout"] == str(srv_wt.resolve()) and info["here"] == str(pol.resolve()), info
+        assert v == f"⚠️ served from another checkout: {srv_wt.resolve()}", v
+        code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}}, cwd=pol)
+        assert code == 2 and "c1 ⚠️ served from another checkout" in out, out
+        assert served_by(pol)[1] == "✅ verified"
+        info, v = served_by(Path(tmp))
+        assert info["cwd"] and info["checkout"] is None and v == "✅ verified", (info, v)
+        served_by(srv_wt)
+        # The dashboard: a session's row says which worktree its last gate fired in; /api/runs lists a plan's unit
+        # runs, each unit run its plan, unit and worktree (struck once removed), and flags a removed worktree with
+        # unmerged work and evidence served from another checkout; a delegated claim says where it went.
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        try:
+            listed = {x["id"]: x for x in json.loads(get(port, "/api/runs"))}
+            sessions = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
+            detail = json.loads(get(port, f"/api/runs/{plan_run}"))
+        finally:
+            server.terminate()
+            server.wait()
+        assert set(listed[plan_run]["children"]) == {child, child2, child3}, listed[plan_run]
+        unit = listed[child]
+        assert (unit["parent"], unit["unit"]) == (plan_run, "1") and unit["worktree"] == \
+            {"path": str(u1.resolve()), "linked": True, "live": False}, unit
+        assert "its worktree was removed with work not merged" in unit["flags"] and unit["attention"], unit
+        assert listed[plan_run]["worktree"]["linked"] is False, listed[plan_run]
+        assert "evidence served from another checkout" in listed[srv_run]["flags"], listed[srv_run]
+        assert detail["claims"][1]["delegated"] == {"run": child, "claim": "c2"} and detail["claims"][0]["delegated"] is None
+        assert (sessions["pol-s"]["worktree"], sessions["pol-s"]["linked"]) == (str(pol_wt.resolve()), True), sessions["pol-s"]
+        sh("git", "worktree", "remove", "--force", str(srv_wt), cwd=pol)
+        # SubagentStop: a subagent in a worktree of its own (Claude Code's agent-<agent_id>) is gated like a session
+        # there: changed code needs a run on its branch, then its claims addressed. One sharing its parent's checkout,
+        # main or the parent's worktree, is never blocked, even with the parent's run open; nor is a re-stop.
+        sub = Path(tmp, "sub")
+        sub.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "sub"], ["checkout", "-q", "-b", "parent-work"]):
+            sh("git", *cmd, cwd=sub)
+        (sub / ".kip").mkdir()
+        (sub / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
+        parent = {"session_id": "sub-s"}
+        check("--hook", "start", event={**parent, "cwd": str(sub)}, cwd=sub)
+        sh(sys.executable, str(SCRIPT), "init", cwd=sub)
+        sh(sys.executable, str(SCRIPT), "claim", "parent's open claim", cwd=sub)
+        (sub / "parent.txt").write_text("mid-task\n")
+        agent_wt, parent_wt = Path(tmp, "agent-abc123"), Path(tmp, "parent-wt")
+        sh("git", "worktree", "add", "-q", "-b", "worktree-agent-abc123", str(agent_wt), cwd=sub)
+        sh("git", "worktree", "add", "-q", "-b", "parent-wt", str(parent_wt), cwd=sub)
+
+        def subagent_stop(cwd, agent="abc123", **extra):
+            return check("--hook", "subagent", event={**parent, "agent_id": agent, "agent_type": "iso", "cwd": str(cwd),
+                                                      "hook_event_name": "SubagentStop", **extra}, cwd=cwd)
+
+        assert subagent_stop(sub) == (0, "check: subagent shares its parent's checkout")
+        assert subagent_stop(agent_wt)[0] == 0, "an isolated subagent that changed nothing was blocked"
+        (agent_wt / "made.txt").write_text("x\n")
+        (parent_wt / "edit.txt").write_text("x\n")
+        assert subagent_stop(parent_wt, agent="other")[0] == 0, "a subagent in its parent's worktree was blocked"
+        code, out = subagent_stop(agent_wt)
+        assert code == 2 and "this session changed code, but there's no receipts run" in out, out
+        assert subagent_stop(agent_wt, stop_hook_active=True)[0] == 0
+        sh(sys.executable, str(SCRIPT), "init", cwd=agent_wt)
+        sh(sys.executable, str(SCRIPT), "claim", "made.txt exists", cwd=agent_wt)
+        code, out = subagent_stop(agent_wt)
+        assert code == 2 and "c1 ⚠️ unverified: made.txt exists" in out, out
+        sh(sys.executable, str(SCRIPT), "run", "c1", "--", "test", "-f", "made.txt", cwd=agent_wt)
+        assert subagent_stop(agent_wt)[0] == 0
+        for folder in (agent_wt, parent_wt):
+            sh("git", "worktree", "remove", "--force", str(folder), cwd=sub)
+        # A host's worktree made inside the checkout, unignored (`claude --worktree` and isolated subagents put
+        # theirs in .claude/worktrees/), is another checkout: it isn't this checkout's change.
+        nest = Path(tmp, "nest")
+        nest.mkdir()
+        for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "nest"]):
+            sh("git", *cmd, cwd=nest)
+        (nest / "untracked-before.txt").write_text("already here\n")
+        nester = {"session_id": "nest-s", "cwd": str(nest)}
+        check("--hook", "start", event=nester, cwd=nest)
+        sh("git", "worktree", "add", "-q", "-b", "worktree-agent-n1", str(nest / ".claude" / "worktrees" / "agent-n1"), cwd=nest)
+        (nest / ".claude" / "worktrees" / "agent-n1" / "inside.txt").write_text("the subagent's\n")
+        assert check("--hook", "stop", event=nester, cwd=nest) == (0, "check: no receipt run for this branch"), \
+            "a nested worktree counted as the main checkout's change"
+        (nest / "real-change.txt").write_text("mine\n")
+        assert check("--hook", "stop", event=nester, cwd=nest)[0] == 2
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
         for name in ("start-merged", "start-dropped"):
@@ -1177,7 +1506,7 @@ def main():
         # and concurrent writers queue instead of overwriting each other.
         fresh = {"KIP_RECEIPTS_DIR": str(Path(tmp, "fresh dir #1?"))}  # a path a hand-built file: URI would break on
         assert rc("db", extra_env=fresh) == f"{Path(tmp, 'fresh dir #1?', 'kip.db')} · not created yet"
-        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v1 of 1 · 0 runs")
+        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v2 of 2 · 0 runs")
         upgrade = f"""import sys
 sys.path.insert(0, {str(SCRIPT.parent)!r})
 import receipt
@@ -1186,7 +1515,21 @@ receipt._db = None
 receipt.SCHEMA.append("ALTER TABLE runs ADD COLUMN note TEXT")
 con = receipt.db()
 print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, note FROM runs").fetchall())"""
-        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "2 [('r1', None)]"
+        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "3 [('r1', None)]"
+        # Upgrading a v1 kip.db leaves `sessions` as an older Kip (another checkout's hooks) writes it: that still
+        # works, and its rows read as starts in an unknown worktree.
+        v1 = f"""import sys
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import receipt
+schema = list(receipt.SCHEMA)
+del receipt.SCHEMA[1:]
+receipt.db()
+receipt._db = None
+receipt.SCHEMA[:] = schema
+receipt.db().execute("INSERT INTO sessions VALUES ('demo', 's1', 'an older Kip, after the upgrade')")
+print(receipt.session_states({{"session_id": "s1"}}))"""
+        assert sh(sys.executable, "-c", v1, extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "v1"))}) == \
+            "{'': 'an older Kip, after the upgrade'}"
         conc = Path(rc("init"))
         rc("claim", "written by 20 processes at once", "--run", conc.name)
         writers = [subprocess.Popen([sys.executable, str(SCRIPT), "observe", "c1", "--passed", f"w{i}", "--run", str(conc)],
@@ -1208,7 +1551,7 @@ print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, 
             shutil.copytree(r, legacy / "demo" / r.name)
             (legacy / "demo" / r.name / "receipt.json").write_text(json.dumps(run_json(r), indent=2))
         (legacy / "demo" / "sessions").mkdir()
-        (legacy / "demo" / "sessions" / "m1").write_text(kipdb("SELECT state FROM sessions LIMIT 1")[0][0] + "\n")
+        (legacy / "demo" / "sessions" / "m1").write_text(kipdb("SELECT state FROM session_starts LIMIT 1")[0][0] + "\n")
         old = {"KIP_RECEIPTS_DIR": str(legacy)}
         assert rc("db", "--migrate", extra_env=old).startswith("imported 2 runs and 1 session starts"), "import"
         assert rc("db", "--migrate", extra_env=old).startswith("imported 0 runs and 0 session starts"), "re-import"

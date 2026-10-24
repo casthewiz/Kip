@@ -11,7 +11,14 @@
                                         (launchd or systemd) from a copy at ~/.kip/dashboard, which
                                         re-running install refreshes; KIP_DASHBOARD=0 skips it. A user
                                         install also adds git hooks to this repo that re-run it after a
-                                        commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them
+                                        commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them.
+                                        A user install refuses to run from a linked worktree
+                                        (KIP_INSTALL_FROM_WORKTREE=1 overrides)
+  kip.py worktree new NAME [--base REF] [--parent RUN --unit N]
+                                        a linked worktree of this repo at .kip/worktrees/NAME on branch
+                                        kip/NAME (from REF, default HEAD): copies the gitignored files
+                                        .worktreeinclude names, runs workflow.worktree.setup there, and with
+                                        --parent starts the unit's receipts run; prints its path
   kip.py setup [--skip NAME]           one-time steps a person does (sign-ins, downloads) that aren't
                                         done yet, and how; sessions are reminded of them until done or skipped
   kip.py uninstall [--host NAME] [--project]
@@ -116,17 +123,32 @@ def validate(cfg):
     stages = cfg.get("workflow", {}).get("stages", [])
     if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
         sys.exit("workflow.stages must be a list of stage names")
+    if cfg.get("workflow", {}).get("worktrees", "nudge") not in ("off", "nudge", "required"):
+        sys.exit("workflow.worktrees must be off, nudge or required")
+    worktree = cfg.get("workflow", {}).get("worktree", {})
+    if not isinstance(worktree, dict):
+        sys.exit("workflow.worktree must be an object, like {\"setup\": \"npm ci\"}")
+    setup = worktree.get("setup")
+    if setup is not None and not is_command(setup):
+        sys.exit("workflow.worktree.setup must be a command: a string or a list of arguments")
     checks = cfg.get("workflow", {}).get("checks", {})
     if not isinstance(checks, dict):
         sys.exit("workflow.checks must map check names to commands")
     for name, cmd in checks.items():
-        if not (isinstance(cmd, str) and cmd.strip() or
-                isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+        if not is_command(cmd):
             sys.exit(f"workflow.checks.{name} must be a command: a string or a list of arguments")
     if not isinstance(cfg.get("dashboard", {}).get("conversation", True), bool):
         sys.exit("dashboard.conversation must be true or false")
     if cfg.get("default_destination", "local") not in cfg["destinations"]:
         sys.exit(f"default_destination {cfg['default_destination']} isn't a destination")
+
+
+def is_command(cmd):
+    return isinstance(cmd, str) and cmd.strip() or isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)
+
+
+def argv(cmd):
+    return cmd if isinstance(cmd, list) else ["sh", "-c", cmd]
 
 
 def env_name(entry, setting):
@@ -405,6 +427,14 @@ def git_hooks_dir():
     return None if r.returncode else ROOT / r.stdout.strip()
 
 
+def main_of_worktree():
+    """The main checkout's folder when this copy of Kip is a linked worktree of it, else None."""
+    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+                       capture_output=True, text=True)
+    git_dir, common = r.stdout.splitlines() if r.returncode == 0 else (None, None)
+    return Path(common).parent if git_dir != common else None
+
+
 def install_git_hooks(d):
     """Re-run install whenever the repo changes, so the copies (Cursor's rules, the dashboard) and links stay current."""
     d.mkdir(parents=True, exist_ok=True)
@@ -441,6 +471,11 @@ def uninstall_service():
 
 
 def cmd_install(a):
+    main = None if a.project else main_of_worktree()
+    if main and os.environ.get("KIP_INSTALL_FROM_WORKTREE") != "1":
+        sys.exit(f"kip install: {ROOT} is a linked worktree; hooks, ~/.kip/kip and the dashboard would point at a "
+                 f"folder that goes when it's removed. Install from the main checkout: python3 {main / 'kip.py'} install "
+                 "(KIP_INSTALL_FROM_WORKTREE=1 installs from here anyway)")
     selected, top = hosts(a)
     if a.conversation is not None:
         save_conversation(top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json", a.conversation)
@@ -540,11 +575,58 @@ def cmd_uninstall(a):
     print_receipts(prefix="kept: ")
 
 
+def git_in(cwd, *args):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"git {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout
+
+
+def cmd_worktree(a):
+    """A linked worktree ready to work in: on its own branch, with the gitignored files .worktreeinclude names
+    (the convention Claude Code uses), set up, and with --parent, its unit's receipts run started."""
+    top = toplevel()
+    if not top:
+        sys.exit("kip worktree: not in a git repo")
+    main = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).parent
+    path, branch = main / ".kip" / "worktrees" / a.name, f"kip/{a.name}"
+    exclude = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
+    lines = exclude.read_text().splitlines() if exclude.is_file() else []
+    if "/.kip/worktrees/" not in lines:  # the main checkout shouldn't see its worktrees as untracked files
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("\n".join(lines + ["/.kip/worktrees/"]) + "\n")
+    git_in(main, "worktree", "add", "-q", "-b", branch, str(path), a.base or git_in(top, "rev-parse", "HEAD").strip())
+    include = main / ".worktreeinclude"
+    if include.is_file():
+        named = git_in(main, "ls-files", "-z", "--others", "--ignored", f"--exclude-from={include}")
+        r = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=main, input=named,
+                           capture_output=True, text=True)  # only files git ignores, as Claude Code copies them
+        for rel in filter(None, r.stdout.split("\0")):
+            (path / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(main / rel, path / rel)
+    os.chdir(path)  # the worktree's own config, which may be a copied, gitignored one
+    setup = load().get("workflow", {}).get("worktree", {}).get("setup")
+    if setup and subprocess.run(argv(setup), cwd=path, stdout=sys.stderr).returncode:
+        sys.exit(f"kip worktree: setup failed in {path}; fix it there, or remove it: git worktree remove {path}")
+    if a.parent:
+        r = subprocess.run([sys.executable, str(RECEIPT), "init", "--parent", a.parent, "--unit", a.unit or ""],
+                           cwd=path, stdout=sys.stderr)
+        if r.returncode:
+            sys.exit(f"kip worktree: couldn't start unit {a.unit}'s run in {path}")
+    print(path)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("config").set_defaults(fn=cmd_config)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
+    s = sub.add_parser("worktree").add_subparsers(dest="action", required=True).add_parser("new")
+    s.add_argument("name")
+    s.add_argument("--base", help="the commit or branch it starts from (default: this checkout's HEAD)")
+    s.add_argument("--parent", help="a plan's receipts run; starts the unit's run in the worktree (with --unit)")
+    s.add_argument("--unit")
+    s.set_defaults(fn=cmd_worktree)
     s = sub.add_parser("setup")
     s.add_argument("--skip", metavar="NAME", help="never remind about this step again (saved to config)")
     s.set_defaults(fn=cmd_setup)

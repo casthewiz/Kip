@@ -194,7 +194,17 @@ python3 $R publish --sink jira --issue PROJ-9        # opt a local run into a si
 **Continue a planned run.** If `kip-decompose` already recorded this
 task's claims, `receipt.py render` shows them with a Unit column on this
 branch. Add evidence to that run instead of calling `init` again; add
-claims to it only for promises the plan missed. A run's destination can be
+claims to it only for promises the plan missed.
+
+**A unit in its own worktree.** When the plan's run is on another branch
+(you're in a unit's worktree), take the unit over instead of retyping it:
+`receipt.py init --parent <plan run> --unit N` starts this worktree's run
+with the plan's open claims for unit N. Record their evidence here; the plan
+refuses it, shows these verdicts as its own, and labels each with the branch
+and commit it was checked on. `kip.py worktree new NAME --parent RUN --unit N`
+makes the worktree and does this in one step. If the unit's run is orphaned,
+its claims go back to the plan. Merging a unit back leaves the plan's own
+required checks stale until they pass on the merged code. A run's destination can be
 added later with `publish --sink`, so a planned run still gets the
 destination question before its first evidence.
 
@@ -249,6 +259,14 @@ it stays ⚠️ self-reported.
   the new check fails without the fix (`--red`), or say why it changed.
 - ⚠️ **passed after failing, code not pinned**: a remote target passed a
   check it had failed, but nothing records whether its code changed.
+- ⚠️ **served from another checkout**: the local URL the check hit was
+  served from another checkout of this repo (worktrees share ports), not the
+  code the evidence pins. Restart the dev server from this worktree, or use
+  its own port, and re-run.
+
+Staleness is judged only where the run's code is: its branch checked out
+(or, for a run started on a detached HEAD, its own worktree). A sibling
+worktree's changes never make another worktree's evidence stale.
 
 **Re-runs.** Runs of the same command in the same directory are one check,
 and its latest run decides it. A failure clears only when that same check,
@@ -401,6 +419,19 @@ default to the latest run on the current branch.
   run's `init` came. A PR opened some other way (the web UI) is caught by CI.
 - **Crashes**: a gate that crashes blocks stop and PR with the error, once
   per turn, rather than letting everything through.
+- **Worktrees**: each worktree a session works in is judged from how the
+  session found it there; one it moved into after starting, from the
+  worktree as it was created. Editing a main checkout's file is stopped once
+  a session (`workflow.worktrees`: `nudge`, the default), every time
+  (`required`, which also blocks a stop after the session changed the main
+  checkout), or never (`off`). Move the work to a worktree; don't work
+  around it.
+- **Subagents**: a worktree-isolated subagent (Claude Code's
+  `isolation: worktree`, in `.claude/worktrees/agent-<id>`) is gated at its
+  stop like a session in that worktree: changed code needs a run there (often
+  `init --parent <plan run> --unit N`), with its claims addressed. A subagent
+  sharing its parent's checkout is never blocked; the parent's stop judges
+  that work.
 
 A run is **finished** once commits made since its `init` are on the base
 branch (`origin`'s default branch: pushed, or the feature branch merged and
@@ -415,7 +446,8 @@ A run whose work was abandoned (a deleted branch, a session left paused) is
 takes no more claims or evidence, and its branch counts as having no run, so
 the next PR or stop with changed code needs a fresh `init`. `receipt.py sweep`
 settles a repo's leftovers in one pass: runs whose branch merged are finished,
-runs whose branch is gone unmerged are orphaned.
+runs whose branch is gone unmerged are orphaned, and so are runs whose linked
+worktree was removed before anything was committed on its branch.
 
 Cursor can't block a stop, so it gets the same list once as a follow-up
 message. The block message lists the claims; address them, don't work

@@ -2,8 +2,9 @@
 """Deterministic receipts: record claims and evidence, publish them to sinks.
 
   receipt.py sinks                                          list destinations and whether each is ready
-  receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra]
-                                                            start a run (local only by default), print its dir
+  receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra] [--parent RUN --unit N]
+                                                            start a run (local only by default), print its dir;
+                                                            --parent takes over a plan run's claims for unit N
   receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
   receipt.py run CLAIM... [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
@@ -26,9 +27,12 @@
   receipt.py json                                           print the run, its claims and evidence, as JSON
   receipt.py db [--migrate]                                 kip.db's path, schema version, and run count;
                                                             --migrate creates or upgrades it and imports JSON runs
-  receipt.py check [--hook start|stop|pr|tool|prompt|response|end] exit 2 if this branch's run has open claims
-                                                            and the code changed since init, or there's
-                                                            no run for work that needs one (host hooks)
+  receipt.py check [--hook start|stop|subagent|pr|edit|tool|prompt|response|end]
+                                                            exit 2 if this branch's run has open claims and the
+                                                            code changed since init, or there's no run for work
+                                                            that needs one (subagent: one in its own worktree), or
+                                                            (edit) a main checkout's file is edited against
+                                                            workflow.worktrees
   receipt.py serve [--port N] [--idle SECONDS]              live dashboard on 127.0.0.1 (install's service or a start hook launches it)
   receipt.py check --pr N                                   exit 1 if PR N's published ledger is missing
                                                             or has claims that aren't done (CI)
@@ -125,6 +129,19 @@ def repo_name():
     return Path(top).name if top else Path.cwd().name
 
 
+@functools.lru_cache(maxsize=None)
+def here():
+    """(branch, worktree folder) of this checkout, once per invocation; (None, None) outside one."""
+    return git("branch", "--show-current"), git("rev-parse", "--show-toplevel")
+
+
+def holds(rec):
+    """This checkout has the run's code: its branch is checked out here (git checks a branch out in one worktree
+    at a time) or, for a run started on a detached HEAD, this is the worktree it started in."""
+    branch, top = here()
+    return repo_name() == rec["repo"] and (branch == rec["branch"] if rec.get("branch") else rec.get("worktree") == top)
+
+
 def github_url():
     """This checkout's GitHub page, from its origin remote; None when it isn't on GitHub."""
     m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", git("remote", "get-url", "origin") or "")
@@ -161,6 +178,10 @@ SCHEMA = [  # one entry per version: append a new one, never edit a shipped one
     CREATE TABLE files (run TEXT NOT NULL, claim TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL,
                         PRIMARY KEY (run, claim, seq));
     CREATE TABLE sessions (repo TEXT NOT NULL, id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (repo, id));""",
+    # A session's start per worktree it works in. `sessions` stays as it was: an older Kip (another checkout's
+    # hooks) shares this kip.db and still writes it, and its rows read as starts in an unknown worktree ('').
+    """CREATE TABLE session_starts (repo TEXT NOT NULL, id TEXT NOT NULL, worktree TEXT NOT NULL, state TEXT NOT NULL,
+                                    PRIMARY KEY (repo, id, worktree))""",
 ]
 _db, _imported = None, (0, 0)
 
@@ -222,11 +243,12 @@ def dumps(x):
 
 def branch_run():
     """This branch's newest run: the last one started on it (rowid order; saving a run never moves it), passing
-    over runs a branch of the same name left behind."""
-    branch = git("branch", "--show-current")
+    over runs a branch of the same name left behind. On a detached HEAD, this worktree's newest branchless run."""
+    branch, top = here()
     for repo, rid in db().execute("SELECT repo, id FROM runs WHERE repo = ? AND branch IS ? ORDER BY rowid DESC",
                                   (repo_name(), branch)).fetchall():
-        if not branch or speaks_for(load(ROOT / repo / rid), branch):
+        rec = load(ROOT / repo / rid)
+        if speaks_for(rec, branch) if branch else rec.get("worktree") == top:
             return ROOT / repo / rid
     return None
 
@@ -341,13 +363,17 @@ def find_claim(rec, cid):
 
 def staged(*commands):
     """Run git commands on the working tree, new files included, staged through a copy of the index
-    (so unchanged files aren't rehashed) and never touching the real one."""
+    (so unchanged files aren't rehashed) and never touching the real one. Linked worktrees inside it (a host's
+    .claude/worktrees, say) are other checkouts, not new files of this one."""
+    top = here()[1] and os.path.realpath(here()[1])
+    nested = [os.path.relpath(f, top) for f in worktrees() if top and f.startswith(top + os.sep)] if top else []
     with tempfile.TemporaryDirectory() as t:
         index, env = Path(t, "index"), {**os.environ, "GIT_INDEX_FILE": str(Path(t, "index"))}
         real = git("rev-parse", "--git-path", "index")
         if real and Path(real).exists():
             shutil.copy2(real, index)
-        subprocess.run(["git", "add", "-A"], env=env, capture_output=True)
+        subprocess.run(["git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
+                       env=env, capture_output=True)
         runs = [subprocess.run(["git", *args], env=env, capture_output=True) for args in commands]
     return [r.stdout if r.returncode == 0 else b"" for r in runs]  # bytes: new files needn't be UTF-8
 
@@ -415,6 +441,34 @@ def command_inputs(cmd, d):
     return inputs
 
 
+LOCAL_URL = re.compile(r"https?://(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)")
+
+
+def quiet(*cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def served(cmd):
+    """The local server a command names (a dev server's URL): the folder its listening process runs in and, when
+    that's a checkout of this repo, which one. Worktrees share ports, so a URL can serve another checkout's code
+    than the one evidence pins. None when the command names no local URL."""
+    url = next((m for m in map(LOCAL_URL.search, cmd) if m), None)
+    if not url:
+        return None
+    pid = (quiet("lsof", "-nP", f"-iTCP:{url[1]}", "-sTCP:LISTEN", "-t").split() or
+           re.findall(r"pid=(\d+)", quiet("ss", "-ltnpH", "sport", "=", f":{url[1]}")) or [None])[0]
+    cwd = pid and (os.path.realpath(f"/proc/{pid}/cwd") if Path(f"/proc/{pid}/cwd").exists() else
+                   next((l[1:] for l in quiet("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn").splitlines()
+                         if l.startswith("n")), None))
+    common = ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+    ours = cwd and git(*common, cwd=cwd) == git(*common) and git("rev-parse", "--show-toplevel", cwd=cwd)
+    return {"url": url[0], "pid": pid, "cwd": cwd, "checkout": ours or None, "here": here()[1]}
+
+
 def attach_file(d, c, src, kind=None, name=None):
     dest = d / "files" / f"{c['id']}f{len(c['files']) + 1}-{name or src.name}"
     shutil.copy2(src, dest)
@@ -446,19 +500,43 @@ def cmd_init(a):
     now = datetime.datetime.now(datetime.timezone.utc)
     rid = now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     d = ROOT / repo_name() / rid
-    (d / "files").mkdir(parents=True)
-    (d / "specs").mkdir()  # test code written for this run lives with its evidence
     workflow = kip.load().get("workflow", {})
     checks = [] if a.target else [  # required checks are this checkout's, not a remote site's
-        new_claim(f"c{i}", f"`{name}` passes", check=name, command=cmd if isinstance(cmd, list) else ["sh", "-c", cmd])
+        new_claim(f"c{i}", f"`{name}` passes", check=name, command=kip.argv(cmd))
         for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
     base = base_branch()
-    save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
-             "commit": git("rev-parse", "HEAD"), "branch": git("branch", "--show-current"), "baseline": fingerprint(),
-             "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
-             "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
-             "session": writer(), "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
-             "stages": workflow.get("stages", []), "claims": checks})
+    rec = {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
+           "commit": git("rev-parse", "HEAD"), "branch": here()[0], "baseline": fingerprint(),
+           "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
+           "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
+           "worktree": here()[1],  # the checkout it started in, main or linked
+           "session": writer(), "level": a.level or "full", "issue": a.issue, "target": a.target, "sinks": sinks,
+           "published": {}, "stages": workflow.get("stages", []), "claims": checks}
+    def write():
+        (d / "files").mkdir(parents=True)
+        (d / "specs").mkdir()  # test code written for this run lives with its evidence
+        save(d, rec)
+
+    if not a.parent:
+        write()
+        return print(d)
+    if not a.unit:
+        sys.exit("--parent needs --unit: the plan's unit this run works on")
+    with mutate(adding_to(argparse.Namespace(run=a.parent))) as plan:
+        if holds(plan):  # this run would become the branch's run in its place
+            sys.exit(f"run {plan['id']} is this checkout's own run; take unit {a.unit} over from the unit's worktree "
+                     f"(`kip.py worktree new NAME --parent {plan['id']} --unit {a.unit}`)")
+        taken = [c for c in plan["claims"] if str(c.get("unit")) == a.unit and not delegate(c)
+                 and not (c["evidence"] or c["files"] or c["unverified"])]
+        if not taken:
+            sys.exit(f"run {plan['id']} has no open claims for unit {a.unit} to take over")
+        rec.update(parent=plan["id"], unit=a.unit, level=a.level or plan["level"])
+        for c in taken:
+            cid = f"c{len(rec['claims']) + 1}"
+            rec["claims"].append(new_claim(cid, c["text"], unit=c["unit"], provider=c["provider"], level=c["level"],
+                                           stage=c["stage"], delegated_from={"run": plan["id"], "claim": c["id"]}))
+            c["delegated"] = {"run": rid, "claim": cid}
+        write()
     print(d)
 
 
@@ -487,6 +565,8 @@ def cmd_run(a):
     """Run one command and record it as evidence for each claim given; they share its log."""
     d = adding_to(a)
     claims = [find_claim(load(d), cid) for cid in a.claims]
+    for c in claims:
+        not_delegated(c)
     cmd = a.cmd or next((c["command"] for c in claims if c.get("command")), None)
     if not cmd:
         sys.exit("usage: receipt.py run CLAIM... [--red] [--static] -- CMD ...")
@@ -494,6 +574,7 @@ def cmd_run(a):
         if c.get("command") and cmd != c["command"]:
             not_a_check(c, f"settled by `{shlex.join(cmd)}`")
     cwd = (any(c.get("command") for c in claims) and git("rev-parse", "--show-toplevel")) or os.getcwd()  # a check runs at the root
+    server = None if load(d).get("target") else served(cmd)  # while it's up, before the command runs
     try:
         r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
         code, out = r.returncode, redact(r.stdout)
@@ -507,7 +588,8 @@ def cmd_run(a):
             c = find_claim(rec, cid)
             e = new_evidence(d, rec, c, kind="static" if a.static else "command", phase="red" if a.red else "green",
                              label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
-                             passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]))
+                             passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]),
+                             **({"served": server} if server else {}))
             if not log:
                 path = d / "files" / f"{e['id']}.log"
                 path.write_text(out)
@@ -532,6 +614,7 @@ def cmd_observe(a):
     with mutate(d) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "observed")
+        not_delegated(c)
         e = new_evidence(d, rec, c, kind="observed", phase="green", observation=a.text, passed=a.passed)
     print(e["id"])
 
@@ -542,7 +625,9 @@ def cmd_attach(a):
         sys.exit(f"no such file: {src}")
     d = adding_to(a)
     with mutate(d) as rec:
-        dest = attach_file(d, find_claim(rec, a.claim), src, a.type)
+        c = find_claim(rec, a.claim)
+        not_delegated(c)
+        dest = attach_file(d, c, src, a.type)
     print(dest)
 
 
@@ -550,6 +635,7 @@ def cmd_unverified(a):
     with mutate(adding_to(a)) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "marked unverified")
+        not_delegated(c)
         c["unverified"], c["unverified_by"] = a.reason, writer()
 
 
@@ -575,13 +661,25 @@ def cmd_sweep(a):
         print(line)
 
 
+def worktrees(cwd=None):
+    """{folder: its branch, or None when detached} for each of this repo's worktrees whose folder still exists."""
+    out = {}
+    for block in (git("worktree", "list", "--porcelain", cwd=cwd) or "").split("\n\n"):
+        folder, branch = re.search(r"^worktree (.+)$", block, re.M), re.search(r"^branch refs/heads/(.+)$", block, re.M)
+        if folder and not re.search(r"^prunable", block, re.M):
+            out[os.path.realpath(folder[1])] = branch and branch[1]
+    return out
+
+
 def settle(orphan=True):
     """Settle this repo's runs that no checkout will finish: finished once their branch merged into the base
-    branch, orphaned (if orphan) once it's gone without merging. The current branch finishes as the gate would.
-    Yields a line per run settled."""
+    branch, orphaned (if orphan) once it's gone without merging, or once the linked worktree it started in is
+    gone and its branch never got a commit. The current branch finishes as the gate would. Yields a line per run
+    settled."""
     base, here = base_branch(), git("branch", "--show-current")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    live = set(re.findall(r"^branch refs/heads/(.+)$", git("worktree", "list", "--porcelain") or "", re.M))
+    trees = worktrees()
+    live = set(filter(None, trees.values()))
     for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
                                "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
@@ -620,6 +718,13 @@ def settle(orphan=True):
             with mutate(d) as fresh:
                 fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
             yield f"orphaned {rid} ({branch}: branch gone)"
+        elif orphan and rec.get("worktree") not in (None, rec.get("checkout")) and Path(rec.get("checkout") or "").is_dir() \
+                and os.path.realpath(rec["worktree"]) not in trees and \
+                git("rev-list", "--count", f"{rec.get('fork') or rec['commit']}..{tip}") == "0":
+            with mutate(d) as fresh:  # its uncommitted work went with the folder
+                fresh["orphaned"] = {"at": now, "reason": "its worktree was removed with nothing committed",
+                                     "via": "worktree removed"}
+            yield f"orphaned {rid} ({branch}: worktree removed)"
 
 
 def gone_merged_by(rec, head, at):
@@ -676,9 +781,28 @@ def rerun_note(fails, passes, last, reds):
     return None
 
 
+def delegate(c):
+    """(claim, run) a plan's claim was handed to with `init --parent`, or None when it wasn't or that run is
+    gone or orphaned (the claim is the plan's again)."""
+    to = c.get("delegated")
+    rec = to and stored(to["run"])
+    if not rec or rec.get("orphaned"):
+        return None
+    return next(((x, rec) for x in rec["claims"] if x["id"] == to["claim"]), None)
+
+
+def not_delegated(c):
+    d = delegate(c)
+    if d:
+        sys.exit(f"{c['id']} was handed to run {d[1]['id']} as {d[0]['id']}; record it there (`--run {d[1]['id']}`)")
+
+
 def verdict(c, rec):
     """The latest run of each check decides it. A failure clears only when the same check passes on
-    changed code, which also shows the check can fail."""
+    changed code, which also shows the check can fail. A delegated claim's verdict is its unit run's."""
+    handed_to = delegate(c)
+    if handed_to:
+        return verdict(*handed_to)
     level = c.get("level") or rec["level"]
     ev = c["evidence"]
     runs = {}
@@ -696,9 +820,13 @@ def verdict(c, rec):
             if note:
                 return f"⚠️ {note}"
             shown = True
-    now = current_tree() if repo_name() == rec["repo"] else None  # another checkout's code says nothing
+    now = current_tree() if holds(rec) else None  # another checkout's code says nothing
     if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
         return "⚠️ stale: the code changed since it was checked"
+    latest = [r["green"][-1].get("served") or {} for r in runs.values() if r["green"]]
+    away = [s["checkout"] for s in latest if s.get("checkout") not in (None, s.get("here"))]
+    if away:
+        return f"⚠️ served from another checkout: {away[0]}"
     if c["unverified"] or not ev:
         return "⚠️ unverified"
     if all(e["kind"] == "observed" for e in ev) and not c["files"]:
@@ -748,6 +876,14 @@ def evidence_meta(e, code):
     return " · ".join(meta)
 
 
+def handed(to, code):
+    """Where a delegated claim's evidence is (to: its delegate()): its unit run, claim, and the branch and commit
+    it was checked on."""
+    x, rec = to
+    at = next((e["commit"] for e in reversed(x["evidence"]) if e.get("commit")), rec["commit"])
+    return f"delegated to {code(rec['id'])} {x['id']} ({rec['branch'] or 'detached'} @ {code((at or '?')[:7])})"
+
+
 def has_units(rec):
     """Runs planned by kip-decompose tag claims with their unit; others keep the original table."""
     return any(c.get("unit") for c in rec["claims"])
@@ -766,7 +902,8 @@ def render_markdown(rec, sink=None, bare_video=False):
            "|---|" + ("---|" if units else "") + "---|---|---|---|"]
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
-        ev = "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
+        to = delegate(c)
+        ev = cell(handed(to, code)) if to else "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
         unit = f" {cell(c.get('unit') or '—')} |" if units else ""
         out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
     for c in rec["claims"]:
@@ -808,7 +945,8 @@ def render_jira(rec, sink=None):
            "||#||" + ("Unit||" if units else "") + "Claim||Provider||Evidence||Verdict||"]
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
-        ev = " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
+        to = delegate(c)
+        ev = cell(handed(to, code)) if to else " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
         unit = f"{cell(c.get('unit') or '—')}|" if units else ""
         out.append(f"|{c['id']}|{unit}{cell(c['text'])}|{c['provider'] or 'generic'}|{ev}|{cell(v)}|")
     for c in rec["claims"]:
@@ -950,6 +1088,8 @@ def cmd_db(a):
         db()  # creates or upgrades it; a new one imports as it opens
         runs, sessions = map(sum, zip(import_json(), _imported))
         print(f"imported {runs} runs and {sessions} session starts from the JSON store")
+        for line in rehome():
+            print(line)
     if not DB.exists():
         return print(f"{DB} · not created yet")
     con = sqlite3.connect(DB.as_uri() + "?mode=ro", uri=True)
@@ -958,14 +1098,45 @@ def cmd_db(a):
     print(f"{DB} · schema v{version} of {len(SCHEMA)} · {runs} runs")
 
 
+def rehome():
+    """Move runs stored under a worktree's folder name (Kip once named a repo after its checkout's folder) to their
+    repository: the one main checkout that has a worktree of that name, or has the run's branch and commit. The
+    main checkouts looked in are those runs recorded, this one, and their siblings named like a stored repo.
+    Yields a line per run moved."""
+    con = db()
+    names = {r for (r,) in con.execute("SELECT DISTINCT repo FROM runs")}
+    known = {c for (c,) in con.execute("SELECT DISTINCT json_extract(data, '$.checkout') FROM runs") if c}
+    known |= {str(main_checkout())} if main_checkout() else set()
+    mains = {Path(c) for c in known | {str(Path(k).parent / n) for k in known for n in names} if Path(c, ".git").is_dir()}
+    folders = {m: {Path(f).name for f in worktrees(m)} for m in mains}
+    for rid, repo, branch, commit in con.execute(
+            "SELECT id, repo, branch, json_extract(data, '$.commit') FROM runs WHERE repo NOT IN (%s) ORDER BY rowid"
+            % ",".join("?" * len(mains)), [m.name for m in mains]).fetchall():
+        hits = [m for m in mains if repo in folders[m] or branch and commit and  # a base branch is in every clone
+                branch != (base_branch(m) or "").split("/")[-1] and
+                git("rev-parse", "-q", "--verify", f"refs/heads/{branch}", cwd=m) and
+                git("cat-file", "-e", f"{commit}^{{commit}}", cwd=m) is not None]
+        if len(hits) != 1:
+            continue
+        home = hits[0]
+        with tx():
+            con.execute("UPDATE runs SET repo = ?1, data = json_set(data, '$.repo', ?1, '$.checkout', ?2) WHERE id = ?3",
+                        (home.name, str(home), rid))
+            (ROOT / home.name).mkdir(parents=True, exist_ok=True)
+            if (ROOT / repo / rid).is_dir():  # a failed move rolls the update back
+                (ROOT / repo / rid).rename(ROOT / home.name / rid)
+        yield f"re-homed {rid}: {repo} -> {home.name}"
+
+
 def blocking(rec, pr=False):
     """What keeps work from being done: claims nobody addressed or whose evidence is stale, required
     checks that haven't passed and, before a PR, refuted claims, workflow stages (tidy, review)
     with no claim, or no claims at all."""
     def open_(c, v):
-        return (not c["evidence"] and not c["unverified"]) or v.startswith("⚠️ stale") or \
+        return (not c["evidence"] and not c["unverified"]) or v.startswith(("⚠️ stale", "⚠️ served")) or \
             (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
-    out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)] if open_(c, v)]
+    out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
+           if open_((delegate(c) or (c,))[0], v)]
     if pr:
         have = {c.get("stage") for c in rec["claims"]}
         out += [f"{s}: no claim (`receipt.py claim \"…\" --stage {s}`)" for s in rec.get("stages", []) if s not in have]
@@ -993,12 +1164,68 @@ def opens_pr(hook):
 NUDGED = "check: already nudged this turn"
 
 
+def subagent_gate(a, hook):
+    """A subagent's stop, gated like a session's only in a worktree of its own (Claude Code names it
+    agent-<agent_id>): one sharing its parent's checkout works toward the parent's run, which the parent's stop
+    judges, so blocking it there would hold up ordinary subagents mid-task."""
+    top = here()[1]
+    if not (top and hook.get("agent_id") and Path(top).name == f"agent-{hook['agent_id']}"):
+        return False, "check: subagent shares its parent's checkout"
+    return gate(argparse.Namespace(**{**vars(a), "hook": "stop"}), hook)
+
+
+def worktree_policy():
+    """workflow.worktrees: off, nudge (the first edit to a main checkout in a session is stopped once), or
+    required (every one is, and a stop after this session changed a main checkout)."""
+    return kip.load().get("workflow", {}).get("worktrees", "nudge")
+
+
+def use_a_worktree(where):
+    return (f"kip: {where} is in the main checkout; work in a linked worktree instead: "
+            "`python3 ~/.kip/kip/kip.py worktree new NAME` (prints its path), or your host's own "
+            "(`claude --worktree`, EnterWorktree, a Cursor worktree), then make the change there.")
+
+
+NUDGES = ROOT / "nudges"  # <session id>: that session was already stopped once from editing a main checkout
+
+
+def edit_gate(hook):
+    """(blocked, message) for a file edit: the main checkout's files are worktree work under workflow.worktrees.
+    One git call decides; files outside a repo or in a linked worktree pass without loading config."""
+    ti = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
+    path = ti.get("file_path") or ti.get("notebook_path")
+    if not path:
+        return False, ""
+    folder = Path(os.path.abspath(path)).parent
+    while not folder.is_dir():
+        folder = folder.parent
+    dirs = (git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", cwd=folder) or "").splitlines()
+    if len(dirs) != 2 or dirs[0] != dirs[1]:
+        return False, ""
+    os.chdir(folder)
+    policy, sid = worktree_policy(), session_id(hook)
+    if policy == "off" or policy == "nudge" and (not sid or (NUDGES / sid).exists()):  # no session: nothing to nudge once
+        return False, ""
+    if policy == "nudge":
+        NUDGES.mkdir(parents=True, exist_ok=True)
+        for old in NUDGES.iterdir():  # a session that never reached its end hook
+            if old.stat().st_mtime < datetime.datetime.now().timestamp() - KEEP_DAYS * 86400:
+                old.unlink(missing_ok=True)
+        (NUDGES / sid).touch()
+    return True, use_a_worktree(path) + (" This is a nudge, once a session: retrying edits here anyway."
+                                         if policy == "nudge" else "")
+
+
 def gate(a, hook):
     """(blocked, message) for this branch's run; anything that isn't this branch's changed work passes."""
     if hook.get("stop_hook_active") or hook.get("loop_count"):  # already nudged once this turn; never loop
         return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
+    if a.hook == "stop" and worktree_policy() == "required" and main_checkout() and not linked() \
+            and session_changed(hook):
+        return True, use_a_worktree(f"this session's work in {here()[1]}") + \
+            " (workflow.worktrees is required; move or commit the work onto a worktree's branch)"
     if a.hook == "pr" and not opens_pr(hook):
         return False, "check: not opening a PR"
     d = run_path(a.run) if a.run else branch_run()
@@ -1035,11 +1262,39 @@ def session_id(hook):
     return str(sid) if sid else None
 
 
-def session_start_state(hook):
-    """The code as this session found it (session_state), or None for a session Kip didn't see start."""
+def session_states(hook):
+    """{worktree: the code as this session found it there (session_state)} for each worktree it started in."""
     sid = session_id(hook)
-    row = sid and db().execute("SELECT state FROM sessions WHERE repo = ? AND id = ?", (repo_name(), sid)).fetchone()
-    return row[0] if row else None
+    return dict(db().execute("SELECT '', state FROM sessions WHERE repo = ?1 AND id = ?2 UNION ALL "
+                             "SELECT worktree, state FROM session_starts WHERE repo = ?1 AND id = ?2",
+                             (repo_name(), sid)).fetchall()) if sid else {}
+
+
+def session_start_state(hook):
+    """The code as this session found it in this worktree; for a linked worktree it entered after starting
+    elsewhere, the worktree as it was created; None for a session Kip didn't see start."""
+    states, top = session_states(hook), here()[1] or ""
+    if top in states:
+        return states[top]
+    return (worktree_created() if states and linked() else None) or \
+        states.get("")  # recorded by a Kip that didn't keep starts per worktree
+
+
+def linked():
+    """This checkout is a linked worktree, not the main one."""
+    top, main = here()[1], main_checkout()
+    return bool(top and main and Path(top).resolve() != main)
+
+
+def worktree_created():
+    """A linked worktree as it was created: where its branch left the base branch, no diff, and when its git dir's
+    commondir was written (once, by `git worktree add`). Not its HEAD's reflog: hosts can create one without it."""
+    base, made = base_branch(), git("rev-parse", "--git-path", "commondir")
+    fork = base and git("merge-base", "HEAD", base)
+    if not (fork and made and Path(made).is_file()):
+        return None
+    at = datetime.datetime.fromtimestamp(int(Path(made).stat().st_mtime), datetime.timezone.utc)
+    return f"{fork} {hashlib.sha256(b'').hexdigest()} {at.isoformat(timespec='seconds')}"
 
 
 def landed(rec, tip, base, cwd=None):
@@ -1128,12 +1383,14 @@ def session_start(hook):
 
 
 def run_status(hook):
-    if not git("rev-parse", "--show-toplevel"):
+    top = here()[1]
+    if not top:
         return ""
-    if session_id(hook) and not session_start_state(hook):
+    if session_id(hook) and top not in session_states(hook):
         state = session_state()  # git runs outside the write lock
         with tx() as con:  # a resumed session keeps the state it first started from
-            con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)", (repo_name(), session_id(hook), state))
+            con.execute("INSERT OR IGNORE INTO session_starts VALUES (?, ?, ?, ?)",
+                        (repo_name(), session_id(hook), top, state))
     list(settle())  # merged and deleted branches, so no one has to remember `sweep`
     d = branch_run()
     rec = load(d) if d else None
@@ -1240,8 +1497,8 @@ def log_prompt(hook):
 def log_gate(event, hook, blocked, msg):
     try:
         d = branch_run()
-        append_event(hook, hook=event, repo=repo_name(), github=github_url(), branch=git("branch", "--show-current"),
-                     run=str(d) if d else None, blocked=blocked, message=msg)
+        append_event(hook, hook=event, repo=repo_name(), github=github_url(), branch=here()[0],
+                     worktree=here()[1], linked=linked(), run=str(d) if d else None, blocked=blocked, message=msg)
     except Exception:
         pass
 
@@ -1256,6 +1513,12 @@ def ensure_server():
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env={k: v for k, v in os.environ.items() if k != OWNER})  # shared: no session's to stop
+
+
+def session_end(hook):
+    stop_servers(hook)
+    if session_id(hook):
+        (NUDGES / session_id(hook)).unlink(missing_ok=True)
 
 
 def stop_servers(hook):
@@ -1277,7 +1540,7 @@ def stop_servers(hook):
 def reason_kind(line):
     """A blocking() line's kind, read from its verdict (claim lines start with their id), never its text."""
     v = re.match(r"c\d+ (.*)", line)
-    return ("missing stage" if not v else "stale" if v[1].startswith("⚠️ stale") else
+    return ("missing stage" if not v else "stale" if v[1].startswith(("⚠️ stale", "⚠️ served")) else
             "failing check" if v[1].startswith("❌") else "unaddressed")
 
 
@@ -1296,10 +1559,13 @@ def fold(rows, e):
         return None
     sid = str(e["session"])
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
+                              "worktree": None, "linked": False,
                               "runs": [], "skills": [], "blocked": 0, "pr": False, "stage": None, "reached": [],
                               "tool": None, "sources": {}, "issues": {}, "started_only": True})
     r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"], hook=e.get("hook"),
              started_only=r["started_only"] and e.get("hook") == "start")
+    if e.get("worktree"):  # where its last gate fired: a linked worktree, or the main checkout
+        r.update(worktree=e["worktree"], linked=bool(e.get("linked")))
     if e.get("run") and e["run"] not in r["runs"]:
         r["runs"].append(e["run"])
     found = [("link", url) for url in URL.findall(str(e.get("text") or ""))] if e.get("hook") == "prompt" else []
@@ -1358,6 +1624,7 @@ def run_detail(rec):
 
     return {**run_summary(rec), "commit": rec.get("commit"), "claims": [
         {"id": c["id"], "text": c["text"], "unit": c.get("unit"), "stage": c.get("stage"),
+         "delegated": delegate(c) and c["delegated"], "delegated_from": c.get("delegated_from"),
          "provider": c.get("provider") or "generic", "verdict": verdict(c, rec), "unverified": c.get("unverified"),
          "accepted": c.get("accepted"),
          "evidence": [{"id": e["id"], "label": e.get("label"), "summary": summarize(e, full=True), "passed": e.get("passed"),
@@ -1392,9 +1659,12 @@ def open_on_merged(rec):
 def triage(seen):
     """Every run as the Runs view lists it, newest first: its state and how it settled, its commits, who wrote it,
     which sessions only shared its branch when a hook fired (seen: run id -> session ids), and what looks wrong."""
-    out, newest = [], {}
+    out, newest, children = [], {}, {}
     for (rid,) in db().execute("SELECT id FROM runs ORDER BY created_at DESC, rowid DESC").fetchall():
         rec = load(rid)
+        summary = run_summary(rec)
+        wt = rec.get("worktree")
+        tree = wt and {"path": wt, "linked": bool(rec.get("checkout")) and wt != rec["checkout"], "live": Path(wt).is_dir()}
         settled = rec.get("orphaned") or rec.get("finished")
         state = "orphaned" if rec.get("orphaned") else "finished" if rec.get("finished") else "open"
         writers, unknown = {}, 0
@@ -1410,15 +1680,22 @@ def triage(seen):
             ("superseded by a newer run on its branch", state == "open" and key in newest),
             ("no writer recorded", not writers),
             ("sessions linked only by branch", branch_only),
-            ("settled before Kip recorded how", settled and "via" not in settled)) if on]
+            ("settled before Kip recorded how", settled and "via" not in settled),
+            ("its worktree was removed with work not merged", state == "open" and tree and tree["linked"] and not tree["live"]),
+            ("evidence served from another checkout", any(v.startswith("⚠️ served") for v in summary["claims"]))) if on]
         newest.setdefault(key, rid)
-        out.append({**run_summary(rec), "repo": rec["repo"], "created_at": rec.get("created_at"), "state": state,
+        if rec.get("parent"):
+            children.setdefault(rec["parent"], []).append(rid)
+        out.append({**summary, "repo": rec["repo"], "created_at": rec.get("created_at"), "state": state,
+                    "parent": rec.get("parent"), "unit": rec.get("unit"), "worktree": tree,
                     "via": settled and settled.get("via"), "reason": (rec.get("orphaned") or {}).get("reason"),
                     "commits": {"start": rec.get("commit"), "fork": rec.get("fork"), "published": rec.get("head"),
                                 "finished": (rec.get("finished") or {}).get("head")},
                     "units": sorted({str(c["unit"]) for c in rec["claims"] if c.get("unit")}),
                     "writers": writers, "unknown_writes": unknown, "branch_only": branch_only, "flags": flags,
                     "attention": state == "open" and bool(flags)})  # a settled run's flags are history
+    for x in out:
+        x["children"] = children.get(x["id"], [])
     return out
 
 
@@ -1667,7 +1944,7 @@ def cmd_check(a):
         try:
             hook = json.loads(sys.stdin.read() or "{}")
             {"tool": log_tool, "prompt": log_prompt,
-             "response": lambda h: log_said(h, "response", h.get("text")), "end": stop_servers}[a.hook](hook)
+             "response": lambda h: log_said(h, "response", h.get("text")), "end": session_end}[a.hook](hook)
         except Exception:
             pass
         if isinstance(hook, dict) and "workspace_roots" in hook:  # Cursor reads a JSON answer, even if logging failed
@@ -1679,18 +1956,19 @@ def cmd_check(a):
         cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
         if cwd:
             os.chdir(cwd)
-        blocked, msg = (False, session_start(hook)) if a.hook == "start" else gate(a, hook)
+        blocked, msg = (False, session_start(hook)) if a.hook == "start" else \
+            edit_gate(hook) if a.hook == "edit" else subagent_gate(a, hook) if a.hook == "subagent" else gate(a, hook)
     except Exception as err:  # hosts let a crashed hook through, so a broken gate blocks instead, once per turn
         if not a.hook:
             raise
         hook = hook if isinstance(hook, dict) else {}
         blocked = opens_pr(hook) if a.hook == "pr" else \
-            a.hook == "stop" and not (hook.get("stop_hook_active") or hook.get("loop_count"))
+            a.hook in ("stop", "subagent") and not (hook.get("stop_hook_active") or hook.get("loop_count"))
         msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
                "Fix it or tell the user; don't work around it.")
     if a.hook == "stop":  # Claude Code's reply; Cursor sends its own on afterAgentResponse
         log_said(hook, "response", hook.get("last_assistant_message"))
-    if a.hook and (a.hook != "pr" or opens_pr(hook)):  # a plain shell or MCP call is the tool hook's to log
+    if a.hook and (a.hook != "pr" or opens_pr(hook)) and (a.hook != "edit" or blocked):  # the tool hook logs the rest
         log_gate(a.hook, hook, blocked, msg)
     if a.hook == "start":
         try:
@@ -1723,7 +2001,9 @@ def main():
                    help="also publish to this sink (opt-in, confirmed with the user); local is always on")
     s.add_argument("--issue")
     s.add_argument("--target", help="URL under test when it isn't this checkout (staging, prod, a preview deploy)")
-    s.add_argument("--level", choices=["lite", "full", "ultra"], default="full")
+    s.add_argument("--level", choices=["lite", "full", "ultra"], help="default full, or the parent's")
+    s.add_argument("--parent", help="the plan run (id or folder) whose unit this run works on, often in a worktree")
+    s.add_argument("--unit", help="with --parent: the unit whose open claims this run takes over")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("claim", parents=[common])
@@ -1801,7 +2081,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "pr", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "subagent", "pr", "edit", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 

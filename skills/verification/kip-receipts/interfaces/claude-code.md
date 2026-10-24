@@ -28,6 +28,8 @@ The desktop app's own browser (tools `mcp__Claude_Browser__*`): `navigate`,
 goes through `eval` (see [CONTRACT.md](CONTRACT.md#set_files-by-eval)), for
 files up to about 1 MB. Its sign-ins are separate from Chrome's.
 
-Last verified: 2026-10-19, Claude in Chrome on casthewiz/Kip#10: `file_upload`
-put a PNG in GitHub's comment box and `javascript_tool` read back the URL.
-The built-in pane's `eval` route hasn't been run yet.
+Last verified: 2026-10-24, Claude in Chrome on casthewiz/Kip#24: `file_upload`
+put JPGs and `.txt` files in GitHub's comment box and `javascript_tool` read
+back each URL (it sends `.log` with a type GitHub refuses; see
+[github.md](github.md)). The built-in pane's `eval` route hasn't been run yet:
+its sign-ins are separate, and it wasn't signed in to GitHub.

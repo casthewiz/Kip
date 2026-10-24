@@ -51,6 +51,9 @@ Plus always-on [rules](rules/user-rules.md) that tie them together.
   locally or to Linear, Jira, a GitHub issue, or the PR.
 - **See every session.** A local [dashboard](docs/dashboard.md) streams each
   session's timeline, stage, and receipts as it happens.
+- **Worktrees by default.** Parallel work goes in linked worktrees: a plan hands
+  each unit's claims to the unit's own run, and the gate steers edits off the
+  main checkout ([how](docs/receipts.md#worktrees)).
 - **Configurable, not forked.** Hosts, evidence providers, and destinations are
   layered [config](docs/configuration.md), per user or per repo.
 - **No dependencies.** Python 3.8+ standard library.

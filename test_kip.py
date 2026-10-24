@@ -2,6 +2,7 @@
 """Self-check for kip.py (config layers, doctor, install): python3 test_kip.py"""
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -22,6 +23,7 @@ def main():
         env["HOME"] = str(home)
         env["KIP_DASHBOARD"] = "0"  # never load a real login service from a test
         env["KIP_GIT_HOOKS"] = "0"  # nor touch this checkout's git hooks
+        env["KIP_INSTALL_FROM_WORKTREE"] = "1"  # this checkout may itself be a linked worktree
 
         def kip(*args, ok=True, **extra):
             r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=repo, env={**env, **extra},
@@ -66,11 +68,72 @@ def main():
                          ({"workflow": {"stages": "tidy"}}, "workflow.stages must be a list"),
                          ({"workflow": {"checks": ["make test"]}}, "workflow.checks must map check names"),
                          ({"workflow": {"checks": {"tests": ""}}}, "workflow.checks.tests must be a command"),
+                         ({"workflow": {"worktrees": "always"}}, "workflow.worktrees must be off, nudge or required"),
+                         ({"workflow": {"worktree": "kip"}}, "workflow.worktree must be an object"),
                          ({"dashboard": {"conversation": "no"}}, "dashboard.conversation must be true or false"),
                          ({"setup": {"x": {"about": "a"}}}, "setup.x needs about, run, and requires")]:
             write(repo / ".kip" / "config.json", bad)
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
+
+        # worktree new: a linked worktree at .kip/worktrees/NAME on kip/NAME that the main checkout doesn't list as
+        # untracked, with the gitignored files .worktreeinclude names (and no others), set up by its own config,
+        # and with --parent its unit's receipts run started there.
+        proj, store = Path(tmp, "proj"), {"KIP_RECEIPTS_DIR": str(Path(tmp, "store"))}
+        proj.mkdir()
+        (proj / ".gitignore").write_text(".env\nsecret.txt\n.kip/config.json\n")
+        (proj / ".worktreeinclude").write_text(".env\n.kip/config.json\nnot-ignored.txt\n")
+        (proj / "app.txt").write_text("app\n")
+        g = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        for cmd in (["init", "-q"], ["add", "."], [*g, "commit", "-qm", "proj"]):
+            subprocess.run(["git", *cmd], cwd=proj, check=True, capture_output=True)
+        (proj / ".env").write_text("TOKEN=dev\n")
+        (proj / "secret.txt").write_text("not named\n")
+        (proj / "not-ignored.txt").write_text("untracked but not ignored\n")
+        write(proj / ".kip" / "config.json", {"workflow": {"stages": [], "worktree": {"setup": "touch setup-ran"}}})
+
+        def kip_in(cwd, *args, ok=True, **extra):
+            r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=cwd, env={**env, **store, **extra},
+                               capture_output=True, text=True)
+            assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
+            return r.stdout.strip(), r.stderr.strip()
+
+        wt = Path(kip_in(proj, "worktree", "new", "feat")[0])
+        assert wt == proj.resolve() / ".kip" / "worktrees" / "feat", wt
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=wt, capture_output=True, text=True).stdout
+        assert branch.strip() == "kip/feat", branch
+        assert (wt / ".env").read_text() == "TOKEN=dev\n" and (wt / ".kip" / "config.json").is_file()
+        assert not (wt / "secret.txt").exists() and not (wt / "not-ignored.txt").exists()
+        assert (wt / "setup-ran").exists() and not (proj / "setup-ran").exists()
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, capture_output=True, text=True).stdout
+        assert ".kip/worktrees" not in status, status
+        assert "already exists" in kip_in(proj, "worktree", "new", "feat", ok=False)[1]
+        receipt = lambda cwd, *args: subprocess.run([sys.executable, str(RECEIPT), *args], cwd=cwd,  # noqa: E731
+                                                    env={**env, **store}, capture_output=True, text=True).stdout.strip()
+        plan = Path(receipt(proj, "init")).name
+        receipt(proj, "claim", "unit one works", "--unit", "1")
+        unit_wt = Path(kip_in(proj, "worktree", "new", "unit-1", "--parent", plan, "--unit", "1")[0])
+        unit_run = json.loads(receipt(unit_wt, "json"))
+        assert (unit_run["parent"], unit_run["unit"], unit_run["claims"][0]["text"]) == (plan, "1", "unit one works"), unit_run
+        write(proj / ".kip" / "config.json", {"workflow": {"worktree": {"setup": "exit 3"}}})
+        assert "setup failed" in kip_in(proj, "worktree", "new", "broken", ok=False)[1]
+        write(proj / ".kip" / "config.json", {"workflow": {"worktree": {"setup": ""}}})
+        assert "workflow.worktree.setup must be a command" in kip_in(proj, "doctor", ok=False)[1]
+
+        # A user install from a linked worktree is refused: what it links would go when the worktree is removed.
+        clone, linked = Path(tmp, "kip-clone"), Path(tmp, "kip-linked")
+        clone.mkdir()
+        for name in ("kip.py", "defaults.json", "rules", "skills"):
+            src = ROOT / name
+            (shutil.copytree if src.is_dir() else shutil.copy2)(src, clone / name)
+        for cmd in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "kip"],
+                    ["worktree", "add", "-q", "--detach", str(linked)]):
+            subprocess.run(["git", *cmd], cwd=clone, check=True, capture_output=True)
+        unset = {k: v for k, v in env.items() if k != "KIP_INSTALL_FROM_WORKTREE"}
+        r = subprocess.run([sys.executable, str(linked / "kip.py"), "install"], cwd=repo, env=unset,
+                           capture_output=True, text=True)
+        assert r.returncode == 1 and "is a linked worktree" in r.stderr and str(clone.resolve() / "kip.py") in r.stderr, r
+        assert not (home / ".kip" / "kip").exists(), "a refused install linked something"
 
         # Install: detected hosts only, every skill linked, rules imported once, idempotent.
         skills = sorted(p.parent.name for p in (ROOT / "skills").rglob("SKILL.md"))
@@ -86,9 +149,9 @@ def main():
         write(old_run / "receipt.json", {"id": old_run.name, "repo": "demo", "branch": "main", "level": "full",
                                          "created_at": "2025-01-01T00:00:00+00:00", "claims": []})
         out = kip("install")
-        assert f"receipts\n  imported 1 runs and 0 session starts from the JSON store\n  {kipdb} · schema v1 of 1 · 1 runs" \
+        assert f"receipts\n  imported 1 runs and 0 session starts from the JSON store\n  {kipdb} · schema v2 of 2 · 1 runs" \
             in out, out
-        assert f"receipts\n  {kipdb} · schema v1 of 1 · 1 runs" in kip("doctor")
+        assert f"receipts\n  {kipdb} · schema v2 of 2 · 1 runs" in kip("doctor")
         first = settings.read_text()
         assert "cursor: skipped, missing ~/.cursor" in out, out
         for d in (home / ".kip" / "skills", home / ".claude" / "skills"):
@@ -104,11 +167,13 @@ def main():
         assert on["model"] == "x" and on["hooks"]["Stop"][0] == mine and len(on["hooks"]["Stop"]) == 2, on
         assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
         pre = on["hooks"]["PreToolUse"]
-        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "*"], pre
-        assert [g["hooks"][0]["command"].split()[-1] for g in pre] == ["pr", "pr", "tool"], pre
+        assert [g["matcher"] for g in pre] == \
+            ["Bash", "mcp__.*(create_pull_request|create_pr)", "Edit|MultiEdit|Write|NotebookEdit", "*"], pre
+        assert [g["hooks"][0]["command"].split()[-1] for g in pre] == ["pr", "pr", "edit", "tool"], pre
         assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
         assert on["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].endswith("check --hook prompt"), on
         assert on["hooks"]["SessionEnd"][0]["hooks"][0]["command"].endswith("check --hook end"), on
+        assert on["hooks"]["SubagentStop"][0]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook subagent", on
         assert settings.read_text() == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
         write(settings, {**on, "hooks": {**on["hooks"], "PreToolUse": pre[:2]}})  # installed before the tool hook
@@ -237,7 +302,7 @@ def main():
         assert snapshot() != before and (home / ".cursor" / "hooks.json").exists()
         out = kip("uninstall", HOME=str(home))
         kept = home / ".kip" / "receipts" / "kip.db"
-        assert f"receipts\n  kept: {kept} · schema v1 of 1 · 0 runs" in out and kept.exists(), out
+        assert f"receipts\n  kept: {kept} · schema v2 of 2 · 0 runs" in out and kept.exists(), out
         assert json.loads(snapshot()[1][0]) == json.loads(before[1][0]) and snapshot()[1][1:] == before[1][1:], snapshot()
         assert snapshot()[0] == before[0], snapshot()
         assert not [p for p in home.rglob("*") if p.is_symlink() and os.readlink(p).startswith(str(ROOT))], out
