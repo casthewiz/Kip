@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import queue
 import shutil
 import socket
@@ -1158,6 +1159,69 @@ def main():
             run_json(sib_runs[1])["repo"] == "sib"
         assert "re-homed" not in frc("db", "--migrate")
         sh("git", "worktree", "remove", str(sib_wt), cwd=sib)
+        # A plan run hands a unit's open claims to a run in that unit's worktree (`init --parent --unit`). The plan's
+        # verdicts for them are that run's, labeled with where they were checked, and it takes no evidence for them
+        # itself. Merging the unit back makes the plan's own required checks stale until they pass on the merged
+        # code, while the handed-over claims stay verified. An orphaned unit run hands its claims back.
+        fsh("git", "checkout", "-q", "-b", "plan", base)
+        (fin / ".kip").mkdir(exist_ok=True)
+        (fin / ".kip" / "config.json").write_text(json.dumps({"workflow": {"stages": [], "checks": {"tests": "test -f a.txt"}}}))
+        fsh("git", "add", ".")
+        fsh("git", "commit", "-qm", "plan config")
+        plan_run = Path(frc("init")).name
+        for text, unit in (("u1 a", "1"), ("u1 b", "1"), ("u2 c", "2")):
+            frc("claim", text, "--unit", unit)
+        u1, u2 = Path(tmp, "u1-folder"), Path(tmp, "u2-folder")
+        fsh("git", "worktree", "add", "-q", "-b", "unit1", str(u1), "plan")
+        fsh("git", "worktree", "add", "-q", "-b", "unit2", str(u2), "plan")
+
+        def urc(folder, *args, **kw):
+            return sh(sys.executable, str(SCRIPT), *args, cwd=folder, **kw)
+
+        runs_before = len(kipdb("SELECT id FROM runs"))
+        assert "--parent needs --unit" in urc(u1, "init", "--parent", plan_run, ok=False)
+        assert "no open claims for unit 9" in urc(u1, "init", "--parent", plan_run, "--unit", "9", ok=False)
+        assert len(kipdb("SELECT id FROM runs")) == runs_before, "a refused init left a run"
+        child = Path(urc(u1, "init", "--parent", plan_run, "--unit", "1")).name
+        crec, prec = run_json(child), run_json(plan_run)
+        assert (crec["parent"], crec["unit"], crec["level"]) == (plan_run, "1", "full"), crec
+        assert [c["text"] for c in crec["claims"]] == ["`tests` passes", "u1 a", "u1 b"], crec["claims"]
+        assert [c.get("delegated") for c in prec["claims"]] == \
+            [None, {"run": child, "claim": "c2"}, {"run": child, "claim": "c3"}, None], prec["claims"]
+        assert crec["claims"][1]["delegated_from"] == {"run": plan_run, "claim": "c2"}
+        assert "no open claims for unit 1" in urc(u1, "init", "--parent", plan_run, "--unit", "1", ok=False)
+        assert f"was handed to run {child} as c2" in frc("run", "c2", "--", "true", ok=False)
+        assert f"was handed to run {child}" in frc("unverified", "c3", "later", ok=False)
+        plan_v = lambda: verdicts(("--run", plan_run))  # noqa: E731
+        assert plan_v()["c2"] == "⚠️ unverified", plan_v()
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "c2 ⚠️ unverified: u1 a" in out, out
+        (u1 / "u1.txt").write_text("1\n")
+        sh("git", "add", ".", cwd=u1)
+        sh("git", "commit", "-qm", "unit 1", cwd=u1)
+        urc(u1, "run", "c1")
+        urc(u1, "run", "c2", "c3", "--", "true")
+        unit_sha = sh("git", "rev-parse", "--short=7", "HEAD", cwd=u1)
+        frc("run", "c1")
+        assert plan_v()["c2"] == plan_v()["c3"] == "✅ verified", plan_v()
+        assert f"delegated to `{child}` c2 (unit1 @ `{unit_sha}`)" in frc("render", "--run", plan_run)
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert code == 2 and "c4 ⚠️ unverified: u2 c" in out and not re.search(r"  c[123] ", out), out
+        fsh("git", "merge", "-q", "--no-ff", "unit1", "-m", "merge unit1")
+        code, out = check("--hook", "pr", event=pr_event, cwd=fin)
+        assert "c1 ⚠️ stale" in out and not re.search(r"  c[23] ", out), out
+        frc("run", "c1")
+        assert "c1 " not in check("--hook", "pr", event=pr_event, cwd=fin)[1]
+        child2 = Path(urc(u2, "init", "--parent", plan_run, "--unit", "2")).name
+        assert run_json(plan_run)["claims"][3]["delegated"]["run"] == child2
+        urc(u2, "orphan", "--reason", "redo unit 2")
+        assert plan_v()["c4"] == "⚠️ unverified" and "c4 ⚠️ unverified" in check("--hook", "pr", event=pr_event, cwd=fin)[1]
+        child3 = Path(urc(u2, "init", "--parent", plan_run, "--unit", "2")).name
+        assert run_json(plan_run)["claims"][3]["delegated"]["run"] == child3 and child3 != child2
+        for folder, branch in ((u1, "unit1"), (u2, "unit2")):
+            fsh("git", "worktree", "remove", "--force", str(folder))
+            fsh("git", "branch", "-q", "-D", branch)
+        fsh("git", "checkout", "-q", base)
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
         for name in ("start-merged", "start-dropped"):

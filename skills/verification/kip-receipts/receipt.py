@@ -2,8 +2,9 @@
 """Deterministic receipts: record claims and evidence, publish them to sinks.
 
   receipt.py sinks                                          list destinations and whether each is ready
-  receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra]
-                                                            start a run (local only by default), print its dir
+  receipt.py init [--sink NAME --issue KEY] [--target URL] [--level lite|full|ultra] [--parent RUN --unit N]
+                                                            start a run (local only by default), print its dir;
+                                                            --parent takes over a plan run's claims for unit N
   receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
   receipt.py run CLAIM... [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
@@ -464,20 +465,40 @@ def cmd_init(a):
     now = datetime.datetime.now(datetime.timezone.utc)
     rid = now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     d = ROOT / repo_name() / rid
-    (d / "files").mkdir(parents=True)
-    (d / "specs").mkdir()  # test code written for this run lives with its evidence
     workflow = kip.load().get("workflow", {})
     checks = [] if a.target else [  # required checks are this checkout's, not a remote site's
         new_claim(f"c{i}", f"`{name}` passes", check=name, command=cmd if isinstance(cmd, list) else ["sh", "-c", cmd])
         for i, (name, cmd) in enumerate(workflow.get("checks", {}).items(), 1)]
     base = base_branch()
-    save(d, {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
-             "commit": git("rev-parse", "HEAD"), "branch": here()[0], "baseline": fingerprint(),
-             "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
-             "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
-             "worktree": here()[1],  # the checkout it started in, main or linked
-             "session": writer(), "level": a.level, "issue": a.issue, "target": a.target, "sinks": sinks, "published": {},
-             "stages": workflow.get("stages", []), "claims": checks})
+    rec = {"id": rid, "created_at": now.isoformat(timespec="seconds"), "repo": repo_name(),
+           "commit": git("rev-parse", "HEAD"), "branch": here()[0], "baseline": fingerprint(),
+           "fork": base and git("merge-base", "HEAD", base),  # where the branch left the base branch: landed() is past it
+           "checkout": str(main_checkout() or "") or None,  # where the dashboard can ask git about its branch
+           "worktree": here()[1],  # the checkout it started in, main or linked
+           "session": writer(), "level": a.level or "full", "issue": a.issue, "target": a.target, "sinks": sinks,
+           "published": {}, "stages": workflow.get("stages", []), "claims": checks}
+    def write():
+        (d / "files").mkdir(parents=True)
+        (d / "specs").mkdir()  # test code written for this run lives with its evidence
+        save(d, rec)
+
+    if not a.parent:
+        write()
+        return print(d)
+    if not a.unit:
+        sys.exit("--parent needs --unit: the plan's unit this run works on")
+    with mutate(adding_to(argparse.Namespace(run=a.parent))) as plan:
+        taken = [c for c in plan["claims"] if str(c.get("unit")) == a.unit and not delegate(c)
+                 and not (c["evidence"] or c["files"] or c["unverified"])]
+        if not taken:
+            sys.exit(f"run {plan['id']} has no open claims for unit {a.unit} to take over")
+        rec.update(parent=plan["id"], unit=a.unit, level=a.level or plan["level"])
+        for c in taken:
+            cid = f"c{len(rec['claims']) + 1}"
+            rec["claims"].append(new_claim(cid, c["text"], unit=c["unit"], provider=c["provider"], level=c["level"],
+                                           stage=c["stage"], delegated_from={"run": plan["id"], "claim": c["id"]}))
+            c["delegated"] = {"run": rid, "claim": cid}
+        write()
     print(d)
 
 
@@ -506,6 +527,8 @@ def cmd_run(a):
     """Run one command and record it as evidence for each claim given; they share its log."""
     d = adding_to(a)
     claims = [find_claim(load(d), cid) for cid in a.claims]
+    for c in claims:
+        not_delegated(c)
     cmd = a.cmd or next((c["command"] for c in claims if c.get("command")), None)
     if not cmd:
         sys.exit("usage: receipt.py run CLAIM... [--red] [--static] -- CMD ...")
@@ -551,6 +574,7 @@ def cmd_observe(a):
     with mutate(d) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "observed")
+        not_delegated(c)
         e = new_evidence(d, rec, c, kind="observed", phase="green", observation=a.text, passed=a.passed)
     print(e["id"])
 
@@ -561,7 +585,9 @@ def cmd_attach(a):
         sys.exit(f"no such file: {src}")
     d = adding_to(a)
     with mutate(d) as rec:
-        dest = attach_file(d, find_claim(rec, a.claim), src, a.type)
+        c = find_claim(rec, a.claim)
+        not_delegated(c)
+        dest = attach_file(d, c, src, a.type)
     print(dest)
 
 
@@ -569,6 +595,7 @@ def cmd_unverified(a):
     with mutate(adding_to(a)) as rec:
         c = find_claim(rec, a.claim)
         not_a_check(c, "marked unverified")
+        not_delegated(c)
         c["unverified"], c["unverified_by"] = a.reason, writer()
 
 
@@ -713,9 +740,28 @@ def rerun_note(fails, passes, last, reds):
     return None
 
 
+def delegate(c):
+    """(claim, run) a plan's claim was handed to with `init --parent`, or None when it wasn't or that run is
+    gone or orphaned (the claim is the plan's again)."""
+    to = c.get("delegated")
+    rec = to and stored(to["run"])
+    if not rec or rec.get("orphaned"):
+        return None
+    return next(((x, rec) for x in rec["claims"] if x["id"] == to["claim"]), None)
+
+
+def not_delegated(c):
+    d = delegate(c)
+    if d:
+        sys.exit(f"{c['id']} was handed to run {d[1]['id']} as {d[0]['id']}; record it there (`--run {d[1]['id']}`)")
+
+
 def verdict(c, rec):
     """The latest run of each check decides it. A failure clears only when the same check passes on
-    changed code, which also shows the check can fail."""
+    changed code, which also shows the check can fail. A delegated claim's verdict is its unit run's."""
+    handed_to = delegate(c)
+    if handed_to:
+        return verdict(*handed_to)
     level = c.get("level") or rec["level"]
     ev = c["evidence"]
     runs = {}
@@ -785,6 +831,13 @@ def evidence_meta(e, code):
     return " · ".join(meta)
 
 
+def handed(c, code):
+    """Where a delegated claim's evidence is: its unit run, claim, and the branch and commit it was checked on."""
+    x, rec = delegate(c)
+    at = next((e["commit"] for e in reversed(x["evidence"]) if e.get("commit")), rec["commit"])
+    return f"delegated to {code(rec['id'])} {x['id']} ({rec['branch'] or 'detached'} @ {code((at or '?')[:7])})"
+
+
 def has_units(rec):
     """Runs planned by kip-decompose tag claims with their unit; others keep the original table."""
     return any(c.get("unit") for c in rec["claims"])
@@ -803,7 +856,7 @@ def render_markdown(rec, sink=None, bare_video=False):
            "|---|" + ("---|" if units else "") + "---|---|---|---|"]
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
-        ev = "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
+        ev = cell(handed(c, code)) if delegate(c) else "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
         unit = f" {cell(c.get('unit') or '—')} |" if units else ""
         out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
     for c in rec["claims"]:
@@ -845,7 +898,7 @@ def render_jira(rec, sink=None):
            "||#||" + ("Unit||" if units else "") + "Claim||Provider||Evidence||Verdict||"]
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
-        ev = " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
+        ev = cell(handed(c, code)) if delegate(c) else " \\\\ ".join(cell(jsum(e)) for e in c["evidence"]) or "—"
         unit = f"{cell(c.get('unit') or '—')}|" if units else ""
         out.append(f"|{c['id']}|{unit}{cell(c['text'])}|{c['provider'] or 'generic'}|{ev}|{cell(v)}|")
     for c in rec["claims"]:
@@ -1033,7 +1086,8 @@ def blocking(rec, pr=False):
     def open_(c, v):
         return (not c["evidence"] and not c["unverified"]) or v.startswith("⚠️ stale") or \
             (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
-    out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)] if open_(c, v)]
+    out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
+           if open_((delegate(c) or (c,))[0], v)]
     if pr:
         have = {c.get("stage") for c in rec["claims"]}
         out += [f"{s}: no claim (`receipt.py claim \"…\" --stage {s}`)" for s in rec.get("stages", []) if s not in have]
@@ -1820,7 +1874,9 @@ def main():
                    help="also publish to this sink (opt-in, confirmed with the user); local is always on")
     s.add_argument("--issue")
     s.add_argument("--target", help="URL under test when it isn't this checkout (staging, prod, a preview deploy)")
-    s.add_argument("--level", choices=["lite", "full", "ultra"], default="full")
+    s.add_argument("--level", choices=["lite", "full", "ultra"], help="default full, or the parent's")
+    s.add_argument("--parent", help="the plan run (id or folder) whose unit this run works on, often in a worktree")
+    s.add_argument("--unit", help="with --parent: the unit whose open claims this run takes over")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("claim", parents=[common])
