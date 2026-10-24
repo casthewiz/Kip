@@ -90,6 +90,24 @@ ol.timeline { list-style: none; margin: 0; padding: 0; }
 .segment .none { color: var(--dim); font-size: 12px; margin: 0; }
 .kindtag { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; color: var(--dim); flex: none; }
 .n { color: var(--dim); font-size: 12px; flex: none; }
+.segment.wide { grid-column: 1 / -1; }
+.family, .family ul { list-style: none; margin: 0; padding: 0; }
+.family li { display: block; padding: 0; }
+.family ul { margin-left: 9px; }
+.family ul > li { position: relative; padding-left: 14px; border-left: 1px solid var(--line); }
+.family ul > li:last-child { border-left-color: transparent; }
+.family ul > li::before { content: ""; position: absolute; left: -1px; top: 0; width: 12px; height: 15px;
+  border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.family .node { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; min-width: 0; margin: 1px 0; padding: 3px 6px;
+  border: 1px solid transparent; border-radius: 6px; background: none; color: inherit; font: inherit; font-size: 13px; text-align: left; }
+.family button.node { cursor: pointer; }
+.family button.node:hover { border-color: var(--line); }
+.family .node[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.family .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+.family .label .sub { font-family: system-ui, -apple-system, sans-serif; }
+.family .tally { margin-left: 0; }
+.family .ghost > .node { border-style: dashed; border-color: var(--line); color: var(--dim); }
+.family .ghost > .node .mascot { opacity: .6; }
 a { color: var(--accent); }
 .runs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .runs button { font: inherit; font-size: 12px; border: 1px solid var(--line); background: var(--panel); color: inherit;
@@ -432,27 +450,39 @@ function renderRuns() {
 
 const runLink = id => h("a", { href: "#run=" + encodeURIComponent(id), onclick: ev => { ev.preventDefault(); selectRun(id); } }, id);
 
-// The plan a unit run works for, then its own unit runs: each with its state, worktree and claims.
-function planItems(x) {
-  const item = id => {
-    const r = runs.find(y => y.id === id);
-    return h("li", {}, h("span", { class: "grow" }, r && r.unit ? "unit " + r.unit + " · " : "", runLink(id), r ? " · " + (r.branch || "detached") : ""),
-      r && r.worktree && r.worktree.linked ? treeChip(r.worktree.path, r.worktree.live) : null,
-      r ? h("span", { class: `state ${r.state}` }, r.state) : null, r ? tally(r.claims) : null);
+// A run's family as a tree: the top of its plan, its unit runs under it, and under each run the sessions that wrote it
+// and, dashed, those that only shared its branch. `current` ({ run: id } or { session: id }) is highlighted.
+function familyTree(runId, current) {
+  const byId = new Map(runs.map(x => [x.id, x]));
+  let root = byId.get(runId);
+  while (root && byId.has(root.parent)) root = byId.get(root.parent);
+  if (!root) return null;
+  const node = (here, go, ...kids) => go ? h("button", { class: "node", "aria-current": here ? "true" : "false", onclick: go }, kids)
+    : h("span", { class: "node" }, kids);
+  const session = (sid, note, ghost) => {
+    const r = rows.find(x => x.session === sid);
+    return h("li", { class: ghost ? "ghost" : null }, node(current.session === sid, r && (() => select(sid)),
+      r ? mascot(mood(r), 18) : null, h("span", { class: "grow label", title: sid }, sid.slice(0, 8), r ? h("span", { class: "sub" }, " · " + (r.host || "?")) : null),
+      h("span", { class: "n" }, note)));
   };
-  return [x.parent && h("li", {}, h("span", { class: "grow" }, `unit ${x.unit} of plan `, runLink(x.parent))), ...x.children.map(item)].filter(Boolean);
+  const run = x => h("li", {},
+    node(current.run === x.id, () => selectRun(x.id), mascot(runMood(x), 20),
+      h("span", { class: "grow label", title: x.id }, x.unit ? "unit " + x.unit + " · " : x.children.length ? "plan · " : "", x.id),
+      h("span", { class: `state ${x.state}` }, x.state), x.worktree && x.worktree.linked ? treeChip(x.worktree.path, x.worktree.live) : null, tally(x.claims)),
+    h("ul", {},
+      Object.entries(x.writers).sort((a, b) => b[1] - a[1]).map(([sid, n]) => session(sid, nWrites(n))),
+      x.unknown_writes ? h("li", { class: "ghost" }, h("span", { class: "node" }, h("span", { class: "grow label" }, "no session recorded"), h("span", { class: "n" }, nWrites(x.unknown_writes)))) : null,
+      x.branch_only.map(sid => session(sid, "branch only", true)),
+      x.children.map(id => byId.get(id)).filter(Boolean).map(run)));
+  return h("ul", { class: "family" }, run(root));
 }
 
-const sessionLink = sid => h("a", { href: "#session=" + encodeURIComponent(sid), onclick: ev => { ev.preventDefault(); select(sid); } },
-  sid.slice(0, 8));
-
-// A run for triage: how it stands and settled, the commits it covers, who wrote it and who only shared its branch,
-// then its claims by unit.
+// A run for triage: how it stands and settled, the commits it covers, its family tree, then its claims by unit.
 function renderRunDetail() {
   const x = runs.find(r => r.id === runSelected);
   if (!x) { $("detail").replaceChildren(h("p", { class: "empty" }, runSelected ? "That run isn't in kip.db." : "Pick a run.")); return; }
   const how = x.state === "open" ? "" : ` · ${x.via || "how unknown"}${x.reason && x.via !== x.reason ? ": " + x.reason : ""}`;
-  const writers = Object.entries(x.writers).sort((a, b) => b[1] - a[1]), m = runMood(x);
+  const m = runMood(x);
   const top = h("div", {},
     h("div", { class: "headline" }, mascot(m, 64), h("div", { class: "grow" }, h("h2", {}, title(x)),
       h("p", { class: "meta" }, `run ${x.id} · ${x.level} · started ${ago(x.created_at)} · ${MOODS[m]}`, " · ", h("span", { class: `state ${x.state}` }, x.state), how,
@@ -462,12 +492,7 @@ function renderRunDetail() {
     h("div", { class: "segments" },
       segment("Commits", [["started on", x.commits.start], ["left the base at", x.commits.fork], ["published at", x.commits.published],
         ["finished at", x.commits.finished]].map(([what, sha]) => h("li", {}, h("span", { class: "grow" }, what), h("span", { class: "sha", title: sha || "" }, short(sha)))), ""),
-      segment("Wrote it", [...writers.map(([sid, n]) => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, nWrites(n)))),
-        x.unknown_writes ? h("li", {}, h("span", { class: "grow" }, "no session recorded"), h("span", { class: "n" }, nWrites(x.unknown_writes))) : null].filter(Boolean),
-        "No writes yet."),
-      segment(x.parent ? "Plan" : "Unit runs", planItems(x), "Not part of a plan."),
-      segment("Only on its branch", x.branch_only.map(sid => h("li", {}, h("span", { class: "grow" }, sessionLink(sid)), h("span", { class: "n" }, "wrote nothing"))),
-        "No session saw this run on its branch without writing to it.")));
+      h("div", { class: "segment wide" }, h("h3", {}, "Family"), familyTree(x.id, { run: x.id }))));
   if ($("detail").dataset.run === x.id && $("review")) return $("detail").firstChild.replaceWith(top);  // keep open claims
   $("detail").dataset.run = x.id;
   $("detail").replaceChildren(top, h("div", { id: "review" }));
