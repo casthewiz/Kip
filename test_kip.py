@@ -74,6 +74,50 @@ def main():
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
 
+        # worktree new: a linked worktree at .kip/worktrees/NAME on kip/NAME that the main checkout doesn't list as
+        # untracked, with the gitignored files .worktreeinclude names (and no others), set up by its own config,
+        # and with --parent its unit's receipts run started there.
+        proj, store = Path(tmp, "proj"), {"KIP_RECEIPTS_DIR": str(Path(tmp, "store"))}
+        proj.mkdir()
+        (proj / ".gitignore").write_text(".env\nsecret.txt\n.kip/config.json\n")
+        (proj / ".worktreeinclude").write_text(".env\n.kip/config.json\nnot-ignored.txt\n")
+        (proj / "app.txt").write_text("app\n")
+        g = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        for cmd in (["init", "-q"], ["add", "."], [*g, "commit", "-qm", "proj"]):
+            subprocess.run(["git", *cmd], cwd=proj, check=True, capture_output=True)
+        (proj / ".env").write_text("TOKEN=dev\n")
+        (proj / "secret.txt").write_text("not named\n")
+        (proj / "not-ignored.txt").write_text("untracked but not ignored\n")
+        write(proj / ".kip" / "config.json", {"workflow": {"stages": [], "worktree": {"setup": "touch setup-ran"}}})
+
+        def kip_in(cwd, *args, ok=True, **extra):
+            r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=cwd, env={**env, **store, **extra},
+                               capture_output=True, text=True)
+            assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
+            return r.stdout.strip(), r.stderr.strip()
+
+        wt = Path(kip_in(proj, "worktree", "new", "feat")[0])
+        assert wt == proj.resolve() / ".kip" / "worktrees" / "feat", wt
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=wt, capture_output=True, text=True).stdout
+        assert branch.strip() == "kip/feat", branch
+        assert (wt / ".env").read_text() == "TOKEN=dev\n" and (wt / ".kip" / "config.json").is_file()
+        assert not (wt / "secret.txt").exists() and not (wt / "not-ignored.txt").exists()
+        assert (wt / "setup-ran").exists() and not (proj / "setup-ran").exists()
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, capture_output=True, text=True).stdout
+        assert ".kip/worktrees" not in status, status
+        assert "already exists" in kip_in(proj, "worktree", "new", "feat", ok=False)[1]
+        receipt = lambda cwd, *args: subprocess.run([sys.executable, str(RECEIPT), *args], cwd=cwd,  # noqa: E731
+                                                    env={**env, **store}, capture_output=True, text=True).stdout.strip()
+        plan = Path(receipt(proj, "init")).name
+        receipt(proj, "claim", "unit one works", "--unit", "1")
+        unit_wt = Path(kip_in(proj, "worktree", "new", "unit-1", "--parent", plan, "--unit", "1")[0])
+        unit_run = json.loads(receipt(unit_wt, "json"))
+        assert (unit_run["parent"], unit_run["unit"], unit_run["claims"][0]["text"]) == (plan, "1", "unit one works"), unit_run
+        write(proj / ".kip" / "config.json", {"workflow": {"worktree": {"setup": "exit 3"}}})
+        assert "setup failed" in kip_in(proj, "worktree", "new", "broken", ok=False)[1]
+        write(proj / ".kip" / "config.json", {"workflow": {"worktree": {"setup": ""}}})
+        assert "workflow.worktree.setup must be a command" in kip_in(proj, "doctor", ok=False)[1]
+
         # A user install from a linked worktree is refused: what it links would go when the worktree is removed.
         clone, linked = Path(tmp, "kip-clone"), Path(tmp, "kip-linked")
         clone.mkdir()
