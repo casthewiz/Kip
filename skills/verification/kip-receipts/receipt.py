@@ -50,6 +50,7 @@ import copy
 import datetime
 import functools
 import hashlib
+import html
 import importlib.util
 import json
 import mimetypes
@@ -65,6 +66,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / "kip.py").is_file())))
@@ -889,9 +891,10 @@ def has_units(rec):
     return any(c.get("unit") for c in rec["claims"])
 
 
-def render_markdown(rec, sink=None, bare_video=False):
-    def cell(s):
-        return str(s).replace("|", "\\|").replace("\n", " ")
+def render_markdown(rec, sink=None, github=False):
+    def cell(s):  # a tag in claim text would render as HTML; code spans already show it literally
+        s = re.sub(r"(`[^`]*`)|<", lambda m: m.group(1) or "&lt;", str(s))
+        return s.replace("|", "\\|").replace("\n", " ")
 
     def code(s):
         return f"`{s}`"
@@ -903,13 +906,16 @@ def render_markdown(rec, sink=None, bare_video=False):
     for c in rec["claims"]:
         v = verdict(c, rec) + (f": {c['unverified']}" if c["unverified"] else "")
         to = delegate(c)
-        ev = cell(handed(to, code)) if to else "<br>".join(cell(summarize(e)) for e in c["evidence"]) or "—"
+        seen = Counter(summarize(e) for e in c["evidence"])
+        ev = cell(handed(to, code)) if to else "<br>".join(cell(s) + (f" ×{n}" if n > 1 else "") for s, n in seen.items()) or "—"
         unit = f" {cell(c.get('unit') or '—')} |" if units else ""
         out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
     for c in rec["claims"]:
         if not c["evidence"] and not c["files"]:
             continue
-        out += ["", f"**{c['id']}**: {c['text']}"]
+        # GitHub folds each claim's evidence into a dropdown; the table above is the summary
+        out += ["", f"<details><summary><b>{c['id']}</b>: {html.escape(c['text'])}</summary>"] if github else \
+            ["", f"**{c['id']}**: {c['text']}"]
         for e in c["evidence"]:
             out += ["", f"- {summarize(e, full=True)} · {evidence_meta(e, code)}"]
             if e.get("excerpt"):
@@ -919,12 +925,14 @@ def render_markdown(rec, sink=None, bare_video=False):
             url = f["uploads"].get(sink)
             if url and f["type"] == "image":
                 out += ["", f"![{name}]({url})"]
-            elif url and f["type"] == "video" and bare_video:  # alone on a line, GitHub renders a player
+            elif url and f["type"] == "video" and github:  # alone on a line, GitHub renders a player
                 out += ["", url]
             elif url:
                 out += ["", f"[{f['type']}: {name}]({url})"]
             else:
                 out += ["", f"- {f['type']}: `{name}` (sha256 `{f['sha256'][:12]}`, not uploaded)"]
+        if github:
+            out += ["", "</details>"]
     out += ["", f"`kip-receipt {rec['id']}`"]
     return "\n".join(out)
 
@@ -971,7 +979,7 @@ def render_github(rec, sink=None):
     """Markdown plus a hidden line CI reads (`check --pr`): the run and what blocks a PR."""
     gate = json.dumps({"run": rec["id"], "head": rec.get("head"), "blocking": blocking(rec, pr=True)},
                       ensure_ascii=False)
-    return render_markdown(rec, sink, bare_video=True) + "\n\n<!-- kip-gate " + gate.replace(">", "\\u003e") + " -->"
+    return render_markdown(rec, sink, github=True) + "\n\n<!-- kip-gate " + gate.replace(">", "\\u003e") + " -->"
 
 
 RENDERERS = {"markdown": render_markdown, "jira": render_jira, "github": render_github}
