@@ -873,7 +873,7 @@ def main():
         fsh("git", "commit", "-qam", "seven")
         assert "has run" in check("--hook", "start", event={"session_id": "f6", "cwd": str(fin)}, cwd=fin)[1]
         assert frc("orphan", "--reason", "went another way").startswith("orphaned ")
-        assert json.loads(frc("json"))["orphaned"]["reason"] == "went another way"
+        assert json.loads(frc("json"))["orphaned"] | {"at": None} == {"at": None, "reason": "went another way", "via": "manual"}
         assert check("--hook", "start", event={"session_id": "f7", "cwd": str(fin)}, cwd=fin) == (0, "")
         code, out = check("--hook", "pr", event=pr_event, cwd=fin)
         assert code == 2 and "no receipts run" in out, out
@@ -927,6 +927,8 @@ def main():
                          "still-open": "open", "no-commits": "open", "in-a-worktree": "open", "late-merged": "finished",
                          "legacy-late": "finished"}, (state, out)
         assert f"orphaned {swept['dropped']} (dropped: branch gone)" in out, out
+        assert [run_json(swept[n])[k]["via"] for n, k in (("kept-merged", "finished"), ("dropped", "orphaned"))] == \
+            ["merged", "branch gone"]
         assert frc("sweep") == "", "a second sweep changed something"
         # The gate on its own branch finishes a run started after the branch's last commit, once that's merged.
         fsh("git", "checkout", "-q", "-b", "late-gate", base)
@@ -937,7 +939,7 @@ def main():
         fsh("git", "checkout", "-q", base)
         fsh("git", "merge", "-q", "--no-ff", "late-gate", "-m", "merge late-gate")
         fsh("git", "checkout", "-q", "late-gate")
-        assert "is finished" in check("--hook", "stop", event={}, cwd=fin)[1] and run_json(late_gate).get("finished")
+        assert "is finished" in check("--hook", "stop", event={}, cwd=fin)[1] and run_json(late_gate)["finished"]["via"] == "checkout"
         fsh("git", "checkout", "-q", base)
         # Squash merges leave no ancestry, so on GitHub sweep asks gh which PRs merged: a kept branch whose tip
         # is a merged PR's head finishes, and so does a deleted one with a PR merged after its run started; a
@@ -959,13 +961,14 @@ def main():
         fsh("git", "branch", "-q", "-D", "squash-gone")
         fsh("git", "remote", "add", "origin", "https://github.com/me/fin.git")
         merged_prs = Path(tmp, "merged.json")
-        merged_prs.write_text(json.dumps([{"headRefName": n, "headRefOid": tips[n], "mergedAt": "2999-01-01T00:00:00Z"}
+        merged_prs.write_text(json.dumps([{"headRefName": n, "headRefOid": tips[n], "mergedAt": "2999-01-01T00:00:00Z", "number": 9}
                                           for n in squashed]))
         no_gh = {"PATH": f"{bin_}{os.pathsep}{env['PATH']}"}  # FAKE_MERGED_PRS unset: gh fails
         assert frc("sweep", extra_env=no_gh) == "", "settled squash merges without gh"
         out = frc("sweep", extra_env={**no_gh, "FAKE_MERGED_PRS": str(merged_prs)})
         state = {n: next((k for k in ("finished", "orphaned") if run_json(r).get(k)), "open") for n, r in squashed.items()}
         assert state == {"squash-kept": "finished", "squash-gone": "finished", "squash-moved": "open"}, (state, out)
+        assert run_json(squashed["squash-kept"])["finished"]["via"] == "pr #9"
         fsh("git", "remote", "remove", "origin")
         # A branch recreated under an old name doesn't inherit the old branch's run (one started before it was
         # created, on commits it lacks); sweep orphans that run. A run started on the new branch is its own.
@@ -977,10 +980,9 @@ def main():
         fsh("git", "branch", "-q", "-D", "reused")
         fsh("git", "checkout", "-q", "-b", "reused", base)
         assert "no receipt run for this branch" in frc("path", ok=False)
-        assert old not in check("--hook", "start", event={"session_id": "f11", "cwd": str(fin)}, cwd=fin)[1]
         out = frc("sweep")
         assert f"orphaned {old} (reused: branch recreated)" in out, out
-        assert run_json(old)["orphaned"]["reason"] == "its branch was recreated"
+        assert run_json(old)["orphaned"]["via"] == "branch recreated"
         assert Path(frc("init")).name == Path(frc("path")).name
         fsh("git", "checkout", "-q", base)
         # A worktree's runs belong to its repository, not its folder: sweeping the main checkout settles them
@@ -1007,6 +1009,20 @@ def main():
         server.terminate()
         server.wait()
         assert served["id"] == wt_run.name and served["finished"], served
+        # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
+        started = {}
+        for name in ("start-merged", "start-dropped"):
+            fsh("git", "checkout", "-q", "-b", name, base)
+            started[name] = Path(frc("init")).name
+            (fin / f"{name}.txt").write_text(name)
+            fsh("git", "add", ".")
+            fsh("git", "commit", "-qm", name)
+        fsh("git", "checkout", "-q", base)
+        fsh("git", "merge", "-q", "--no-ff", "start-merged", "-m", "merge start-merged")
+        fsh("git", "branch", "-q", "-D", "start-dropped")
+        check("--hook", "start", event={"session_id": "f12", "cwd": str(fin)}, cwd=fin)
+        assert run_json(started["start-merged"])["finished"]["via"] == "merged"
+        assert run_json(started["start-dropped"])["orphaned"]["via"] == "branch gone"
         # A session that merges its own verified branch into the base branch didn't change code there: the
         # merged branch's run (finished by the gate itself) covers those commits. A commit of its own still counts.
         merger = {"session_id": "f10", "cwd": str(fin)}

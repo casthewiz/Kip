@@ -544,7 +544,7 @@ def cmd_orphan(a):
     """Set a run aside whose work was abandoned: it leaves the dashboard and stops speaking for its branch."""
     with mutate(run_dir(a)) as rec:
         rec["orphaned"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                           "reason": a.reason}
+                           "reason": a.reason, "via": "manual"}
     print(f"orphaned {rec['id']}")
 
 
@@ -568,7 +568,7 @@ def settle(orphan=True):
             continue
         if orphan and git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") and not speaks_for(rec, branch):
             with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch was recreated"}
+                fresh["orphaned"] = {"at": now, "reason": "its branch was recreated", "via": "branch recreated"}
             yield f"orphaned {rid} ({branch}: branch recreated)"
             continue
         if branch == here:
@@ -585,29 +585,31 @@ def settle(orphan=True):
             bool(base and git("log", base, "--merges", "-1", "--format=%h", f"--grep=from [^ ]*/{re.escape(branch)}$"))
         asks_gh = not merged and github_url()  # squash merges leave no ancestry to find
         prs = merged_prs() if asks_gh else None
+        via = "merged"
         if prs:
             created = datetime.datetime.fromisoformat(rec["created_at"])
-            merged = any(head == tip if tip else datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) > created
-                         for head, at in prs.get(branch, []))
+            pr = next((n for head, at, n in prs.get(branch, [])
+                       if (head == tip if tip else datetime.datetime.fromisoformat(at.replace("Z", "+00:00")) > created)), None)
+            merged, via = bool(pr), f"pr #{pr}"
         if merged:
             with mutate(d) as fresh:
-                fresh["finished"] = {"at": now, "head": tip, "fingerprint": None}
+                fresh["finished"] = {"at": now, "head": tip, "fingerprint": None, "via": via}
             yield f"finished {rid} ({branch}: merged)"
         elif orphan and not tip and not (asks_gh and prs is None):  # on GitHub, only once gh has answered
             with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch is gone"}
+                fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
             yield f"orphaned {rid} ({branch}: branch gone)"
 
 
 @functools.lru_cache(maxsize=None)
 def merged_prs():
-    """{branch: [(head, mergedAt)]} for this repo's merged GitHub PRs, or None when gh can't say."""
+    """{branch: [(head, mergedAt, number)]} for this repo's merged GitHub PRs, or None when gh can't say."""
     try:
         r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--limit", "500", "--json",
-                            "headRefName,headRefOid,mergedAt"], capture_output=True, text=True, timeout=30)
+                            "headRefName,headRefOid,mergedAt,number"], capture_output=True, text=True, timeout=30)
         prs = {}
         for pr in json.loads(r.stdout) if r.returncode == 0 else None:
-            prs.setdefault(pr["headRefName"], []).append((pr["headRefOid"], pr["mergedAt"]))
+            prs.setdefault(pr["headRefName"], []).append((pr["headRefOid"], pr["mergedAt"], pr["number"]))
         return prs
     except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         return None
@@ -1024,7 +1026,7 @@ def finish_if_done(d, rec):
     if not landed(rec, head, base) or worktree_diff():
         return False
     rec["finished"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                       "head": head, "fingerprint": fingerprint()}
+                       "head": head, "fingerprint": fingerprint(), "via": "checkout"}
     with mutate(d) as fresh:
         fresh["finished"] = rec["finished"]
     return True
@@ -1098,6 +1100,7 @@ def run_status(hook):
         state = session_state()  # git runs outside the write lock
         with tx() as con:  # a resumed session keeps the state it first started from
             con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)", (repo_name(), session_id(hook), state))
+    list(settle())  # merged and deleted branches, so no one has to remember `sweep`
     d = branch_run()
     rec = load(d) if d else None
     if not rec or rec.get("finished") or rec.get("orphaned") or finish_if_done(d, rec):
