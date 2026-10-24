@@ -304,11 +304,17 @@ function segment(name, items, none) {
   return h("div", { class: "segment" }, h("h3", {}, name), items.length ? h("ul", {}, items) : h("p", { class: "none" }, none));
 }
 
-// What the session touched beyond the repo: the issues it's tied to, where its receipts go, what it read from outside.
+// What the session touched: the family of every run it saw or wrote, the worktrees it worked in, the issues it's tied
+// to, where its receipts go, and what it read from outside.
 function segments(r) {
   const sinks = new Map();
   for (const x of r.runs || []) for (const s of x.sinks) sinks.set(s.name + " " + (s.url || ""), s);
+  const families = new Set(runs.filter(x => (r.runs || []).some(y => y.id === x.id) || x.writers[r.session] || x.branch_only.includes(r.session))
+    .map(x => rootOf(x.id).id));
   return h("div", { class: "segments" },
+    families.size ? h("div", { class: "segment wide" }, h("h3", {}, "Family"), [...families].map(id => familyTree(id, { session: r.session }))) : null,
+    segment("Worktrees", (r.worktrees || []).map(w => h("li", { title: w.path }, w.linked ? treeChip(w.path, w.live)
+      : h("span", { class: "grow" }, "main checkout · " + w.path.split("/").pop()))), "No worktree recorded."),
     segment("Issues", (r.issues || []).map(i => h("li", {}, h("span", { class: "grow" }, i.key), h("span", { class: "n" }, "via " + i.via))),
       "No Linear, Jira or GitHub issue: no run publishes to one, and no tracker call named one."),
     segment("Sinks", [...sinks.values()].map(s => h("li", {}, h("span", { class: "grow" }, link(s.url, s.name)),
@@ -402,9 +408,10 @@ function renderDetail(full) {
 }
 
 async function refresh() {
+  const get = u => fetch(u).then(r => r.ok ? r.json() : null, () => null);  // one failing list never stalls the other
+  const [s, x] = await Promise.all([get("/api/sessions"), view === "runs" || selected ? get("/api/runs") : null]);
+  rows = s || rows; runs = x || runs;
   try {
-    rows = await (await fetch("/api/sessions")).json();
-    if (view === "runs") runs = await (await fetch("/api/runs")).json();
     renderList();
     if (view === "runs") renderRunDetail(); else if (selected) renderDetail();
   } catch (_) {}
@@ -416,6 +423,7 @@ async function select(id) {
   review = null;
   history.replaceState(null, "", "#session=" + encodeURIComponent(id));
   events = await (await fetch("/api/sessions/" + encodeURIComponent(id))).json();
+  if (!runs.length) runs = await (await fetch("/api/runs")).json();
   renderList();
   renderDetail(true);
   const r = rows.find(x => x.session === id), latest = r && r.run && r.run.split("/").pop();
@@ -450,12 +458,17 @@ function renderRuns() {
 
 const runLink = id => h("a", { href: "#run=" + encodeURIComponent(id), onclick: ev => { ev.preventDefault(); selectRun(id); } }, id);
 
+// The top of a run's family: its plan, as far up as kip.db has it.
+function rootOf(id) {
+  let x = runs.find(y => y.id === id);
+  while (x && runs.some(y => y.id === x.parent)) x = runs.find(y => y.id === x.parent);
+  return x;
+}
+
 // A run's family as a tree: the top of its plan, its unit runs under it, and under each run the sessions that wrote it
 // and, dashed, those that only shared its branch. `current` ({ run: id } or { session: id }) is highlighted.
 function familyTree(runId, current) {
-  const byId = new Map(runs.map(x => [x.id, x]));
-  let root = byId.get(runId);
-  while (root && byId.has(root.parent)) root = byId.get(root.parent);
+  const byId = new Map(runs.map(x => [x.id, x])), root = rootOf(runId);
   if (!root) return null;
   const node = (here, go, ...kids) => go ? h("button", { class: "node", "aria-current": here ? "true" : "false", onclick: go }, kids)
     : h("span", { class: "node" }, kids);
