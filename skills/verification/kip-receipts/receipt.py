@@ -1470,7 +1470,7 @@ def log_gate(event, hook, blocked, msg):
     try:
         d = branch_run()
         append_event(hook, hook=event, repo=repo_name(), github=github_url(), branch=git("branch", "--show-current"),
-                     run=str(d) if d else None, blocked=blocked, message=msg)
+                     worktree=here()[1], linked=linked(), run=str(d) if d else None, blocked=blocked, message=msg)
     except Exception:
         pass
 
@@ -1531,10 +1531,13 @@ def fold(rows, e):
         return None
     sid = str(e["session"])
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
+                              "worktree": None, "linked": False,
                               "runs": [], "skills": [], "blocked": 0, "pr": False, "stage": None, "reached": [],
                               "tool": None, "sources": {}, "issues": {}, "started_only": True})
     r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"], hook=e.get("hook"),
              started_only=r["started_only"] and e.get("hook") == "start")
+    if e.get("worktree"):  # where its last gate fired: a linked worktree, or the main checkout
+        r.update(worktree=e["worktree"], linked=bool(e.get("linked")))
     if e.get("run") and e["run"] not in r["runs"]:
         r["runs"].append(e["run"])
     found = [("link", url) for url in URL.findall(str(e.get("text") or ""))] if e.get("hook") == "prompt" else []
@@ -1593,6 +1596,7 @@ def run_detail(rec):
 
     return {**run_summary(rec), "commit": rec.get("commit"), "claims": [
         {"id": c["id"], "text": c["text"], "unit": c.get("unit"), "stage": c.get("stage"),
+         "delegated": delegate(c) and c["delegated"], "delegated_from": c.get("delegated_from"),
          "provider": c.get("provider") or "generic", "verdict": verdict(c, rec), "unverified": c.get("unverified"),
          "accepted": c.get("accepted"),
          "evidence": [{"id": e["id"], "label": e.get("label"), "summary": summarize(e, full=True), "passed": e.get("passed"),
@@ -1627,9 +1631,12 @@ def open_on_merged(rec):
 def triage(seen):
     """Every run as the Runs view lists it, newest first: its state and how it settled, its commits, who wrote it,
     which sessions only shared its branch when a hook fired (seen: run id -> session ids), and what looks wrong."""
-    out, newest = [], {}
+    out, newest, children = [], {}, {}
     for (rid,) in db().execute("SELECT id FROM runs ORDER BY created_at DESC, rowid DESC").fetchall():
         rec = load(rid)
+        summary = run_summary(rec)
+        wt = rec.get("worktree")
+        tree = wt and {"path": wt, "linked": wt != rec.get("checkout"), "live": Path(wt).is_dir()}
         settled = rec.get("orphaned") or rec.get("finished")
         state = "orphaned" if rec.get("orphaned") else "finished" if rec.get("finished") else "open"
         writers, unknown = {}, 0
@@ -1645,15 +1652,22 @@ def triage(seen):
             ("superseded by a newer run on its branch", state == "open" and key in newest),
             ("no writer recorded", not writers),
             ("sessions linked only by branch", branch_only),
-            ("settled before Kip recorded how", settled and "via" not in settled)) if on]
+            ("settled before Kip recorded how", settled and "via" not in settled),
+            ("its worktree was removed with work not merged", state == "open" and tree and tree["linked"] and not tree["live"]),
+            ("evidence served from another checkout", any(v.startswith("⚠️ served") for v in summary["claims"]))) if on]
         newest.setdefault(key, rid)
-        out.append({**run_summary(rec), "repo": rec["repo"], "created_at": rec.get("created_at"), "state": state,
+        if rec.get("parent"):
+            children.setdefault(rec["parent"], []).append(rid)
+        out.append({**summary, "repo": rec["repo"], "created_at": rec.get("created_at"), "state": state,
+                    "parent": rec.get("parent"), "unit": rec.get("unit"), "worktree": tree,
                     "via": settled and settled.get("via"), "reason": (rec.get("orphaned") or {}).get("reason"),
                     "commits": {"start": rec.get("commit"), "fork": rec.get("fork"), "published": rec.get("head"),
                                 "finished": (rec.get("finished") or {}).get("head")},
                     "units": sorted({str(c["unit"]) for c in rec["claims"] if c.get("unit")}),
                     "writers": writers, "unknown_writes": unknown, "branch_only": branch_only, "flags": flags,
                     "attention": state == "open" and bool(flags)})  # a settled run's flags are history
+    for x in out:
+        x["children"] = children.get(x["id"], [])
     return out
 
 

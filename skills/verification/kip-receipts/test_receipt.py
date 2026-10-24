@@ -1302,6 +1302,30 @@ def main():
         assert served_by(pol)[1] == "✅ verified"
         info, v = served_by(Path(tmp))
         assert info["cwd"] and info["checkout"] is None and v == "✅ verified", (info, v)
+        served_by(srv_wt)
+        # The dashboard: a session's row says which worktree its last gate fired in; /api/runs lists a plan's unit
+        # runs, each unit run its plan, unit and worktree (struck once removed), and flags a removed worktree with
+        # unmerged work and evidence served from another checkout; a delegated claim says where it went.
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert wait_until(lambda: listening(port), 10)
+        try:
+            listed = {x["id"]: x for x in json.loads(get(port, "/api/runs"))}
+            sessions = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
+            detail = json.loads(get(port, f"/api/runs/{plan_run}"))
+        finally:
+            server.terminate()
+            server.wait()
+        assert set(listed[plan_run]["children"]) == {child, child2, child3}, listed[plan_run]
+        unit = listed[child]
+        assert (unit["parent"], unit["unit"]) == (plan_run, "1") and unit["worktree"] == \
+            {"path": str(u1.resolve()), "linked": True, "live": False}, unit
+        assert "its worktree was removed with work not merged" in unit["flags"] and unit["attention"], unit
+        assert listed[plan_run]["worktree"]["linked"] is False, listed[plan_run]
+        assert "evidence served from another checkout" in listed[srv_run]["flags"], listed[srv_run]
+        assert detail["claims"][1]["delegated"] == {"run": child, "claim": "c2"} and detail["claims"][0]["delegated"] is None
+        assert (sessions["pol-s"]["worktree"], sessions["pol-s"]["linked"]) == (str(pol_wt.resolve()), True), sessions["pol-s"]
         sh("git", "worktree", "remove", "--force", str(srv_wt), cwd=pol)
         # A session's start settles what a sweep would, so merged and deleted branches need no manual sweep.
         started = {}
