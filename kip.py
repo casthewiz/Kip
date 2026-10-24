@@ -11,7 +11,9 @@
                                         (launchd or systemd) from a copy at ~/.kip/dashboard, which
                                         re-running install refreshes; KIP_DASHBOARD=0 skips it. A user
                                         install also adds git hooks to this repo that re-run it after a
-                                        commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them
+                                        commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them.
+                                        A user install refuses to run from a linked worktree
+                                        (KIP_INSTALL_FROM_WORKTREE=1 overrides)
   kip.py setup [--skip NAME]           one-time steps a person does (sign-ins, downloads) that aren't
                                         done yet, and how; sessions are reminded of them until done or skipped
   kip.py uninstall [--host NAME] [--project]
@@ -405,6 +407,14 @@ def git_hooks_dir():
     return None if r.returncode else ROOT / r.stdout.strip()
 
 
+def main_of_worktree():
+    """The main checkout's folder when this copy of Kip is a linked worktree of it, else None."""
+    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+                       capture_output=True, text=True)
+    git_dir, common = r.stdout.splitlines() if r.returncode == 0 else (None, None)
+    return Path(common).parent if git_dir != common else None
+
+
 def install_git_hooks(d):
     """Re-run install whenever the repo changes, so the copies (Cursor's rules, the dashboard) and links stay current."""
     d.mkdir(parents=True, exist_ok=True)
@@ -441,6 +451,11 @@ def uninstall_service():
 
 
 def cmd_install(a):
+    main = None if a.project else main_of_worktree()
+    if main and os.environ.get("KIP_INSTALL_FROM_WORKTREE") != "1":
+        sys.exit(f"kip install: {ROOT} is a linked worktree; hooks, ~/.kip/kip and the dashboard would point at a "
+                 f"folder that goes when it's removed. Install from the main checkout: python3 {main / 'kip.py'} install "
+                 "(KIP_INSTALL_FROM_WORKTREE=1 installs from here anyway)")
     selected, top = hosts(a)
     if a.conversation is not None:
         save_conversation(top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json", a.conversation)

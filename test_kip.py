@@ -2,6 +2,7 @@
 """Self-check for kip.py (config layers, doctor, install): python3 test_kip.py"""
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -22,6 +23,7 @@ def main():
         env["HOME"] = str(home)
         env["KIP_DASHBOARD"] = "0"  # never load a real login service from a test
         env["KIP_GIT_HOOKS"] = "0"  # nor touch this checkout's git hooks
+        env["KIP_INSTALL_FROM_WORKTREE"] = "1"  # this checkout may itself be a linked worktree
 
         def kip(*args, ok=True, **extra):
             r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=repo, env={**env, **extra},
@@ -71,6 +73,21 @@ def main():
             write(repo / ".kip" / "config.json", bad)
             assert msg in kip("doctor", ok=False), msg
         (repo / ".kip" / "config.json").unlink()
+
+        # A user install from a linked worktree is refused: what it links would go when the worktree is removed.
+        clone, linked = Path(tmp, "kip-clone"), Path(tmp, "kip-linked")
+        clone.mkdir()
+        for name in ("kip.py", "defaults.json", "rules", "skills"):
+            src = ROOT / name
+            (shutil.copytree if src.is_dir() else shutil.copy2)(src, clone / name)
+        for cmd in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "kip"],
+                    ["worktree", "add", "-q", "--detach", str(linked)]):
+            subprocess.run(["git", *cmd], cwd=clone, check=True, capture_output=True)
+        unset = {k: v for k, v in env.items() if k != "KIP_INSTALL_FROM_WORKTREE"}
+        r = subprocess.run([sys.executable, str(linked / "kip.py"), "install"], cwd=repo, env=unset,
+                           capture_output=True, text=True)
+        assert r.returncode == 1 and "is a linked worktree" in r.stderr and str(clone.resolve() / "kip.py") in r.stderr, r
+        assert not (home / ".kip" / "kip").exists(), "a refused install linked something"
 
         # Install: detected hosts only, every skill linked, rules imported once, idempotent.
         skills = sorted(p.parent.name for p in (ROOT / "skills").rglob("SKILL.md"))
