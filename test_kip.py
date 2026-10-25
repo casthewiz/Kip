@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Self-check for kip.py (config layers, doctor, install): python3 test_kip.py"""
+import ast
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -12,9 +14,41 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
+GLOSSARY = ROOT / "docs" / "glossary.md"
+
+
+def glossary_terms():
+    """Every term defined in code that docs/glossary.md must name, as the text it must contain."""
+    def choices(script, *args):  # argparse's "{a,b,c}" usage line, so the CLI itself is the source
+        out = subprocess.run([sys.executable, str(script), *args, "--help"], capture_output=True, text=True).stdout
+        return re.search(r"\{([\w,-]+)\}", out).group(1).split(",")
+
+    tree = ast.parse(RECEIPT.read_text())
+    stages = next(ast.literal_eval(n.value) for n in tree.body
+                  if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) == "STAGES")
+    verdicts = set()
+    for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("verdict", "rerun_note")):
+        for r in (n for n in ast.walk(fn) if isinstance(n, ast.Return)):
+            head = r.value.values[0] if isinstance(r.value, ast.JoinedStr) else r.value
+            if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                verdicts.add(re.split(r"[:;]", head.value.lstrip("✅❌⚠️ "))[0].strip())
+    defaults = json.loads((ROOT / "defaults.json").read_text())
+    return ([f"`receipt.py {c}" for c in choices(RECEIPT)] + [f"`kip.py {c}" for c in choices(ROOT / "kip.py")] +
+            [f"`{m}`" for m in choices(RECEIPT, "check")] + [f"**{s}**" for s in stages] +
+            [f"**{v}**" for v in verdicts if v] + [f"`{k}`" for k in defaults] +
+            [f"`workflow.{k}`" for k in defaults["workflow"]])
+
+
+def check_glossary():
+    text = GLOSSARY.read_text()
+    missing = [t for t in glossary_terms() if t not in text]
+    assert not missing, f"docs/glossary.md is missing: {missing}"
+    broken = [l for l in re.findall(r"\]\(([^)#:]+)[)#]", text) if not (GLOSSARY.parent / l).exists()]
+    assert not broken, f"docs/glossary.md links to missing files: {broken}"
 
 
 def main():
+    check_glossary()
     with tempfile.TemporaryDirectory() as tmp:
         home, repo = Path(tmp, "home"), Path(tmp, "repo")
         (home / ".claude").mkdir(parents=True)

@@ -65,6 +65,7 @@ Plus always-on [rules](rules/user-rules.md) that tie them together.
 - [Receipts](docs/receipts.md): the gate, storage, and CI
 - [Dashboard](docs/dashboard.md): the session log and live dashboard
 - [Configuration](docs/configuration.md): surfaces and layered config
+- [Glossary](docs/glossary.md): every Kip term in one place
 
 ## License
 

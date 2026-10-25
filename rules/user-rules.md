@@ -27,3 +27,9 @@ Anything you believe you accomplished is a claim until evidence settles it. Evid
 ## Implementation workflow
 
 Start every code change with the `/kip-decompose` skill (lite for a small change) to understand the problem and break it into units of work; its claims carry through to `/kip-receipts`. Unless the change is trivial, follow the `/kip-messy-bun` skill for the implementation itself. Before considering the task "done", run a pass using the `/kip-marie-kondo` skill over the changes made in this session (comments, duplication, dead code, unnecessary indirection), then a review pass for correctness bugs (the host's `/code-review` when it has one, otherwise read the branch diff for bugs yourself), then finish with the `/kip-receipts` skill: list every claim about the work and back each one with evidence at the current thoroughness level. The tidy and review passes are recorded as claims with `--stage tidy` and `--stage review`; a PR is blocked until each stage has one. Where the host supports hooks, edits wait for `/kip-decompose` (with one nudge toward `/kip-messy-bun`), and a turn that changed code can't end until `/kip-marie-kondo` has run.
+
+---
+
+## Kip terms
+
+When a Kip term is unclear (run, claim, verdict, stage, sink, settled, orphaned, …), look it up in `~/.kip/kip/docs/glossary.md` before guessing. When you add or rename one, update the glossary in the same change.
