@@ -14,7 +14,7 @@ claims, evidence the code has since outgrown, or failing
 [required checks](../skills/verification/kip-receipts/SKILL.md#required-checks),
 or without a receipts run, or open a PR with refuted claims or without its
 tidy and review [stages](../skills/verification/kip-receipts/SKILL.md#stages).
-Edits wait for `kip-decompose`, with one nudge toward `kip-messy-bun`, and a
+Edits wait for `kip-decompose` and `kip-messy-bun`, and a
 turn that changed code can't end before `kip-marie-kondo`
 ([`workflow.skills`](configuration.md)); Cursor has no hook before an edit, so
 there only the stop holds it.
