@@ -1659,8 +1659,9 @@ def fold(rows, e):
                               "worktree": None, "linked": False, "worktrees": {},
                               "runs": [], "skills": [], "blocked": 0, "pr": False, "stage": None, "reached": [],
                               "tool": None, "sources": {}, "issues": {}, "started_only": True})
-    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"], hook=e.get("hook"),
-             started_only=r["started_only"] and e.get("hook") == "start")
+    late = e.get("hook") == "response" and r.get("hook") == "stop"  # Cursor's reply can land just after its stop
+    r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"],
+             hook="stop" if late else e.get("hook"), started_only=r["started_only"] and e.get("hook") == "start")
     if e.get("worktree"):  # where its last gate fired: a linked worktree, or the main checkout
         r.update(worktree=e["worktree"], linked=bool(e.get("linked")))
         r["worktrees"].setdefault(e["worktree"], r["linked"])  # and every one it fired in, first seen first

@@ -601,6 +601,7 @@ def main():
         assert json.loads(lines()[-1])["text"] == "Done, key [MY_API_KEY].", lines()[-1]
         check("--hook", "stop", event={**k2, "status": "completed"})
         assert json.loads(lines()[-1])["hook"] == "stop", "Cursor's stop logged a reply it doesn't carry"
+        check("--hook", "response", event={**k2, "text": "A reply that lands after the stop."})
         check("--hook", "stop", event={"session_id": "p1", "cwd": str(repo), "last_assistant_message": "All set."})
         assert [(e["hook"], e.get("text")) for e in map(json.loads, lines()[-2:])] == \
             [("response", "All set."), ("stop", None)], lines()[-2:]
@@ -612,6 +613,7 @@ def main():
         server.terminate()
         assert rows["p1"]["skills"] == ["kip-decompose", "my-skill"] and rows["p1"]["stage"] == "implement", rows["p1"]
         assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo", rows
+        assert rows["k2"]["hook"] == "stop", "a reply landing after Cursor's stop put it back mid-turn"
         assert "cursor-session" not in rows and "k0" not in rows, rows
         assert rows["k2"]["skills"] == ["kip-marie-kondo", "kip-receipts"] and rows["k2"]["stage"] == "receipts", rows["k2"]
         assert rows["k2"]["tool"] == "Read: /u/.cursor/skills/kip-receipts/SKILL.md", rows["k2"]
