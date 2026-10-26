@@ -1656,13 +1656,14 @@ def fold(rows, e):
         return None
     sid = str(e["session"])
     r = rows.setdefault(sid, {"session": sid, "host": None, "repo": None, "github": None, "branch": None, "run": None,
-                              "worktree": None, "linked": False,
+                              "worktree": None, "linked": False, "worktrees": {},
                               "runs": [], "skills": [], "blocked": 0, "pr": False, "stage": None, "reached": [],
                               "tool": None, "sources": {}, "issues": {}, "started_only": True})
     r.update({k: e[k] for k in ("host", "repo", "github", "branch", "run") if e.get(k)}, last=e["at"], hook=e.get("hook"),
              started_only=r["started_only"] and e.get("hook") == "start")
     if e.get("worktree"):  # where its last gate fired: a linked worktree, or the main checkout
         r.update(worktree=e["worktree"], linked=bool(e.get("linked")))
+        r["worktrees"].setdefault(e["worktree"], r["linked"])  # and every one it fired in, first seen first
     if e.get("run") and e["run"] not in r["runs"]:
         r["runs"].append(e["run"])
     found = [("link", url) for url in URL.findall(str(e.get("text") or ""))] if e.get("hook") == "prompt" else []
@@ -1828,6 +1829,7 @@ def finish(rows):
         out.append({**r, "active": now - datetime.datetime.fromisoformat(r["last"]) < ACTIVE, "open": open_,
                     "reached": sorted(set(r["reached"]) | claimed, key=STAGES.index),
                     "runs": [run_summary(x) for x in recs], "issues": list(issues.values()),
+                    "worktrees": [{"path": p, "linked": ln, "live": Path(p).is_dir()} for p, ln in r["worktrees"].items()],
                     "sources": sorted(r["sources"].values(), key=lambda s: s["last"], reverse=True)})
     return sorted(out, key=lambda r: r["last"], reverse=True)
 

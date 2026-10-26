@@ -1445,6 +1445,8 @@ def main():
         assert "evidence served from another checkout" in listed[srv_run]["flags"], listed[srv_run]
         assert detail["claims"][1]["delegated"] == {"run": child, "claim": "c2"} and detail["claims"][0]["delegated"] is None
         assert (sessions["pol-s"]["worktree"], sessions["pol-s"]["linked"]) == (str(pol_wt.resolve()), True), sessions["pol-s"]
+        assert sessions["pol-s"]["worktrees"] == [{"path": str(pol.resolve()), "linked": False, "live": True},
+                                                  {"path": str(pol_wt.resolve()), "linked": True, "live": False}], sessions["pol-s"]
         sh("git", "worktree", "remove", "--force", str(srv_wt), cwd=pol)
         # SubagentStop: a subagent in a worktree of its own (Claude Code's agent-<agent_id>) is gated like a session
         # there: changed code needs a run on its branch, then its claims addressed. One sharing its parent's checkout,

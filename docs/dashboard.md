@@ -37,6 +37,10 @@ working mid-turn, waiting on you, celebrating a finished run, or rained on when 
 gate blocked its stop. A session's page
 splits what it touched into segments:
 
+- **Family**: a tree for each run family the session wrote to or shared a branch
+  with (see [Runs](#runs)), with the session highlighted wherever it appears.
+- **Worktrees**: every checkout its gates fired in, the main one by name and linked
+  ones struck through once their folder is removed.
 - **Issues**: the Linear, Jira or GitHub issue its runs publish to, and issue keys its
   Linear, Jira, Atlassian or GitHub MCP calls named.
 - **Sinks**: where each run's receipts go, linked once published.
@@ -55,14 +59,17 @@ state too: celebrating once it's finished, rained on while a claim fails,
 asking while a claim is unverified and not accepted, working while a session
 that wrote to it is mid-turn, waiting otherwise and once orphaned. A run's page shows the
 commits it covers (where it started, where its branch left the base branch,
-where it was published and finished), the sessions that wrote to it, the
-sessions that only shared its branch when a hook fired, and its claims grouped
+where it was published and finished), its family tree, and its claims grouped
 by `kip-decompose` unit.
 
 A plan's unit runs are listed right under it, each with its unit and the
 [worktree](receipts.md#worktrees) it started in (struck through once that
-folder is removed); a run's page names its plan or lists its unit runs, and a
-delegated claim links to the run that took it. A session's row shows the
+folder is removed), and a delegated claim links to the run that took it. A
+run's page draws its whole family as a tree: the plan at the root, its unit
+runs beneath, and under each run the sessions that wrote to it (with how many
+writes) and, dashed, those that only shared its branch when a hook fired. Every
+node shows Kip's mood, and runs their state, worktree and claims; the run you're
+on is highlighted, and any node opens its own page. A session's row shows the
 worktree its last gate fired in, when that isn't the main checkout.
 
 Sessions settle only the repo they start in, so the dashboard also runs
