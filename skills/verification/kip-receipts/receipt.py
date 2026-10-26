@@ -1251,7 +1251,7 @@ def edit_gate(hook):
 
 
 ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",
-       "implement": "`/kip-messy-bun` (a nudge, once a session: skip it if the change is trivial)",
+       "implement": "`/kip-messy-bun` (lite is enough for a small change)",
        "tidy": "`/kip-marie-kondo` over this session's changes"}
 
 

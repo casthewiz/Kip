@@ -1372,6 +1372,18 @@ def main():
         check("--hook", "end", event=sk)
         assert "/kip-messy-bun" in edit(pol / "a.py", "sk")[1], "a session's end didn't forget its skill nudges"
         assert "/kip-messy-bun" not in edit(pol / "a.py", "sk3")[1], "a session's end forgot another session's nudges"
+        # By default (no home config nulling the gates) kip-messy-bun is required, not a nudge: every edit waits for
+        # it until the session uses it.
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
+        def edit_default(sid):
+            return check("--hook", "edit", event={"session_id": sid, "cwd": str(pol), "tool_name": "Write",
+                                                  "tool_input": {"file_path": str(pol / "a.py")}},
+                         cwd=pol, extra_env={"KIP_HOME": str(Path(tmp, "home-defaults"))})
+        used("sk5", "Skill", "kip-decompose")
+        assert "/kip-messy-bun" in edit_default("sk5")[1]
+        assert "/kip-messy-bun" in edit_default("sk5")[1], "kip-messy-bun was only a nudge by default"
+        used("sk5", "Skill", "kip-messy-bun")
+        assert edit_default("sk5") == (0, "")
         (pol / ".kip" / "config.json").write_text('{"workflow": {"skills": {"tidy": "sometimes"}}}')
         assert "workflow.skills must map" in edit(pol / "a.py", "sk4")[1]
         (pol / "tidy-me.txt").unlink()
