@@ -1561,7 +1561,14 @@ def append_event(payload, **fields):
 def log_tool(hook, kind="tool"):
     """A tool call, or Claude Code asking to approve one: its name and a short, redacted line of what it was asked
     to do. No git: this runs on every call."""
+    if str(hook.get("tool_name")).startswith("MCP:"):  # Cursor's preToolUse has no server; beforeMCPExecution logs it
+        return
     ti = hook.get("tool_input")
+    if isinstance(ti, str):  # Cursor's beforeMCPExecution sends it as JSON text
+        try:
+            ti = json.loads(ti)
+        except ValueError:
+            pass
     ti = ti if isinstance(ti, dict) else {}
     what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
                  if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
@@ -2124,6 +2131,8 @@ def cmd_check(a):
         log_said(hook, "response", hook.get("last_assistant_message"))
     if a.hook and (a.hook != "pr" or opens_pr(hook)) and (a.hook != "edit" or blocked):  # the tool hook logs the rest
         log_gate(a.hook, hook, blocked, msg)
+    if a.hook == "pr" and isinstance(hook, dict) and hook.get("mcp_server_name"):
+        log_tool({**hook, "tool_name": f"mcp__{hook['mcp_server_name']}__{hook.get('tool_name')}"})
     if a.hook == "start":
         try:
             ensure_server()
