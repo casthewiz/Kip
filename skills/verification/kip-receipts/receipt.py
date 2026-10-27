@@ -1251,10 +1251,6 @@ def edit_gate(hook):
     return with_due(skills_due(hook, ("decompose", "implement")), blocked, msg)
 
 
-ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",
-       "implement": "`/kip-messy-bun` (lite is enough for a small change)",
-       "tidy": "`/kip-marie-kondo` over this session's changes"}
-
 
 def session_skills(sid):
     """The skills a session has used, from the event log."""
@@ -1293,7 +1289,7 @@ def skills_due(hook, stages):
     for s in due:
         if policy[s] == "nudge":
             nudge_once(f"{sid}.{s}")
-    return f"kip: run {' and '.join(ASK[s] for s in due)} first (workflow.skills)." if due else ""
+    return f"kip: run {' and '.join(kip.ASK[s] for s in due)} first (workflow.skills)." if due else ""
 
 
 def with_due(due, blocked, msg):
@@ -1860,7 +1856,7 @@ def cmd_serve(a):
     import queue
     import threading
     import time
-    page = Path(__file__).resolve().with_name("dashboard.html").read_text()
+    page = Path(__file__).resolve().with_name("dashboard.html").read_text().replace("__STAGES__", json.dumps(STAGES))
     MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree

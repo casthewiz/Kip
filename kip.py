@@ -56,6 +56,9 @@ GIT_HOOK = f"#!/bin/sh\n# kip: re-sync every host after this repo changes\npytho
 SURFACES = ("hosts", "connectors", "evidence", "destinations", "setup")
 CONNECTOR_KINDS = ("mcp", "tool")
 POLICIES = ("off", "nudge", "required")
+ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",  # workflow.skills' stages, as a gate asks
+       "implement": "`/kip-messy-bun` (lite is enough for a small change)",
+       "tidy": "`/kip-marie-kondo` over this session's changes"}
 RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\n(.*?)\n<!-- /kip rules -->\n?", re.S)  # Kip's block in a rules value
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 
@@ -128,9 +131,8 @@ def validate(cfg):
     if cfg.get("workflow", {}).get("worktrees", "nudge") not in POLICIES:
         sys.exit("workflow.worktrees must be off, nudge or required")
     skills = cfg.get("workflow", {}).get("skills", {})
-    if not (isinstance(skills, dict) and set(skills) <= {"decompose", "implement", "tidy"}
-            and all(v in POLICIES for v in skills.values())):
-        sys.exit("workflow.skills must map decompose, implement or tidy to off, nudge or required")
+    if not (isinstance(skills, dict) and set(skills) <= set(ASK) and all(v in POLICIES for v in skills.values())):
+        sys.exit(f"workflow.skills must map {', '.join(ASK)} to off, nudge or required")
     worktree = cfg.get("workflow", {}).get("worktree", {})
     if not isinstance(worktree, dict):
         sys.exit("workflow.worktree must be an object, like {\"setup\": \"npm ci\"}")
