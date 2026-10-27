@@ -48,6 +48,8 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **claim**: one falsifiable statement of done-ness, written before gathering evidence. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#claims)
 - **evidence**: a deterministic, rerunnable check plus its observed output. Strongest to weakest: behavior shown to fail without the change, behavior, static, presence. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#evidence)
 - **check**: the command behind evidence; runs of the same command in the same directory are one check, and its latest run decides it. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#verdicts)
+- **fix loop**: what a claim's failed run opens: each rerun of that check, or a corrected command (`run --replace`), is an **attempt** that supersedes the one before; after `workflow.loop`'s attempts or minutes it **closes**, refusing runs until a person reopens it. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#fix-loops)
+- **superseded**: an earlier attempt in a fix loop; it stays in the record and the ledger but no longer decides the verdict.
 - **observation**: evidence that is the agent's account (`receipt.py observe`), for checks with no command equivalent such as a browser pane.
 - **attachment**: a screenshot, video, trace, or log on a claim (`receipt.py attach`, or `run --collect`).
 - **ledger**: the rendered table of claims, verdicts, and evidence (`receipt.py render`), posted verbatim by every sink.
@@ -106,6 +108,7 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
   - `workflow.checks`: required check commands.
   - `workflow.worktrees`: how hard edits are steered off a main checkout (`nudge`, `required`, `off`).
   - `workflow.skills`: which workflow skills the gate holds a session to (`decompose`, `implement`, `tidy`).
+  - `workflow.loop`: a fix loop's bound, `attempts` and wall-clock `minutes` from the first failure (default 3 and 10).
   - `workflow.worktree.setup`: a command run in each new `kip.py worktree new` worktree.
 - `dashboard`: `dashboard.conversation`, whether the session log keeps prompts and replies.
 - `requires`: what a surface needs (`env`, `cmd`, `file`), checked by doctor.
@@ -136,11 +139,12 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
 
 - `receipt.py init`: start a run (`--level`, `--sink`, `--issue`, `--target`, `--parent`, `--unit`).
 - `receipt.py claim`: add a claim (`--provider`, `--level`, `--unit`, `--stage`).
-- `receipt.py run`: run a check as evidence for claims (`--red`, `--static`, `--collect`).
+- `receipt.py run`: run a check as evidence for claims (`--red`, `--static`, `--collect`, `--replace`).
 - `receipt.py observe`: record an observation (`--passed` / `--failed`).
 - `receipt.py attach`: attach a file to a claim.
 - `receipt.py unverified`: mark a claim unverified with a reason.
 - `receipt.py accept`: accept an unverified claim.
+- `receipt.py reopen`: a person reopens a claim's closed fix loop.
 - `receipt.py orphan`: set the run aside.
 - `receipt.py sweep`: settle the repo's leftover runs.
 - `receipt.py render`: print the ledger (`--sink` for one sink's markup).

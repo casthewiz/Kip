@@ -32,7 +32,10 @@ the gate holds a session to, each `required`, `nudge` (once a session) or
 `off`: `decompose` (`kip-decompose`) and `implement` (`kip-messy-bun`) before
 its first edit in a repo, `decompose` and `tidy` (`kip-marie-kondo`) before a
 stop once it changed code (default `required` for all three). A skill
-counts once the session calls it or reads its `SKILL.md`. `workflow.worktree.setup`: a command
+counts once the session calls it or reads its `SKILL.md`. `workflow.loop`: how long a claim's [fix loop](../skills/verification/kip-receipts/SKILL.md#fix-loops)
+runs before it goes to a person: `attempts` after the first failure and
+`minutes` of wall-clock time since it (default `{"attempts": 3, "minutes": 10}`).
+`workflow.worktree.setup`: a command
 `kip.py worktree new` runs in each new worktree (say `npm ci`), after copying
 the gitignored files `.worktreeinclude` names. And `dashboard.conversation`:
 whether the session log keeps prompts and replies (default `true`).

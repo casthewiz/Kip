@@ -78,7 +78,7 @@
     "github-issue": {"type": "github-issue", "requires": {"cmd": ["gh"]}}
   },
   "default_destination": "local",
-  "workflow": {"stages": ["tidy", "review"], "checks": {}, "worktrees": "nudge",
+  "workflow": {"stages": ["tidy", "review"], "checks": {}, "worktrees": "nudge", "loop": {"attempts": 3, "minutes": 10},
                "skills": {"decompose": "required", "implement": "required", "tidy": "required"}},
   "dashboard": {"conversation": true},
   "setup": {

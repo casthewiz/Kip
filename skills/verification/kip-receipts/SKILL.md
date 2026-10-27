@@ -240,8 +240,9 @@ it stays ⚠️ self-reported.
 `receipt.py` assigns every claim exactly one:
 
 - ✅ **verified**: all evidence passed.
-- ❌ **refuted**: a check on the new code failed. Fix it and re-run, or
-  report it plainly. Never quietly drop a refuted claim.
+- ❌ **refuted**: a check on the new code failed. Fix it within its
+  [fix loop](#fix-loops), or report it plainly. Never quietly drop a refuted
+  claim.
 - ❌ **check can't fail**: a `--red` run passed, so the check proves nothing.
   Write a check that would fail without the change.
 - ⚠️ **unverified**: no evidence, or marked `unverified` with a reason (needs
@@ -272,8 +273,32 @@ worktree's changes never make another worktree's evidence stale.
 and its latest run decides it. A failure clears only when that same check,
 unchanged, passes on code that changed since it failed. That is a fix, and
 red-then-green also shows the check can fail, so it counts as falsifiability
-at ultra. Adding a different passing check never clears a failing one. Every
-earlier run stays in the record. New evidence replaces an `unverified` note.
+at ultra. Adding a different passing check never clears a failing one,
+unless it replaces it in a fix loop. Every earlier run stays in the record.
+New evidence replaces an `unverified` note.
+
+### Fix loops
+
+A claim's failed `run` opens a fix loop on that check. Find out whether the
+check or the code is wrong, fix that, and run again: each rerun of the check
+is an attempt, and so is a corrected command run with `--replace` (a command
+line passed as one program name, a script fixed under another name). The
+latest attempt decides; earlier ones stay in the ledger, marked superseded.
+
+- A check whose own files changed, or a replacement command, still has to
+  show it fails without the fix (`--red`), at every level. The one exception
+  is a replaced run that never started (exit 126 or 127): it tested nothing.
+- The loop gets 3 attempts and 10 minutes of wall-clock time from the first
+  failure (`workflow.loop`). The stop gate holds you to an open loop and says
+  what's left.
+- When the last attempt fails or the time is up, the loop closes: the claim
+  stays ❌ refuted, its verdict says the loop closed, and `run` refuses it.
+  Stop and hand it to the user with what you tried; only they reopen it
+  (`receipt.py reopen CLAIM`, from their own terminal), which starts a fresh
+  loop. `reopen` refuses a Claude Code agent's shell; on other hosts, never
+  run it yourself.
+- Other checks on the claim (another viewport, another test) are ordinary
+  evidence, not attempts, and never supersede the failing one.
 
 An unverified claim is never reported as done. "Should work" is ⚠️.
 
