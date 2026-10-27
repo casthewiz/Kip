@@ -399,10 +399,14 @@ or `unverified` is refused. Until it's ✅ on the current code, it blocks stop a
 ## Gate
 
 `kip.py install` wires `receipt.py check` into each host's hooks (Claude
-Code: `SessionStart`, `Stop` and `PreToolUse` on Bash and PR-opening MCP
-tools; Cursor: `sessionStart`, `stop`, `beforeShellExecution` and
-`beforeMCPExecution`). Each branch has its own runs; commands
-default to the latest run on the current branch.
+Code: `SessionStart`, `Stop`, `SubagentStop`, and `PreToolUse` on Bash and
+PR-opening MCP tools and on `Edit|MultiEdit|Write|NotebookEdit`; Cursor:
+`sessionStart`, `stop`, `beforeShellExecution` and `beforeMCPExecution`).
+The rest only log for the dashboard and never block: Claude Code's
+`PreToolUse` on `*`, `PermissionRequest`, `UserPromptSubmit` and
+`SessionEnd`; Cursor's `afterFileEdit`, `preToolUse`, `beforeSubmitPrompt`
+and `afterAgentResponse`. Each branch has its own runs; commands default to
+the latest run on the current branch.
 
 - **Session start**: the session is told where this branch's run stands,
   and the code as the session found it is remembered.

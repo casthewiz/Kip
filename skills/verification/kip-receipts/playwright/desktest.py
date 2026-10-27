@@ -32,8 +32,7 @@ import kip  # noqa: E402
 HERE = Path(__file__).resolve().parent
 RECEIPT = HERE.parent / "receipt.py"
 CONFIG = HERE / "kip.config.mjs"
-KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
-PW_CLI = KIP_HOME / "node_modules" / "@playwright" / "test" / "cli.js"
+PW_CLI = kip.KIP_HOME / "node_modules" / "@playwright" / "test" / "cli.js"
 NODE_VERSION = (HERE / ".nvmrc").read_text().strip()
 SETUP = f"run `bash {HERE / 'setup.sh'}` once"
 
@@ -110,7 +109,7 @@ def main():
             # NODE_PATH lets specs anywhere (e.g. a custom $KIP_RECEIPTS_DIR) import Kip's @playwright/test.
             vp_json = json.dumps({vp: configured[vp]}, separators=(",", ":"))
             cmd = ["env", f"BASE_URL={a.url}", f"KIP_VIEWPORTS={vp_json}", f"KIP_LEVEL={level}",
-                   f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={KIP_HOME / 'node_modules'}",
+                   f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={kip.KIP_HOME / 'node_modules'}",
                    *pw, "test", str(spec), "--config", str(CONFIG), f"--project={vp}"]
             r = subprocess.run([sys.executable, str(RECEIPT), "run", a.claim, *run_args,
                                 *(["--red"] if a.red else []), "--collect", out,

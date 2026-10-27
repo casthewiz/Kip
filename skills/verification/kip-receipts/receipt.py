@@ -114,11 +114,7 @@ def load_sink(name):
     sys.exit(f"no sink module {module} for {name}; available: {', '.join(sink_names())}")
 
 
-def main_checkout():
-    """The main checkout's folder, from a worktree too; None outside a clone with a .git folder."""
-    common = git("rev-parse", "--git-common-dir")
-    common = common and Path.cwd() / common  # relative to here, when it isn't absolute
-    return common.resolve().parent if common and common.name == ".git" else None
+main_checkout = kip.main_checkout
 
 
 @functools.lru_cache(maxsize=None)
@@ -171,6 +167,7 @@ def redact(text):
 
 
 DB = ROOT / "kip.db"
+OPEN_RUN = "json_extract(data, '$.finished') IS NULL AND json_extract(data, '$.orphaned') IS NULL"
 SCHEMA = [  # one entry per version: append a new one, never edit a shipped one
     """CREATE TABLE runs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, branch TEXT, created_at TEXT NOT NULL, data TEXT NOT NULL);
     CREATE INDEX runs_by_branch ON runs (repo, branch);
@@ -650,12 +647,17 @@ def cmd_accept(a):
         c["accepted"], c["accepted_by"] = a.reason or True, writer()
 
 
+def set_aside(d, reason, via, at=None, **extra):
+    """Orphan the run in d (at defaults to now); returns its record."""
+    with mutate(d) as rec:
+        rec["orphaned"] = {"at": at or datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                           "reason": reason, "via": via, **extra}
+    return rec
+
+
 def cmd_orphan(a):
     """Set a run aside whose work was abandoned: it leaves the dashboard and stops speaking for its branch."""
-    with mutate(run_dir(a)) as rec:
-        rec["orphaned"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                           "reason": a.reason, "via": "manual", "session": writer()}
-    print(f"orphaned {rec['id']}")
+    print(f"orphaned {set_aside(run_dir(a), a.reason, 'manual', session=writer())['id']}")
 
 
 def cmd_sweep(a):
@@ -689,16 +691,15 @@ def settle(orphan=True):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     trees = worktrees()
     ours = main_checkout() and os.path.realpath(main_checkout() / ".kip" / "worktrees")  # kip.py worktree new's
-    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
-                               "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
+    for (rid,) in db().execute(f"SELECT id FROM runs WHERE repo = ? AND {OPEN_RUN} ORDER BY rowid",
+                               (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
         rec = load(d)
         branch = rec.get("branch")
         if rec.get("finished") or rec.get("orphaned") or not branch:
             continue
         if orphan and git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") and not speaks_for(rec, branch):
-            with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch was recreated", "via": "branch recreated"}
+            set_aside(d, "its branch was recreated", "branch recreated", now)
             yield f"orphaned {rid} ({branch}: branch recreated)"
             continue
         if branch == here:
@@ -730,15 +731,13 @@ def settle(orphan=True):
                 git("branch", "-q", "-d", branch)  # refused after a squash merge: the branch stays
                 yield f"removed worktree {folder}"
         elif orphan and not tip and not (asks_gh and prs is None):  # on GitHub, only once gh has answered
-            with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
+            set_aside(d, "its branch is gone", "branch gone", now)
             yield f"orphaned {rid} ({branch}: branch gone)"
         elif orphan and rec.get("worktree") not in (None, rec.get("checkout")) and Path(rec.get("checkout") or "").is_dir() \
                 and os.path.realpath(rec["worktree"]) not in trees and \
                 git("rev-list", "--count", f"{rec.get('fork') or rec['commit']}..{tip}") == "0":
-            with mutate(d) as fresh:  # its uncommitted work went with the folder
-                fresh["orphaned"] = {"at": now, "reason": "its worktree was removed with nothing committed",
-                                     "via": "worktree removed"}
+            # its uncommitted work went with the folder
+            set_aside(d, "its worktree was removed with nothing committed", "worktree removed", now)
             yield f"orphaned {rid} ({branch}: worktree removed)"
 
 
@@ -1163,12 +1162,15 @@ def rehome():
         yield f"re-homed {rid}: {repo} -> {home.name}"
 
 
+STALE = ("⚠️ stale", "⚠️ served")
+
+
 def blocking(rec, pr=False):
     """What keeps work from being done: claims nobody addressed or whose evidence is stale, required
     checks that haven't passed and, before a PR, refuted claims, workflow stages (tidy, review)
     with no claim, or no claims at all."""
     def open_(c, v):
-        return (not c["evidence"] and not c["unverified"]) or v.startswith(("⚠️ stale", "⚠️ served")) or \
+        return (not c["evidence"] and not c["unverified"]) or v.startswith(STALE) or \
             (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
     out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
            if open_((delegate(c) or (c,))[0], v)]
@@ -1184,8 +1186,7 @@ def opens_pr(hook):
     """A PR-opening MCP tool, or a shell command (not text in one) that opens a PR through gh."""
     if re.search(r"create_pull_request\b|create_pr\b", str(hook.get("tool_name") or "")):
         return True
-    tool_input = hook.get("tool_input")
-    command = str((tool_input.get("command") if isinstance(tool_input, dict) else None) or hook.get("command") or "")
+    command = str(tool_input(hook).get("command") or hook.get("command") or "")
     for part in re.split(r"[;&|(\n]", command):
         part = part.strip()
         if re.match(r"gh\s+pr\s+create\b", part):
@@ -1236,7 +1237,7 @@ def edit_gate(hook):
     """(blocked, message) for a file edit in a repo: the main checkout's files are worktree work under
     workflow.worktrees, and workflow.skills' decompose and implement skills come first. One git call decides a
     file outside a repo; one in a linked worktree adds none once those skills are used."""
-    ti = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
+    ti = tool_input(hook)
     path = ti.get("file_path") or ti.get("notebook_path")
     if not path:
         return False, ""
@@ -1257,10 +1258,6 @@ def edit_gate(hook):
                                                          if policy == "nudge" else "")
     return with_due(skills_due(hook, ("decompose", "implement")), blocked, msg)
 
-
-ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",
-       "implement": "`/kip-messy-bun` (lite is enough for a small change)",
-       "tidy": "`/kip-marie-kondo` over this session's changes"}
 
 
 def session_skills(sid):
@@ -1300,7 +1297,7 @@ def skills_due(hook, stages):
     for s in due:
         if policy[s] == "nudge":
             nudge_once(f"{sid}.{s}")
-    return f"kip: run {' and '.join(ASK[s] for s in due)} first (workflow.skills)." if due else ""
+    return f"kip: run {' and '.join(kip.ASK[s] for s in due)} first (workflow.skills)." if due else ""
 
 
 def with_due(due, blocked, msg):
@@ -1310,7 +1307,7 @@ def with_due(due, blocked, msg):
 
 def gate(a, hook):
     """(blocked, message) for this branch's run; anything that isn't this branch's changed work passes."""
-    if hook.get("stop_hook_active") or hook.get("loop_count"):  # already nudged once this turn; never loop
+    if looping(hook):  # already nudged once this turn; never loop
         return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
@@ -1357,6 +1354,25 @@ def base_branch(cwd=None):
 def session_id(hook):
     sid = hook.get("session_id") or hook.get("conversation_id")
     return str(sid) if sid else None
+
+
+def hook_cwd(hook):
+    return hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+
+
+def looping(hook):
+    """The host's stop hook already fired once this turn (Claude Code's stop_hook_active, Cursor's loop_count)."""
+    return hook.get("stop_hook_active") or hook.get("loop_count")
+
+
+def tool_input(hook):
+    ti = hook.get("tool_input")
+    if isinstance(ti, str):  # Cursor's beforeMCPExecution sends it as JSON text
+        try:
+            ti = json.loads(ti)
+        except ValueError:
+            pass
+    return ti if isinstance(ti, dict) else {}
 
 
 def session_states(hook):
@@ -1549,7 +1565,7 @@ def append_event(payload, **fields):
     """One line in the event log for a host hook's payload; a failure here never touches the gate or the tool call."""
     try:
         e = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-             "session": payload.get("conversation_id") or payload.get("session_id"),  # Cursor: one id across its events
+             "session": session_id(payload),
              "host": "cursor" if "workspace_roots" in payload else "claude", **fields}
         EVENTS.mkdir(parents=True, exist_ok=True)
         with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
@@ -1563,13 +1579,7 @@ def log_tool(hook, kind="tool"):
     to do. No git: this runs on every call."""
     if str(hook.get("tool_name")).startswith("MCP:"):  # Cursor's preToolUse has no server; beforeMCPExecution logs it
         return
-    ti = hook.get("tool_input")
-    if isinstance(ti, str):  # Cursor's beforeMCPExecution sends it as JSON text
-        try:
-            ti = json.loads(ti)
-        except ValueError:
-            pass
-    ti = ti if isinstance(ti, dict) else {}
+    ti = tool_input(hook)
     what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
                  if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
         (json.dumps(ti, ensure_ascii=False) if ti else "")
@@ -1582,7 +1592,7 @@ def log_said(hook, kind, text):
     if not (isinstance(text, str) and text.strip()):
         return
     try:
-        cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+        cwd = hook_cwd(hook)
         if cwd:
             os.chdir(cwd)  # the repo's own .kip/config.json can turn it off
         if not kip.load().get("dashboard", {}).get("conversation", True):
@@ -1655,7 +1665,7 @@ def stop_servers(hook):
 def reason_kind(line):
     """A blocking() line's kind, read from its verdict (claim lines start with their id), never its text."""
     v = re.match(r"c\d+ (.*)", line)
-    return ("missing stage" if not v else "stale" if v[1].startswith(("⚠️ stale", "⚠️ served")) else
+    return ("missing stage" if not v else "stale" if v[1].startswith(STALE) else
             "failing check" if v[1].startswith("❌") else "unaddressed")
 
 
@@ -1861,7 +1871,7 @@ def cmd_serve(a):
     import queue
     import threading
     import time
-    page = Path(__file__).resolve().with_name("dashboard.html").read_text()
+    page = Path(__file__).resolve().with_name("dashboard.html").read_text().replace("__STAGES__", json.dumps(STAGES))
     MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
@@ -1883,8 +1893,7 @@ def cmd_serve(a):
         """Sweep each repo with an open run from its checkout, in the background: sessions settle only the repo
         they start in, so a repo no one opens again would keep its merged runs open."""
         with reading:
-            checkouts = db().execute("SELECT DISTINCT json_extract(data, '$.checkout') FROM runs WHERE "
-                                     "json_extract(data, '$.finished') IS NULL AND json_extract(data, '$.orphaned') IS NULL").fetchall()
+            checkouts = db().execute(f"SELECT DISTINCT json_extract(data, '$.checkout') FROM runs WHERE {OPEN_RUN}").fetchall()
         for (co,) in checkouts:
             if co and Path(co).is_dir():
                 subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "sweep"], cwd=co,
@@ -2114,7 +2123,7 @@ def cmd_check(a):
     hook = {}
     try:
         hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
-        cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+        cwd = hook_cwd(hook)
         if cwd:
             os.chdir(cwd)
         blocked, msg = (False, session_start(hook)) if a.hook == "start" else \
@@ -2124,7 +2133,7 @@ def cmd_check(a):
             raise
         hook = hook if isinstance(hook, dict) else {}
         blocked = opens_pr(hook) if a.hook == "pr" else \
-            a.hook in ("stop", "subagent") and not (hook.get("stop_hook_active") or hook.get("loop_count"))
+            a.hook in ("stop", "subagent") and not looping(hook)
         msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
                "Fix it or tell the user; don't work around it.")
     if a.hook == "stop":  # Claude Code's reply; Cursor sends its own on afterAgentResponse

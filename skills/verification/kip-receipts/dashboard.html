@@ -172,7 +172,7 @@ dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoo
   <dialog id="zoom"><img alt=""></dialog>
 </main>
 <script>
-const STAGES = ["decompose", "implement", "tidy", "review", "receipts"];
+const STAGES = __STAGES__;  // receipt.py serve fills in its STAGES
 const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "prompt", response: "reply", ask: "approval", resume: "resumed" };
 const fromHash = key => decodeURIComponent((location.hash.match(new RegExp(key + "=([^&]+)")) || [])[1] || "");
 let rows = [], selected = fromHash("session"), events = [];

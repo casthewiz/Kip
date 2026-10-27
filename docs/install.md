@@ -19,9 +19,9 @@ session: skills, rules, and hooks load at session start.
 
 `install` links every skill (any folder with a `SKILL.md`, however deeply
 nested; names must be unique) into each **host** it detects, wires up the always-on
-[rules](../rules/user-rules.md) (lazy senior developer, claims and evidence,
-implementation workflow), adds the [receipts gate](receipts.md#the-gate) to each
-host's hooks, starts the [dashboard](dashboard.md), and links the repo at
+[rules](../rules/user-rules.md) (lazy senior developer, question tool for fixed
+choices, claims and evidence, implementation workflow, Kip terms), adds the
+[receipts gate](receipts.md#the-gate) to each host's hooks, starts the [dashboard](dashboard.md), and links the repo at
 `~/.kip/kip`. Links mean a `git pull` updates every host. For what links can't
 reach (new or moved skills, Cursor's copy of the rules, the dashboard's copy),
 `install` also adds git hooks to the Kip repo that re-run it after every commit,

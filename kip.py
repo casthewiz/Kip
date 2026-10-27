@@ -55,6 +55,11 @@ GIT_HOOKS = ("post-commit", "post-merge", "post-checkout", "post-rewrite")
 GIT_HOOK = f"#!/bin/sh\n# kip: re-sync every host after this repo changes\npython3 {shlex.quote(str(ROOT / 'kip.py'))} install >/dev/null 2>&1\nexit 0\n"
 SURFACES = ("hosts", "connectors", "evidence", "destinations", "setup")
 CONNECTOR_KINDS = ("mcp", "tool")
+POLICIES = ("off", "nudge", "required")
+ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",  # workflow.skills' stages, as a gate asks
+       "implement": "`/kip-messy-bun` (lite is enough for a small change)",
+       "tidy": "`/kip-marie-kondo` over this session's changes"}
+RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\s*(.*?)\s*<!-- /kip rules -->\s*", re.S)  # Kip's block in a rules value
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 
 
@@ -123,12 +128,11 @@ def validate(cfg):
     stages = cfg.get("workflow", {}).get("stages", [])
     if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
         sys.exit("workflow.stages must be a list of stage names")
-    if cfg.get("workflow", {}).get("worktrees", "nudge") not in ("off", "nudge", "required"):
+    if cfg.get("workflow", {}).get("worktrees", "nudge") not in POLICIES:
         sys.exit("workflow.worktrees must be off, nudge or required")
     skills = cfg.get("workflow", {}).get("skills", {})
-    if not (isinstance(skills, dict) and set(skills) <= {"decompose", "implement", "tidy"}
-            and all(v in ("off", "nudge", "required") for v in skills.values())):
-        sys.exit("workflow.skills must map decompose, implement or tidy to off, nudge or required")
+    if not (isinstance(skills, dict) and set(skills) <= set(ASK) and all(v in POLICIES for v in skills.values())):
+        sys.exit(f"workflow.skills must map {', '.join(ASK)} to off, nudge or required")
     worktree = cfg.get("workflow", {}).get("worktree", {})
     if not isinstance(worktree, dict):
         sys.exit("workflow.worktree must be an object, like {\"setup\": \"npm ci\"}")
@@ -216,10 +220,7 @@ def pending_setup():
 def cmd_setup(a):
     if a.skip:
         path = KIP_HOME / "config.json"
-        layer = json.loads(path.read_text()) if path.is_file() else {}
-        layer.setdefault("setup", {})[a.skip] = None  # null deletes it from the merged config
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(layer, indent=2) + "\n")
+        save_layer(path, "setup", a.skip, None)  # null deletes it from the merged config
         return print(f"setup: skipped {a.skip} ({path})")
     for name, e in pending_setup():
         print(f"{name}: {e['about']}\n  {e['run']}")
@@ -277,16 +278,16 @@ def is_import(line):
 
 
 def user_rules(con, key):
-    """The rules value with Kip's block taken out: (row, the user's own rules)."""
+    """The rules value split around Kip's block: (row, Kip's block or None, the user's own rules)."""
     row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
-    return row, re.sub(r"<!-- kip rules: .*?<!-- /kip rules -->\n?", "", row[0] if row else "", flags=re.S).strip()
+    value = row[0] if row else ""
+    return row, RULES_BLOCK.search(value), RULES_BLOCK.sub("", value).strip()
 
 
 def rules_copy_status(rules):
     """A host holding a copy of the rules (not an import) goes stale when they change."""
     with sqlite3.connect(rules_db(rules)) as con:
-        row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (rules["key"],)).fetchone()
-    block = re.search(r"<!-- kip rules: .*? -->\n(.*?)\n<!-- /kip rules -->", row[0] if row else "", flags=re.S)
+        _, block, _ = user_rules(con, rules["key"])
     if not block:
         return "not installed (run install)"
     return "current" if block.group(1) == RULES.read_text().strip() else "stale (run install)"
@@ -294,10 +295,10 @@ def rules_copy_status(rules):
 
 def install_rules_sqlite(db, key):
     """Replace Kip's block in a rules value kept in an app's key-value store; keep the user's own rules."""
-    begin, end = f"<!-- kip rules: {RULES} -->", "<!-- /kip rules -->"
     with sqlite3.connect(db) as con:
-        row, mine = user_rules(con, key)
-        value = "\n\n".join(filter(None, [mine, f"{begin}\n{RULES.read_text().strip()}\n{end}"])) + "\n"
+        row, _, mine = user_rules(con, key)
+        block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text().strip()}\n<!-- /kip rules -->"
+        value = "\n\n".join(filter(None, [mine, block])) + "\n"
         if row and row[0] == value:
             return print(f"  rules: already in {db}")
         con.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (key, value))
@@ -369,13 +370,12 @@ def print_receipts(*args, prefix=""):
         print(f"  {prefix}{line}")
 
 
-def save_conversation(path, on):
-    """Install's --[no-]conversation, written into a config layer beside whatever else it holds."""
+def save_layer(path, kind, key, value):
+    """Set kind.key in one config layer, beside whatever else it holds."""
     layer = json.loads(path.read_text()) if path.is_file() else {}
-    layer.setdefault("dashboard", {})["conversation"] = on
+    layer.setdefault(kind, {})[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(layer, indent=2) + "\n")
-    print(f"dashboard: prompts and replies {'kept' if on else 'not kept'} ({path})")
 
 
 def service(platform=sys.platform):
@@ -431,12 +431,18 @@ def git_hooks_dir():
     return None if r.returncode else ROOT / r.stdout.strip()
 
 
+def main_checkout(cwd=None):
+    """The main checkout's folder, from a worktree too; None outside a clone with a .git folder (a submodule, say)."""
+    r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd,
+                       capture_output=True, text=True)
+    common = Path(r.stdout.strip()) if r.returncode == 0 else None
+    return common.resolve().parent if common and common.name == ".git" else None
+
+
 def main_of_worktree():
     """The main checkout's folder when this copy of Kip is a linked worktree of it, else None."""
-    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-                       capture_output=True, text=True)
-    git_dir, common = r.stdout.splitlines() if r.returncode == 0 else (None, None)
-    return Path(common).parent if git_dir != common else None
+    main = main_checkout(ROOT)
+    return main if main and not main.samefile(ROOT) else None  # samefile: ROOT keeps however it was spelled
 
 
 def install_git_hooks(d):
@@ -482,7 +488,9 @@ def cmd_install(a):
                  "(KIP_INSTALL_FROM_WORKTREE=1 installs from here anyway)")
     selected, top = hosts(a)
     if a.conversation is not None:
-        save_conversation(top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json", a.conversation)
+        path = top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json"
+        save_layer(path, "dashboard", "conversation", a.conversation)
+        print(f"dashboard: prompts and replies {'kept' if a.conversation else 'not kept'} ({path})")
     found = skills()
     if not a.project:  # a host-neutral path to kip.py for skills to call
         KIP_HOME.mkdir(parents=True, exist_ok=True)
@@ -532,8 +540,8 @@ def uninstall_rules(rules):
     db = rules_db(rules)
     if db:
         with sqlite3.connect(db) as con:
-            row, mine = user_rules(con, rules["key"])
-            if not row or "<!-- kip rules: " not in row[0]:
+            row, block, mine = user_rules(con, rules["key"])
+            if not block:
                 return
             if mine:
                 con.execute("UPDATE ItemTable SET value = ? WHERE key = ?", (mine, rules["key"]))
@@ -592,7 +600,7 @@ def cmd_worktree(a):
     top = toplevel()
     if not top:
         sys.exit("kip worktree: not in a git repo")
-    main = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).parent
+    main = main_checkout(top) or top  # a submodule's worktrees go in its own checkout
     path, branch = main / ".kip" / "worktrees" / a.name, f"kip/{a.name}"
     exclude = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
     lines = exclude.read_text().splitlines() if exclude.is_file() else []
