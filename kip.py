@@ -59,7 +59,7 @@ POLICIES = ("off", "nudge", "required")
 ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",  # workflow.skills' stages, as a gate asks
        "implement": "`/kip-messy-bun` (lite is enough for a small change)",
        "tidy": "`/kip-marie-kondo` over this session's changes"}
-RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\n(.*?)\n<!-- /kip rules -->\n?", re.S)  # Kip's block in a rules value
+RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\s*(.*?)\s*<!-- /kip rules -->\s*", re.S)  # Kip's block in a rules value
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 
 
@@ -442,7 +442,7 @@ def main_checkout(cwd=None):
 def main_of_worktree():
     """The main checkout's folder when this copy of Kip is a linked worktree of it, else None."""
     main = main_checkout(ROOT)
-    return main if main != ROOT else None
+    return main if main and not main.samefile(ROOT) else None  # samefile: ROOT keeps however it was spelled
 
 
 def install_git_hooks(d):

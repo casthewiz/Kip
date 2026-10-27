@@ -51,8 +51,8 @@ def check_submodule_worktree():
     """worktree new in a submodule lands under the submodule's checkout, not its git dir in .git/modules."""
     with tempfile.TemporaryDirectory() as tmp:
         lib, sup = Path(tmp, "lib"), Path(tmp, "super")
-        env = {**os.environ, "HOME": tmp, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        env = {**os.environ, "HOME": tmp, "KIP_HOME": str(Path(tmp, ".kip")), "GIT_AUTHOR_NAME": "t",
+               "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         for cwd, cmd in ((lib, ["init", "-q"]), (lib, ["commit", "-q", "--allow-empty", "-m", "lib"]),
                          (sup, ["init", "-q"]),
                          (sup, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "lib"])):
@@ -287,6 +287,13 @@ def main():
         assert "rules stale (run install)" in kip("doctor")
         kip("install", "--host", "cursor")
         assert "rules current" in kip("doctor")
+        # A block whose line endings an editor changed is still Kip's: replaced, never doubled.
+        with sqlite3.connect(db) as con:
+            con.execute("UPDATE ItemTable SET value = replace(value, char(10), char(13) || char(10))")
+        kip("install", "--host", "cursor")
+        with sqlite3.connect(db) as con:
+            value = con.execute("SELECT value FROM ItemTable WHERE key = 'aicontext.personalContext'").fetchone()[0]
+        assert value.count("<!-- /kip rules -->") == 1 and "rules current" in kip("doctor"), value
         # The conversation switch: install saves it into the user's layer (the repo's with --project),
         # beside what's already there; no flag leaves it as it was.
         kip("install", "--host", "cursor", "--no-conversation")
