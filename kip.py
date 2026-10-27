@@ -55,6 +55,8 @@ GIT_HOOKS = ("post-commit", "post-merge", "post-checkout", "post-rewrite")
 GIT_HOOK = f"#!/bin/sh\n# kip: re-sync every host after this repo changes\npython3 {shlex.quote(str(ROOT / 'kip.py'))} install >/dev/null 2>&1\nexit 0\n"
 SURFACES = ("hosts", "connectors", "evidence", "destinations", "setup")
 CONNECTOR_KINDS = ("mcp", "tool")
+POLICIES = ("off", "nudge", "required")
+RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\n(.*?)\n<!-- /kip rules -->\n?", re.S)  # Kip's block in a rules value
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 
 
@@ -123,11 +125,11 @@ def validate(cfg):
     stages = cfg.get("workflow", {}).get("stages", [])
     if not (isinstance(stages, list) and all(isinstance(x, str) for x in stages)):
         sys.exit("workflow.stages must be a list of stage names")
-    if cfg.get("workflow", {}).get("worktrees", "nudge") not in ("off", "nudge", "required"):
+    if cfg.get("workflow", {}).get("worktrees", "nudge") not in POLICIES:
         sys.exit("workflow.worktrees must be off, nudge or required")
     skills = cfg.get("workflow", {}).get("skills", {})
     if not (isinstance(skills, dict) and set(skills) <= {"decompose", "implement", "tidy"}
-            and all(v in ("off", "nudge", "required") for v in skills.values())):
+            and all(v in POLICIES for v in skills.values())):
         sys.exit("workflow.skills must map decompose, implement or tidy to off, nudge or required")
     worktree = cfg.get("workflow", {}).get("worktree", {})
     if not isinstance(worktree, dict):
@@ -216,10 +218,7 @@ def pending_setup():
 def cmd_setup(a):
     if a.skip:
         path = KIP_HOME / "config.json"
-        layer = json.loads(path.read_text()) if path.is_file() else {}
-        layer.setdefault("setup", {})[a.skip] = None  # null deletes it from the merged config
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(layer, indent=2) + "\n")
+        save_layer(path, "setup", a.skip, None)  # null deletes it from the merged config
         return print(f"setup: skipped {a.skip} ({path})")
     for name, e in pending_setup():
         print(f"{name}: {e['about']}\n  {e['run']}")
@@ -277,16 +276,16 @@ def is_import(line):
 
 
 def user_rules(con, key):
-    """The rules value with Kip's block taken out: (row, the user's own rules)."""
+    """The rules value split around Kip's block: (row, Kip's block or None, the user's own rules)."""
     row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
-    return row, re.sub(r"<!-- kip rules: .*?<!-- /kip rules -->\n?", "", row[0] if row else "", flags=re.S).strip()
+    value = row[0] if row else ""
+    return row, RULES_BLOCK.search(value), RULES_BLOCK.sub("", value).strip()
 
 
 def rules_copy_status(rules):
     """A host holding a copy of the rules (not an import) goes stale when they change."""
     with sqlite3.connect(rules_db(rules)) as con:
-        row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (rules["key"],)).fetchone()
-    block = re.search(r"<!-- kip rules: .*? -->\n(.*?)\n<!-- /kip rules -->", row[0] if row else "", flags=re.S)
+        _, block, _ = user_rules(con, rules["key"])
     if not block:
         return "not installed (run install)"
     return "current" if block.group(1) == RULES.read_text().strip() else "stale (run install)"
@@ -294,10 +293,10 @@ def rules_copy_status(rules):
 
 def install_rules_sqlite(db, key):
     """Replace Kip's block in a rules value kept in an app's key-value store; keep the user's own rules."""
-    begin, end = f"<!-- kip rules: {RULES} -->", "<!-- /kip rules -->"
     with sqlite3.connect(db) as con:
-        row, mine = user_rules(con, key)
-        value = "\n\n".join(filter(None, [mine, f"{begin}\n{RULES.read_text().strip()}\n{end}"])) + "\n"
+        row, _, mine = user_rules(con, key)
+        block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text().strip()}\n<!-- /kip rules -->"
+        value = "\n\n".join(filter(None, [mine, block])) + "\n"
         if row and row[0] == value:
             return print(f"  rules: already in {db}")
         con.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (key, value))
@@ -369,12 +368,17 @@ def print_receipts(*args, prefix=""):
         print(f"  {prefix}{line}")
 
 
-def save_conversation(path, on):
-    """Install's --[no-]conversation, written into a config layer beside whatever else it holds."""
+def save_layer(path, kind, key, value):
+    """Set kind.key in one config layer, beside whatever else it holds."""
     layer = json.loads(path.read_text()) if path.is_file() else {}
-    layer.setdefault("dashboard", {})["conversation"] = on
+    layer.setdefault(kind, {})[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(layer, indent=2) + "\n")
+
+
+def save_conversation(path, on):
+    """Install's --[no-]conversation."""
+    save_layer(path, "dashboard", "conversation", on)
     print(f"dashboard: prompts and replies {'kept' if on else 'not kept'} ({path})")
 
 
@@ -538,8 +542,8 @@ def uninstall_rules(rules):
     db = rules_db(rules)
     if db:
         with sqlite3.connect(db) as con:
-            row, mine = user_rules(con, rules["key"])
-            if not row or "<!-- kip rules: " not in row[0]:
+            row, block, mine = user_rules(con, rules["key"])
+            if not block:
                 return
             if mine:
                 con.execute("UPDATE ItemTable SET value = ? WHERE key = ?", (mine, rules["key"]))
