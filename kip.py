@@ -378,12 +378,6 @@ def save_layer(path, kind, key, value):
     path.write_text(json.dumps(layer, indent=2) + "\n")
 
 
-def save_conversation(path, on):
-    """Install's --[no-]conversation."""
-    save_layer(path, "dashboard", "conversation", on)
-    print(f"dashboard: prompts and replies {'kept' if on else 'not kept'} ({path})")
-
-
 def service(platform=sys.platform):
     """The dashboard as a login service the OS keeps running: its file, that file's text, and the commands
     that load and unload it; None where there's no service manager (a session's start hook still launches it)."""
@@ -494,7 +488,9 @@ def cmd_install(a):
                  "(KIP_INSTALL_FROM_WORKTREE=1 installs from here anyway)")
     selected, top = hosts(a)
     if a.conversation is not None:
-        save_conversation(top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json", a.conversation)
+        path = top / ".kip" / "config.json" if a.project else KIP_HOME / "config.json"
+        save_layer(path, "dashboard", "conversation", a.conversation)
+        print(f"dashboard: prompts and replies {'kept' if a.conversation else 'not kept'} ({path})")
     found = skills()
     if not a.project:  # a host-neutral path to kip.py for skills to call
         KIP_HOME.mkdir(parents=True, exist_ok=True)
