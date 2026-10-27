@@ -68,8 +68,9 @@ When this breaks, fix the surface that changed, not each run:
 
 - **GitHub's page changed** (input not found, no URL, new URL shape): update
   [github.md](../interfaces/github.md). If videos no longer come back as a
-  bare URL, also update `render_markdown`'s `bare_video` branch in
-  `receipt.py` and its test in `test_receipt.py`.
+  bare URL, also update the branch in `receipt.py`'s
+  `render_markdown` that puts a GitHub video's URL alone on a line, and its
+  test in `test_receipt.py`.
 - **A host's tools changed or refused a call**: update that host's
   interface, e.g. Cursor's `browser_cdp` refusing `DOM.setFileInputFiles`
   means its `set_files` row moves to `eval`.

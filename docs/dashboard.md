@@ -57,8 +57,8 @@ splits what it touched into segments:
 
 The **Runs** tab lists every receipts run, newest first, for triage: whether
 it's open, finished or orphaned, and how it settled (`checkout`, `merged`,
-`pr #N`, `branch gone`, `branch recreated`, `manual`). Kip shows each run's
-state too: celebrating once it's finished, rained on while a claim fails,
+`pr #N`, `branch gone`, `branch recreated`, `worktree removed`, `manual`).
+Kip shows each run's state too: celebrating once it's finished, rained on while a claim fails,
 asking while a claim is unverified and not accepted, working while a session
 that wrote to it is mid-turn, waiting otherwise and once orphaned. A run's page shows the
 commits it covers (where it started, where its branch left the base branch,

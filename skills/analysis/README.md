@@ -6,10 +6,12 @@ actually asks for, and how it decomposes into units of work.
 
 Effort sets depth:
 
-- **Low effort**: shallow. Take the problem roughly as stated and focus on
+- **lite**: shallow. Take the problem roughly as stated and focus on
   efficient chunking, units of work that are clearly sequenced or
   parallelizable.
-- **High effort**: deep. Dig into the underlying problem and how it relates
+- **full** (default): read the code the request touches and ground units in
+  it.
+- **ultra**: deep. Dig into the underlying problem and how it relates
   to the implementation the model can actually see (code, data, docs), then
   propose units of work grounded in it.
 
