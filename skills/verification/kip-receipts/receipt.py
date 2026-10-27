@@ -1176,8 +1176,7 @@ def opens_pr(hook):
     """A PR-opening MCP tool, or a shell command (not text in one) that opens a PR through gh."""
     if re.search(r"create_pull_request\b|create_pr\b", str(hook.get("tool_name") or "")):
         return True
-    tool_input = hook.get("tool_input")
-    command = str((tool_input.get("command") if isinstance(tool_input, dict) else None) or hook.get("command") or "")
+    command = str(tool_input(hook).get("command") or hook.get("command") or "")
     for part in re.split(r"[;&|(\n]", command):
         part = part.strip()
         if re.match(r"gh\s+pr\s+create\b", part):
@@ -1228,7 +1227,7 @@ def edit_gate(hook):
     """(blocked, message) for a file edit in a repo: the main checkout's files are worktree work under
     workflow.worktrees, and workflow.skills' decompose and implement skills come first. One git call decides a
     file outside a repo; one in a linked worktree adds none once those skills are used."""
-    ti = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
+    ti = tool_input(hook)
     path = ti.get("file_path") or ti.get("notebook_path")
     if not path:
         return False, ""
@@ -1302,7 +1301,7 @@ def with_due(due, blocked, msg):
 
 def gate(a, hook):
     """(blocked, message) for this branch's run; anything that isn't this branch's changed work passes."""
-    if hook.get("stop_hook_active") or hook.get("loop_count"):  # already nudged once this turn; never loop
+    if looping(hook):  # already nudged once this turn; never loop
         return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
@@ -1349,6 +1348,20 @@ def base_branch(cwd=None):
 def session_id(hook):
     sid = hook.get("session_id") or hook.get("conversation_id")
     return str(sid) if sid else None
+
+
+def hook_cwd(hook):
+    return hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+
+
+def looping(hook):
+    """The host's stop hook already fired once this turn (Claude Code's stop_hook_active, Cursor's loop_count)."""
+    return hook.get("stop_hook_active") or hook.get("loop_count")
+
+
+def tool_input(hook):
+    ti = hook.get("tool_input")
+    return ti if isinstance(ti, dict) else {}
 
 
 def session_states(hook):
@@ -1541,7 +1554,7 @@ def append_event(payload, **fields):
     """One line in the event log for a host hook's payload; a failure here never touches the gate or the tool call."""
     try:
         e = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-             "session": payload.get("conversation_id") or payload.get("session_id"),  # Cursor: one id across its events
+             "session": session_id(payload),
              "host": "cursor" if "workspace_roots" in payload else "claude", **fields}
         EVENTS.mkdir(parents=True, exist_ok=True)
         with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
@@ -1553,8 +1566,7 @@ def append_event(payload, **fields):
 def log_tool(hook, kind="tool"):
     """A tool call, or Claude Code asking to approve one: its name and a short, redacted line of what it was asked
     to do. No git: this runs on every call."""
-    ti = hook.get("tool_input")
-    ti = ti if isinstance(ti, dict) else {}
+    ti = tool_input(hook)
     what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
                  if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
         (json.dumps(ti, ensure_ascii=False) if ti else "")
@@ -1567,7 +1579,7 @@ def log_said(hook, kind, text):
     if not (isinstance(text, str) and text.strip()):
         return
     try:
-        cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+        cwd = hook_cwd(hook)
         if cwd:
             os.chdir(cwd)  # the repo's own .kip/config.json can turn it off
         if not kip.load().get("dashboard", {}).get("conversation", True):
@@ -2099,7 +2111,7 @@ def cmd_check(a):
     hook = {}
     try:
         hook = json.loads(sys.stdin.read() or "{}") if a.hook else {}
-        cwd = hook.get("cwd") or (hook.get("workspace_roots") or [None])[0]
+        cwd = hook_cwd(hook)
         if cwd:
             os.chdir(cwd)
         blocked, msg = (False, session_start(hook)) if a.hook == "start" else \
@@ -2109,7 +2121,7 @@ def cmd_check(a):
             raise
         hook = hook if isinstance(hook, dict) else {}
         blocked = opens_pr(hook) if a.hook == "pr" else \
-            a.hook in ("stop", "subagent") and not (hook.get("stop_hook_active") or hook.get("loop_count"))
+            a.hook in ("stop", "subagent") and not looping(hook)
         msg = (f"kip-receipts: the gate crashed ({type(err).__name__}: {err}). "
                "Fix it or tell the user; don't work around it.")
     if a.hook == "stop":  # Claude Code's reply; Cursor sends its own on afterAgentResponse
