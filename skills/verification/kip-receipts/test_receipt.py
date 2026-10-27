@@ -247,7 +247,7 @@ def main():
         assert md.startswith("### Receipts · https://staging.example.test (remote: state not pinned) · ultra"), md
         assert "· remote · log sha256" in md and "commit `" not in md, md
         table_row = next(line for line in md.splitlines() if line.startswith("| c1 |"))
-        assert "desktest mobile https://broken.example.test (exit 1)<br>" in table_row, table_row
+        assert "desktest mobile https://broken.example.test (exit 1, superseded)<br>" in table_row, table_row
         assert "`env " not in table_row, "full commands belong in the details, not the table"
         assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
         # A desk test is one check per spec and viewport, whatever its URL: mobile failed on one host and
@@ -378,7 +378,9 @@ def main():
 
         rc("run", "c1", "--", "false")
         rc("unverified", "c2", "needs the device")
-        assert check("--hook", "stop", event={})[0] == 0, "refuted claims are reported, not blocked, at stop"
+        code, out = check("--hook", "stop", event={})  # a fresh failure opens a fix loop, which the stop holds to
+        assert code == 2 and "c1's fix loop: fix the check or the code" in out, out
+        assert "3 attempt(s) and 10 minute(s) left before it goes to a person" in out, out
         code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}})
         assert code == 2 and "c1 ❌ refuted" in out and "  c2 " not in out, out
         assert "tidy: no claim" in out and "review: no claim" in out, "workflow stages aren't required"
@@ -386,6 +388,8 @@ def main():
         assert code == 0 and json.loads(out)["permission"] == "deny", out
         assert "c1 ❌ refuted" in json.loads(out)["agent_message"], out
         assert check("--hook", "pr", event={**cursor, "command": "git status"}) == (0, '{"permission": "allow"}')
+        rc("run", "c1", "--replace", "--", "true")  # a corrected command ends c1's fix loop
+        rc("observe", "c1", "--failed", "still broken")  # refuted again, by an observation: no fix loop, the stop passes
 
         # Hooks log to the event log: gate decisions with where they happened, and every tool call (no git,
         # never blocking, redacted and cut short). Claude Code's PR hook on a plain shell call leaves that
@@ -867,6 +871,58 @@ def main():
         flag.write_text("")
         rc("run", "c1", "--", *has_flag)
         assert verdicts(("--run", remote))["c1"] == "⚠️ passed after failing, code not pinned"
+
+        # Fix loops: a failed run opens one; each rerun of its check, or a corrected command (--replace), is an
+        # attempt that supersedes the one before. After 3 failed attempts or 10 minutes it closes for a person.
+        looped = Path(rc("init", "--level", "full"))
+        for text in ("malformed", "code fix", "replaced", "three strikes", "out of time"):
+            rc("claim", text)
+        rc("run", "c2", "--", "grep", "-q", "loopfix", "app.py")
+        (repo / "app.py").write_text('print("fixed again, loopfix")\n')
+        rc("run", "c2", "--", "grep", "-q", "loopfix", "app.py")
+        rc("run", "c1", "--", "grep -q again app.py")  # the whole line as one program name
+        rc("run", "c1", "--replace", "--", "grep", "-q", "again", "app.py")
+        rc("run", "c3", "--", "grep", "-q", "nope", "app.py")
+        rc("run", "c3", "--replace", "--", "grep", "-q", "loopfix", "app.py")
+        v = verdicts()
+        assert v["c1"] == v["c2"] == "✅ verified", v
+        assert v["c3"].startswith("⚠️ check changed after failing"), v
+        (repo / "app.py").write_text('print("fixed again")\n')  # the replacement fails without the fix
+        rc("run", "c3", "--red", "--", "grep", "-q", "loopfix", "app.py")
+        (repo / "app.py").write_text('print("fixed again, loopfix")\n')
+        assert verdicts()["c3"] == "✅ verified", verdicts()
+        md = rc("render")
+        assert "`'grep -q again app.py'` (exit 127, superseded)" in md and "(exit 1, superseded)" in md, md
+        assert "--replace is a green run's" in rc("run", "c2", "--replace", "--", "true", ok=False)
+        rc("run", "c4", "--", "false")
+        assert "fix loop is closed" not in rc("run", "c4", "--", "false") + rc("run", "c4", "--", "false")
+        assert "c4's fix loop is closed (attempt 3 failed)" in rc("run", "c4", "--", "false")
+        assert "Hand it to a person" in rc("run", "c4", "--", "true", ok=False), "a closed loop took another run"
+        rc("run", "c5", "--", "false")
+        code, out = check("--hook", "stop", event={})
+        assert code == 2 and "c4's fix loop is closed (attempt 3 failed)" in out, out
+        assert "c5's fix loop: fix the check or the code" in out and "3 attempt(s) and 10 minute(s) left" in out, out
+        kipdb("UPDATE claims SET data = json_set(data, '$.loop.opened', '2026-01-01T00:00:00+00:00') "
+              "WHERE run = ? AND id = 'c5'", looped.name)
+        assert "c5's fix loop is closed (10 minutes passed" in check("--hook", "stop", event={})[1]
+        assert "c5's fix loop is closed (10 minutes passed" in rc("run", "c5", "--", "false", ok=False)
+        c5 = run_json(looped)["claims"][4]
+        assert c5["loop"]["closed"]["why"].startswith("10 minutes") and len(c5["evidence"]) == 1, c5
+        v = verdicts()
+        assert v["c4"] == "❌ refuted: fix loop closed (attempt 3 failed), a person reopens it (`receipt.py reopen c4`)", v
+        assert v["c5"].startswith("❌ refuted: fix loop closed (10 minutes passed"), v
+        assert "a person's call" in rc("reopen", "c4", extra_env={"CLAUDE_CODE_SESSION_ID": "agent"}, ok=False)
+        assert "no closed fix loop" in rc("reopen", "c1", ok=False)
+        rc("reopen", "c4", "--reason", "fixed the flaky fixture")
+        rc("run", "c4", "--", "false")  # a fresh loop takes runs again
+        assert run_json(looped)["claims"][3]["loop"]["attempts"] == 1
+        rc("claim", "replaced, then back to the original")  # c6: the original check's own red-then-green is enough
+        rc("run", "c6", "--", "grep", "-q", "twice", "app.py")
+        rc("run", "c6", "--replace", "--", "grep", "-q", "twise", "app.py")
+        (repo / "app.py").write_text('print("fixed again, loopfix, twice")\n')
+        rc("run", "c6", "--replace", "--", "grep", "-q", "twice", "app.py")
+        assert verdicts()["c6"] == "✅ verified", verdicts()
+        rc("orphan", "--reason", "fix loop tests done")
 
         # Finished runs: once a run's commits are on the base branch and nothing changed since, the
         # session stops hearing about it and its old claims stop covering new work.

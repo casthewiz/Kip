@@ -7,13 +7,14 @@
                                                             --parent takes over a plan run's claims for unit N
   receipt.py claim "TEXT" [--provider NAME] [--level L] [--unit N] [--stage NAME]
                                                             add a claim, print its id
-  receipt.py run CLAIM... [--red] [--static] [--collect DIR] [--label TEXT] [-- CMD ...]
+  receipt.py run CLAIM... [--red] [--static] [--collect DIR] [--label TEXT] [--replace] [-- CMD ...]
                                                             run CMD (a required check's own command if omitted),
                                                             record the result, attach media from DIR
   receipt.py observe CLAIM (--passed|--failed) "TEXT"       record a non-command observation
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
   receipt.py accept CLAIM [--reason TEXT]                   the user takes an unverified claim as it stands
+  receipt.py reopen CLAIM [--reason TEXT]                   a person gives a claim whose fix loop closed a new one
   receipt.py orphan [--reason TEXT]                         set aside a run whose work was abandoned: it leaves
                                                             the dashboard and its branch needs a new run
   receipt.py sweep                                          finish this repo's runs whose branch merged, orphan
@@ -412,7 +413,8 @@ def code_state(d, rec, eid):
 
 def new_evidence(d, rec, c, **fields):
     eid = f"{c['id']}e{len(c['evidence']) + 1}"
-    e = {"id": eid, **fields, "session": writer(), **code_state(d, rec, eid)}
+    e = {"id": eid, **fields, "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+         "session": writer(), **code_state(d, rec, eid)}
     c["evidence"].append(e)
     c["unverified"] = None  # evidence supersedes an earlier "can't verify"
     return e
@@ -560,12 +562,82 @@ def not_a_check(c, how):
                  f"Run it: `receipt.py run {c['id']}`")
 
 
+def fix_loop(c):
+    """A claim's fix loop that still takes attempts: opened by a failed green run, ended by a passing attempt
+    or by closing."""
+    loop = c.get("loop")
+    return loop if loop and not loop["fixed"] and not loop["closed"] else None
+
+
+@functools.lru_cache(maxsize=None)
+def loop_limit():
+    return kip.load()["workflow"]["loop"]
+
+
+def loop_left(loop, at):
+    """(attempts, seconds) an open fix loop has left at time `at`."""
+    limit = loop_limit()
+    spent = (at - datetime.datetime.fromisoformat(loop["opened"])).total_seconds()
+    return limit["attempts"] - loop["attempts"], limit["minutes"] * 60 - spent
+
+
+def shut(c, at):
+    """Why a claim's fix loop takes no more runs (closed, or out of time), or None."""
+    loop = c.get("loop") or {}
+    if loop.get("closed"):
+        return loop["closed"]["why"]
+    if fix_loop(c) and loop_left(loop, at)[1] <= 0:
+        return f"{loop_limit()['minutes']} minutes passed since it first failed"
+    return None
+
+
+def attempt(c, e, replace):
+    """Count a green run in the claim's fix loop: a failure opens one on its check, and each later run of that
+    check, or of a command that replaces it (--replace), is an attempt that supersedes the one before. The loop
+    ends when an attempt passes, and closes when the last allowed attempt fails or time is up."""
+    loop, key = fix_loop(c), dumps(check_key(e))
+    if loop and (replace or key == loop["check"]):
+        loop["attempts"] += 1
+        loop["check"] = key
+    elif loop or e["passed"]:
+        return
+    else:
+        loop = c["loop"] = {"opened": e["at"], "check": key, "attempts": 0, "fixed": False, "closed": None}
+    for x in c["evidence"]:
+        if "attempt" in x:
+            x["superseded"] = True
+    e["attempt"] = loop["attempts"]
+    at = datetime.datetime.fromisoformat(e["at"])
+    why = f"attempt {loop['attempts']} failed" if loop_left(loop, at)[0] <= 0 else shut(c, at)
+    if e["passed"]:
+        loop["fixed"] = True
+    elif why:
+        loop["closed"] = {"at": e["at"], "why": why}
+
+
+def closed_note(cid, why):
+    return f"{cid}'s fix loop is closed ({why}). Hand it to a person; they reopen it with `receipt.py reopen {cid}`."
+
+
 def cmd_run(a):
     """Run one command and record it as evidence for each claim given; they share its log."""
     d = adding_to(a)
     claims = [find_claim(load(d), cid) for cid in a.claims]
     for c in claims:
         not_delegated(c)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if any(shut(c, now) for c in claims):
+        with mutate(d) as rec:  # record a loop that ran out of time as closed
+            stuck = []
+            for cid in a.claims:
+                c = find_claim(rec, cid)
+                why = shut(c, now)
+                if why and not c["loop"]["closed"]:
+                    c["loop"]["closed"] = {"at": now.isoformat(timespec="seconds"), "why": why}
+                stuck += [closed_note(cid, why)] if why else []
+        sys.exit("\n".join(stuck))
+    if a.replace and (a.red or not all(fix_loop(c) for c in claims)):
+        sys.exit("--replace is a green run's: it replaces the failing check of a claim's open fix loop")
     cmd = a.cmd or next((c["command"] for c in claims if c.get("command")), None)
     if not cmd:
         sys.exit("usage: receipt.py run CLAIM... [--red] [--static] -- CMD ...")
@@ -589,6 +661,8 @@ def cmd_run(a):
                              label=a.label, command=cmd, cwd=cwd, inputs=command_inputs(cmd, d), exit_code=code,
                              passed=passed, excerpt="\n".join(out.strip().splitlines()[-EXCERPT_LINES:]),
                              **({"served": server} if server else {}))
+            if not a.red:
+                attempt(c, e, a.replace)
             if not log:
                 path = d / "files" / f"{e['id']}.log"
                 path.write_text(out)
@@ -606,6 +680,10 @@ def cmd_run(a):
     for eid in ids:
         print(f"{eid}: exit {code} ({expected}) -> {'pass' if passed else 'FAIL'}"
               + (f", collected {len(collected)} file(s)" if a.collect else ""))
+    for cid in a.claims:
+        closed = (find_claim(rec, cid).get("loop") or {}).get("closed")
+        if closed:
+            print(closed_note(cid, closed["why"]))
 
 
 def cmd_observe(a):
@@ -645,6 +723,20 @@ def cmd_accept(a):
         if not c["unverified"]:
             sys.exit(f"{c['id']} isn't marked unverified; only an unverified claim can be accepted")
         c["accepted"], c["accepted_by"] = a.reason or True, writer()
+
+
+def cmd_reopen(a):
+    """A person gives a claim whose fix loop closed a fresh one: its attempts and minutes start over."""
+    if writer():
+        sys.exit("reopening a closed fix loop is a person's call; ask the user to run it from their own terminal")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    with mutate(adding_to(a)) as rec:
+        c = find_claim(rec, a.claim)
+        why = shut(c, now)
+        if not why:
+            sys.exit(f"{c['id']} has no closed fix loop to reopen")
+        c["loop"].update(opened=now.isoformat(timespec="seconds"), attempts=0, closed=None,
+                         reopened={"why": why, "reason": a.reason})
 
 
 def set_aside(d, reason, via, at=None, **extra):
@@ -818,8 +910,10 @@ def not_delegated(c):
 
 
 def verdict(c, rec):
-    """The latest run of each check decides it. A failure clears only when the same check passes on
-    changed code, which also shows the check can fail. A delegated claim's verdict is its unit run's."""
+    """The latest run of each check decides it, and a fix loop's latest attempt supersedes its earlier ones.
+    A failure clears only when the same check passes on changed code, which also shows the check can fail; a
+    different check that replaced it must show that itself (--red), unless the failed run never started.
+    A delegated claim's verdict is its unit run's."""
     handed_to = delegate(c)
     if handed_to:
         return verdict(*handed_to)
@@ -827,19 +921,33 @@ def verdict(c, rec):
     ev = c["evidence"]
     runs = {}
     for e in ev:
-        runs.setdefault(check_key(e), {"green": [], "red": []})[e["phase"]].append(e)
+        runs.setdefault(check_key(e), {"green": [], "red": [], "superseded": []})[
+            "superseded" if e.get("superseded") else e["phase"]].append(e)
     if any(r["green"] and not r["green"][-1]["passed"] for r in runs.values()):
-        return "❌ refuted"
+        closed = (c.get("loop") or {}).get("closed")
+        return "❌ refuted" + (f": fix loop closed ({closed['why']}), a person reopens it "
+                               f"(`receipt.py reopen {c['id']}`)" if closed else "")
     if any(r["red"] and not r["red"][-1]["passed"] for r in runs.values()):
         return "❌ check can't fail"
     shown = any(e["phase"] == "red" for e in ev)
+    latest = next((e for e in reversed(ev) if "attempt" in e and not e.get("superseded")), None)
     for r in runs.values():
-        fails = [e for e in r["green"] if not e["passed"]]
-        if fails:
-            note = rerun_note(fails, [e for e in r["green"] if e["passed"]], r["green"][-1], r["red"])
-            if note:
-                return f"⚠️ {note}"
-            shown = True
+        tried = r["superseded"] + r["green"]
+        fails = [e for e in tried if not e["passed"]]
+        if not fails:
+            continue
+        if r["green"]:
+            note = rerun_note(fails, [e for e in tried if e["passed"]], r["green"][-1], r["red"])
+        elif all(f.get("exit_code") in (126, 127) for f in fails):  # never started, so it tested nothing
+            continue
+        else:  # replaced by the loop's latest attempt, another check: shown by its own red, or its own fix
+            mine = runs[check_key(latest)]
+            note = None if any(x["passed"] for x in mine["red"]) or \
+                any(not x["passed"] for x in mine["superseded"]) else \
+                "check changed after failing; show the new check fails without the fix (--red)"
+        if note:
+            return f"⚠️ {note}"
+        shown = True
     now = current_tree() if holds(rec) else None  # another checkout's code says nothing
     if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
         return "⚠️ stale: the code changed since it was checked"
@@ -876,10 +984,11 @@ def summarize(e, full=False):
     if e["kind"] == "observed":
         return f"observed: {e['observation']}"
     red = ", red" if e["phase"] == "red" else ""
+    gone = ", superseded" if e.get("superseded") else ""
     cmd = f"`{shlex.join(e['command'])}`"
     label = e.get("label")
     head = (f"{label}: {cmd}" if label else cmd) if full else (label or cmd)
-    return f"{head} (exit {e['exit_code']}{red})"
+    return f"{head} (exit {e['exit_code']}{red}{gone})"
 
 
 def subject(rec, code):
@@ -1171,7 +1280,8 @@ def blocking(rec, pr=False):
     with no claim, or no claims at all."""
     def open_(c, v):
         return (not c["evidence"] and not c["unverified"]) or v.startswith(STALE) or \
-            (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
+            (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌")) or \
+            (c.get("loop") and not c["loop"]["fixed"])
     out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
            if open_((delegate(c) or (c,))[0], v)]
     if pr:
@@ -1343,7 +1453,20 @@ def branch_gate(a, hook):
     todo = ("fix them, or re-run their checks, before opening a PR" if pr else
             "record evidence (`receipt.py run`) or why it can't be verified (`receipt.py unverified`), "
             "then end with `receipt.py render`")
-    return True, f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(open_) + f"\nNext: {todo}."
+    now = datetime.datetime.now(datetime.timezone.utc)
+    loops = [loop_note(c, now) for c in rec["claims"] if c.get("loop") and not c["loop"]["fixed"]]
+    return True, f"kip-receipts: run {d} has claims that aren't done:\n  " + "\n  ".join(open_) + \
+        "".join(f"\n{n}" for n in loops) + f"\nNext: {todo}."
+
+
+def loop_note(c, at):
+    """What's left of a claim's fix loop, or that it's closed and who takes it from here."""
+    why = shut(c, at)
+    if why:
+        return closed_note(c["id"], why)
+    attempts, seconds = loop_left(c["loop"], at)
+    return (f"{c['id']}'s fix loop: fix the check or the code, then `receipt.py run {c['id']}`; "
+            f"{attempts} attempt(s) and {-(-int(seconds) // 60)} minute(s) left before it goes to a person.")
 
 
 def base_branch(cwd=None):
@@ -2192,6 +2315,8 @@ def main():
     s.add_argument("--static", action="store_true", help="typecheck/lint/grep, not behavior")
     s.add_argument("--collect", help="after the run, attach every image, video, and trace under this dir")
     s.add_argument("--label", help="short name for the ledger table; the full command stays in the details")
+    s.add_argument("--replace", action="store_true",
+                   help="a corrected command for the check that opened the claim's fix loop: the next attempt")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("observe", parents=[common])
@@ -2217,6 +2342,11 @@ def main():
     s.add_argument("claim")
     s.add_argument("--reason", help="why it's fine as it stands")
     s.set_defaults(fn=cmd_accept)
+
+    s = sub.add_parser("reopen", parents=[common])
+    s.add_argument("claim")
+    s.add_argument("--reason", help="what the person changed or decided")
+    s.set_defaults(fn=cmd_reopen)
 
     s = sub.add_parser("orphan", parents=[common])
     s.add_argument("--reason", help="why its work was abandoned")
