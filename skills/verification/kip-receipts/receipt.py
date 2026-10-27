@@ -114,11 +114,7 @@ def load_sink(name):
     sys.exit(f"no sink module {module} for {name}; available: {', '.join(sink_names())}")
 
 
-def main_checkout():
-    """The main checkout's folder, from a worktree too; None outside a clone with a .git folder."""
-    common = git("rev-parse", "--git-common-dir")
-    common = common and Path.cwd() / common  # relative to here, when it isn't absolute
-    return common.resolve().parent if common and common.name == ".git" else None
+main_checkout = kip.main_checkout
 
 
 @functools.lru_cache(maxsize=None)

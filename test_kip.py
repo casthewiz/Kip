@@ -47,8 +47,25 @@ def check_glossary():
     assert not broken, f"docs/glossary.md links to missing files: {broken}"
 
 
+def check_submodule_worktree():
+    """worktree new in a submodule lands under the submodule's checkout, not its git dir in .git/modules."""
+    with tempfile.TemporaryDirectory() as tmp:
+        lib, sup = Path(tmp, "lib"), Path(tmp, "super")
+        env = {**os.environ, "HOME": tmp, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cwd, cmd in ((lib, ["init", "-q"]), (lib, ["commit", "-q", "--allow-empty", "-m", "lib"]),
+                         (sup, ["init", "-q"]),
+                         (sup, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "lib"])):
+            cwd.mkdir(exist_ok=True)
+            subprocess.run(["git", *cmd], cwd=cwd, env=env, check=True, capture_output=True)
+        r = subprocess.run([sys.executable, str(ROOT / "kip.py"), "worktree", "new", "probe"], cwd=sup / "lib", env=env,
+                           capture_output=True, text=True)
+        assert Path(r.stdout.strip()) == (sup / "lib").resolve() / ".kip" / "worktrees" / "probe", r
+
+
 def main():
     check_glossary()
+    check_submodule_worktree()
     with tempfile.TemporaryDirectory() as tmp:
         home, repo = Path(tmp, "home"), Path(tmp, "repo")
         (home / ".claude").mkdir(parents=True)

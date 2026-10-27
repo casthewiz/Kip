@@ -431,12 +431,18 @@ def git_hooks_dir():
     return None if r.returncode else ROOT / r.stdout.strip()
 
 
+def main_checkout(cwd=None):
+    """The main checkout's folder, from a worktree too; None outside a clone with a .git folder (a submodule, say)."""
+    r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd,
+                       capture_output=True, text=True)
+    common = Path(r.stdout.strip()) if r.returncode == 0 else None
+    return common.resolve().parent if common and common.name == ".git" else None
+
+
 def main_of_worktree():
     """The main checkout's folder when this copy of Kip is a linked worktree of it, else None."""
-    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-                       capture_output=True, text=True)
-    git_dir, common = r.stdout.splitlines() if r.returncode == 0 else (None, None)
-    return Path(common).parent if git_dir != common else None
+    main = main_checkout(ROOT)
+    return main if main != ROOT else None
 
 
 def install_git_hooks(d):
@@ -592,7 +598,7 @@ def cmd_worktree(a):
     top = toplevel()
     if not top:
         sys.exit("kip worktree: not in a git repo")
-    main = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).parent
+    main = main_checkout(top) or top  # a submodule's worktrees go in its own checkout
     path, branch = main / ".kip" / "worktrees" / a.name, f"kip/{a.name}"
     exclude = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
     lines = exclude.read_text().splitlines() if exclude.is_file() else []
