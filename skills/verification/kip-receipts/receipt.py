@@ -167,6 +167,7 @@ def redact(text):
 
 
 DB = ROOT / "kip.db"
+OPEN_RUN = "json_extract(data, '$.finished') IS NULL AND json_extract(data, '$.orphaned') IS NULL"
 SCHEMA = [  # one entry per version: append a new one, never edit a shipped one
     """CREATE TABLE runs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, branch TEXT, created_at TEXT NOT NULL, data TEXT NOT NULL);
     CREATE INDEX runs_by_branch ON runs (repo, branch);
@@ -646,12 +647,17 @@ def cmd_accept(a):
         c["accepted"], c["accepted_by"] = a.reason or True, writer()
 
 
+def set_aside(d, reason, via, at=None, **extra):
+    """Orphan the run in d (at defaults to now); returns its record."""
+    with mutate(d) as rec:
+        rec["orphaned"] = {"at": at or datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                           "reason": reason, "via": via, **extra}
+    return rec
+
+
 def cmd_orphan(a):
     """Set a run aside whose work was abandoned: it leaves the dashboard and stops speaking for its branch."""
-    with mutate(run_dir(a)) as rec:
-        rec["orphaned"] = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-                           "reason": a.reason, "via": "manual", "session": writer()}
-    print(f"orphaned {rec['id']}")
+    print(f"orphaned {set_aside(run_dir(a), a.reason, 'manual', session=writer())['id']}")
 
 
 def cmd_sweep(a):
@@ -685,16 +691,15 @@ def settle(orphan=True):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     trees = worktrees()
     ours = main_checkout() and os.path.realpath(main_checkout() / ".kip" / "worktrees")  # kip.py worktree new's
-    for (rid,) in db().execute("SELECT id FROM runs WHERE repo = ? AND json_extract(data, '$.finished') IS NULL AND "
-                               "json_extract(data, '$.orphaned') IS NULL ORDER BY rowid", (repo_name(),)).fetchall():
+    for (rid,) in db().execute(f"SELECT id FROM runs WHERE repo = ? AND {OPEN_RUN} ORDER BY rowid",
+                               (repo_name(),)).fetchall():
         d = ROOT / repo_name() / rid
         rec = load(d)
         branch = rec.get("branch")
         if rec.get("finished") or rec.get("orphaned") or not branch:
             continue
         if orphan and git("rev-parse", "-q", "--verify", f"refs/heads/{branch}") and not speaks_for(rec, branch):
-            with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch was recreated", "via": "branch recreated"}
+            set_aside(d, "its branch was recreated", "branch recreated", now)
             yield f"orphaned {rid} ({branch}: branch recreated)"
             continue
         if branch == here:
@@ -726,15 +731,13 @@ def settle(orphan=True):
                 git("branch", "-q", "-d", branch)  # refused after a squash merge: the branch stays
                 yield f"removed worktree {folder}"
         elif orphan and not tip and not (asks_gh and prs is None):  # on GitHub, only once gh has answered
-            with mutate(d) as fresh:
-                fresh["orphaned"] = {"at": now, "reason": "its branch is gone", "via": "branch gone"}
+            set_aside(d, "its branch is gone", "branch gone", now)
             yield f"orphaned {rid} ({branch}: branch gone)"
         elif orphan and rec.get("worktree") not in (None, rec.get("checkout")) and Path(rec.get("checkout") or "").is_dir() \
                 and os.path.realpath(rec["worktree"]) not in trees and \
                 git("rev-list", "--count", f"{rec.get('fork') or rec['commit']}..{tip}") == "0":
-            with mutate(d) as fresh:  # its uncommitted work went with the folder
-                fresh["orphaned"] = {"at": now, "reason": "its worktree was removed with nothing committed",
-                                     "via": "worktree removed"}
+            # its uncommitted work went with the folder
+            set_aside(d, "its worktree was removed with nothing committed", "worktree removed", now)
             yield f"orphaned {rid} ({branch}: worktree removed)"
 
 
@@ -1151,12 +1154,15 @@ def rehome():
         yield f"re-homed {rid}: {repo} -> {home.name}"
 
 
+STALE = ("⚠️ stale", "⚠️ served")
+
+
 def blocking(rec, pr=False):
     """What keeps work from being done: claims nobody addressed or whose evidence is stale, required
     checks that haven't passed and, before a PR, refuted claims, workflow stages (tidy, review)
     with no claim, or no claims at all."""
     def open_(c, v):
-        return (not c["evidence"] and not c["unverified"]) or v.startswith(("⚠️ stale", "⚠️ served")) or \
+        return (not c["evidence"] and not c["unverified"]) or v.startswith(STALE) or \
             (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌"))
     out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
            if open_((delegate(c) or (c,))[0], v)]
@@ -1648,7 +1654,7 @@ def stop_servers(hook):
 def reason_kind(line):
     """A blocking() line's kind, read from its verdict (claim lines start with their id), never its text."""
     v = re.match(r"c\d+ (.*)", line)
-    return ("missing stage" if not v else "stale" if v[1].startswith(("⚠️ stale", "⚠️ served")) else
+    return ("missing stage" if not v else "stale" if v[1].startswith(STALE) else
             "failing check" if v[1].startswith("❌") else "unaddressed")
 
 
@@ -1876,8 +1882,7 @@ def cmd_serve(a):
         """Sweep each repo with an open run from its checkout, in the background: sessions settle only the repo
         they start in, so a repo no one opens again would keep its merged runs open."""
         with reading:
-            checkouts = db().execute("SELECT DISTINCT json_extract(data, '$.checkout') FROM runs WHERE "
-                                     "json_extract(data, '$.finished') IS NULL AND json_extract(data, '$.orphaned') IS NULL").fetchall()
+            checkouts = db().execute(f"SELECT DISTINCT json_extract(data, '$.checkout') FROM runs WHERE {OPEN_RUN}").fetchall()
         for (co,) in checkouts:
             if co and Path(co).is_dir():
                 subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "sweep"], cwd=co,
