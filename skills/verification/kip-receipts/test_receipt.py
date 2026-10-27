@@ -685,7 +685,9 @@ def main():
         rc("record", "--sink", "github", "--file", "files/c3f2-demo.mp4", "--url", vid)
         assert "not uploaded" not in rc("publish", extra_env=ghenv)
         pr_body = body.read_text()
-        assert f"![c3f1-shot.png]({img})" in pr_body and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
+        thumb = f'<img src="{img}" width="240" alt="c3: c3f1-shot.png"'
+        assert thumb in pr_body and pr_body.index(thumb) < pr_body.index("<details>"), pr_body
+        assert pr_body.count(img) == 1 and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
 
         # The github-issue sink posts the ledger as one issue comment, like Linear, then updates that comment.
         assert "github-issue: posted https://github.test/issues/7#issuecomment-99" in \
