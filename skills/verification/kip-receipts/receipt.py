@@ -1510,6 +1510,8 @@ def check_pr(pr):
     print(f"check: every claim in {g['run']} is addressed")
 
 
+CURSOR_WAKE = re.compile(r'\[ComposerWakelockManager\] \w+ wakelock id=\d+ '
+                         r'reason="(user-approval-requested|agent-loop-resumed)" composerId=([\w-]+)')
 EVENTS = ROOT / "events"  # one <UTC date>.jsonl per day, so old days can be dropped without rewriting a file hooks append to
 KEEP_DAYS = 14
 ACTIVE = datetime.timedelta(minutes=30)
@@ -1548,14 +1550,15 @@ def append_event(payload, **fields):
         pass
 
 
-def log_tool(hook):
-    """A tool call: its name and a short, redacted line of what it was asked to do. No git: this runs on every call."""
+def log_tool(hook, kind="tool"):
+    """A tool call, or Claude Code asking to approve one: its name and a short, redacted line of what it was asked
+    to do. No git: this runs on every call."""
     ti = hook.get("tool_input")
     ti = ti if isinstance(ti, dict) else {}
     what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
                  if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
         (json.dumps(ti, ensure_ascii=False) if ti else "")
-    append_event(hook, hook="tool", tool=hook.get("tool_name") or hook.get("hook_event_name") or "tool",
+    append_event(hook, hook=kind, tool=hook.get("tool_name") or hook.get("hook_event_name") or "tool",
                  input=redact(str(what))[:200])
 
 
@@ -1850,6 +1853,8 @@ def cmd_serve(a):
     rows, timelines, streams, lock = {}, {}, set(), threading.Lock()
     reading = threading.Lock()  # request threads share one kip.db connection; one read transaction at a time
     offsets, partial, live = {}, {}, {"busy": time.time()}
+    renderers = {}  # each Cursor renderer.log, and how far it's been read
+    cursor_logs = [Path(os.path.expandvars(d)).expanduser() for d in kip.load()["hosts"].get("cursor", {}).get("logs", [])]
 
     def sweep():
         cutoff = str(datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=KEEP_DAYS))
@@ -1893,6 +1898,31 @@ def cmd_serve(a):
                         q.put(line)
                     live["busy"] = time.time()
 
+    def approvals(skip=False):
+        """Cursor runs no hook when it asks to run a command; its renderer log notes the ask and the resume after,
+        by session. Logged as events for sessions the log already has; skip passes over what's there already."""
+        for root in cursor_logs:
+            launches = sorted(root.glob("*")) if root.is_dir() else []  # one folder per Cursor launch
+            for p in launches[-1].glob("window*/renderer.log") if launches else []:
+                try:
+                    size = p.stat().st_size
+                    at = renderers.setdefault(p, size if skip else 0)
+                    at = 0 if size < at else at
+                    with open(p, "rb") as f:
+                        f.seek(at)
+                        chunk = f.read(size - at)
+                except OSError:  # gone between the glob and the read
+                    continue
+                chunk = chunk[:chunk.rfind(b"\n") + 1]  # a line still being written waits for the next look
+                renderers[p] = at + len(chunk)
+                for reason, sid in CURSOR_WAKE.findall(chunk.decode(errors="replace")):
+                    with lock:
+                        known = sid in rows
+                    if known:
+                        append_event({"session_id": sid, "workspace_roots": []}, **(
+                            {"hook": "ask", "message": "waiting on approval"} if reason == "user-approval-requested"
+                            else {"hook": "resume", "message": "resumed"}))
+
     def follow():
         swept = settled = time.time()
         while True:
@@ -1903,6 +1933,7 @@ def cmd_serve(a):
             if a.settle and time.time() - settled > a.settle:
                 settle_repos()
                 settled = time.time()
+            approvals()
             poll()
 
     class Handler(BaseHTTPRequestHandler):
@@ -2026,6 +2057,7 @@ def cmd_serve(a):
         sys.exit(f"kip dashboard: can't listen on 127.0.0.1:{a.port} ({err.strerror}); is it already running?")
     sweep()
     poll()
+    approvals(skip=True)
     threading.Thread(target=follow, daemon=True).start()
 
     def idle_exit():
@@ -2053,11 +2085,11 @@ def cmd_check(a):
     events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
     if a.pr:
         return check_pr(a.pr)
-    if a.hook in ("tool", "prompt", "response", "end"):  # never blocks, never adds to the agent's context
+    if a.hook in ("tool", "ask", "prompt", "response", "end"):  # never blocks, never adds to the agent's context
         hook = {}
         try:
             hook = json.loads(sys.stdin.read() or "{}")
-            {"tool": log_tool, "prompt": log_prompt,
+            {"tool": log_tool, "ask": lambda h: log_tool(h, "ask"), "prompt": log_prompt,
              "response": lambda h: log_said(h, "response", h.get("text")), "end": session_end}[a.hook](hook)
         except Exception:
             pass
@@ -2195,7 +2227,7 @@ def main():
 
     s = sub.add_parser("check", parents=[common])
     g = s.add_mutually_exclusive_group()
-    g.add_argument("--hook", choices=["start", "stop", "subagent", "pr", "edit", "tool", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
+    g.add_argument("--hook", choices=["start", "stop", "subagent", "pr", "edit", "tool", "ask", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
     s.set_defaults(fn=cmd_check)
 

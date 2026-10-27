@@ -173,7 +173,7 @@ dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoo
 </main>
 <script>
 const STAGES = ["decompose", "implement", "tidy", "review", "receipts"];
-const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "prompt", response: "reply" };
+const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "prompt", response: "reply", ask: "approval", resume: "resumed" };
 const fromHash = key => decodeURIComponent((location.hash.match(new RegExp(key + "=([^&]+)")) || [])[1] || "");
 let rows = [], selected = fromHash("session"), events = [];
 let runs = [], runSelected = fromHash("run"), view = runSelected || location.hash === "#runs" ? "runs" : "sessions";
@@ -224,11 +224,11 @@ function claimMood(x) {
 
 // Kip as the session stands: blocked or failing a claim, mid-turn, asking the user to settle an unverified claim,
 // let stop by the gate or done with its run, or idle. A question to the user (Claude Code's AskUserQuestion, Cursor's
-// AskQuestion) isn't working: it waits on them until the next event.
+// AskQuestion) or a tool call waiting on their approval isn't working: it waits on them until the next event.
 function mood(r) {
   if (r.blocked) return "failure";
   const asked = r.hook === "tool" && /^Ask(User)?Question\b/.test(r.tool || "");
-  if (r.active && r.hook !== "stop" && r.hook !== "start" && !asked) return "working";
+  if (r.active && !["stop", "start", "ask"].includes(r.hook) && !asked) return "working";
   const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop()), m = run && claimMood(run);
   if (m && !(m === "asking" && r.pr)) return m;
   return r.hook === "stop" ? "success" : "waiting";
@@ -284,7 +284,7 @@ function gist(e, text) {
 
 function eventItem(e, fresh) {
   const blocked = e.blocked === true, skill = e.hook === "tool" && e.tool === "Skill", said = "text" in e, prompt = e.hook === "prompt";
-  const text = said ? e.text : e.hook === "tool" ? (skill ? e.input : `${e.tool}${e.input ? "  " + e.input : ""}`)
+  const text = said ? e.text : e.tool ? (skill ? e.input : `${e.tool}${e.input ? "  " + e.input : ""}`)
     : e.message || (e.hook === "stop" ? "stop allowed" : e.hook);
   const long = prompt && (text.length > 600 || text.split("\n").length > 6);
   return h("li", { class: `ev${blocked ? " blocked" : ""}${skill ? " skill" : ""}${said ? " said " + e.hook : ""}${fresh ? " fresh" : ""}` },

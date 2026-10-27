@@ -17,6 +17,7 @@
                          {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr"}]},
                          {"matcher": "Edit|MultiEdit|Write|NotebookEdit", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook edit"}]},
                          {"matcher": "*", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook tool"}]}],
+          "PermissionRequest": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook ask"}]}],
           "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook prompt"}]}],
           "SessionEnd": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook end"}]}]
         }
@@ -33,6 +34,7 @@
         "key": "aicontext.personalContext",
         "manual": "Paste {rules} into Cursor Settings → Rules → User Rules (re-paste after pulling)."
       },
+      "logs": ["~/Library/Application Support/Cursor/logs", "~/.config/Cursor/logs", "$APPDATA/Cursor/logs"],
       "hooks": {
         "settings": "~/.cursor/hooks.json",
         "project_settings": ".cursor/hooks.json",

@@ -89,8 +89,8 @@ def main():
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "CLAUDE_CODE_SESSION_ID"):
             env.pop(v, None)
         Path(tmp, "home").mkdir()
-        Path(tmp, "home", "config.json").write_text(  # this machine's setup isn't the test's; skill gates have their own test
-            '{"setup": null, "workflow": {"skills": null}}')
+        Path(tmp, "home", "config.json").write_text(json.dumps({  # this machine's setup isn't the test's; skill gates have their own test
+            "setup": None, "workflow": {"skills": None}, "hosts": {"cursor": {"logs": [str(Path(tmp, "cursor-logs"))]}}}))
 
         def sh(*args, ok=True, extra_env=None, cwd=repo):
             r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
@@ -605,12 +605,31 @@ def main():
         check("--hook", "stop", event={"session_id": "p1", "cwd": str(repo), "last_assistant_message": "All set."})
         assert [(e["hook"], e.get("text")) for e in map(json.loads, lines()[-2:])] == \
             [("response", "All set."), ("stop", None)], lines()[-2:]
+        # A tool call waiting on approval: Claude Code's hook logs it; Cursor's renderer log notes it, read live.
+        assert check("--hook", "ask", event={"session_id": "p1", "cwd": str(repo), "tool_name": "Bash",
+                                             "tool_input": {"command": "docker start redis"}}) == (0, "")
+        assert [json.loads(lines()[-1])[k] for k in ("hook", "tool", "input")] == ["ask", "Bash", "docker start redis"]
+        renderer = Path(tmp, "cursor-logs", "20261026T090000", "window1", "renderer.log")
+        renderer.parent.mkdir(parents=True)
+        wake = 'x [ComposerWakelockManager] {} wakelock id=1 reason="{}" composerId={}\n'.format
+        renderer.write_text(wake("Released", "user-approval-requested", "k2"))  # before the server: history
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env=env,
                                   stdout=subprocess.PIPE, text=True)
         server.stdout.readline()
-        rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
-        server.terminate()
+        try:  # a server left running holds the test's output open
+            rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
+            assert rows["p1"]["hook"] == "ask", rows["p1"]
+            with open(renderer, "a") as f:
+                f.write(wake("Released", "user-approval-requested", "k2") + wake("Released", "user-approval-requested", "zz"))
+            hook = lambda sid: {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}.get(sid, {}).get("hook")
+            assert wait_until(lambda: hook("k2") == "ask", 5), "Cursor's approval request didn't reach its session"
+            with open(renderer, "a") as f:
+                f.write(wake("Acquired", "agent-loop-resumed", "k2"))
+            assert wait_until(lambda: hook("k2") == "resume", 5), "Cursor resuming after approval didn't reach its session"
+            assert hook("zz") is None, "an approval for a session the log doesn't have made a row"
+        finally:
+            server.terminate()
         assert rows["p1"]["skills"] == ["kip-decompose", "my-skill"] and rows["p1"]["stage"] == "implement", rows["p1"]
         assert rows["k2"]["host"] == "cursor" and rows["k2"]["repo"] == "demo", rows
         assert rows["k2"]["hook"] == "stop", "a reply landing after Cursor's stop put it back mid-turn"
