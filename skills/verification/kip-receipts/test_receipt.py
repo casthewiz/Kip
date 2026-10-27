@@ -1405,6 +1405,12 @@ def main():
         used("sk5", "Skill", "kip-decompose")
         assert "/kip-messy-bun" in edit_default("sk5")[1]
         assert "/kip-messy-bun" in edit_default("sk5")[1], "kip-messy-bun was only a nudge by default"
+        # Cursor runs this Claude Code hook too, and lets a preToolUse through unless it answers a deny.
+        code, out = check("--hook", "edit", event={"session_id": "sk5", "cwd": str(pol), "workspace_roots": [str(pol)],
+                                                   "tool_name": "Write", "tool_input": {"file_path": str(pol / "a.py")}},
+                          cwd=pol, extra_env={"KIP_HOME": str(Path(tmp, "home-defaults"))})
+        denied = json.loads(out)
+        assert denied["permission"] == "deny" and "/kip-messy-bun" in denied["agent_message"], out
         used("sk5", "Skill", "kip-messy-bun")
         assert edit_default("sk5") == (0, "")
         (pol / ".kip" / "config.json").write_text('{"workflow": {"skills": {"tidy": "sometimes"}}}')

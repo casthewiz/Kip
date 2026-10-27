@@ -2106,7 +2106,7 @@ def cmd_serve(a):
 
 def cmd_check(a):
     """The gate host hooks and CI call. Claude Code: exit 2 blocks, reasons on stderr. Cursor (its
-    events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR."""
+    events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR or a gated edit."""
     if a.pr:
         return check_pr(a.pr)
     if a.hook in ("tool", "ask", "prompt", "response", "end"):  # never blocks, never adds to the agent's context
@@ -2149,7 +2149,7 @@ def cmd_check(a):
             pass
         return print(json.dumps({"additional_context": msg} if msg else {}) if "workspace_roots" in hook else msg)
     if "workspace_roots" in hook:
-        if a.hook == "pr":
+        if a.hook in ("pr", "edit"):  # preToolUse ignores a followup_message: the edit would go through
             out = {"permission": "deny", "user_message": msg, "agent_message": msg} if blocked else {"permission": "allow"}
         else:
             out = {"followup_message": msg} if blocked else {}
