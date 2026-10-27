@@ -54,7 +54,8 @@ Before starting, read:
       ledger already lives in the PR body or its own issue comment, and
       another comment would duplicate it.
 5. `receipt.py publish` again. `render --sink github` shows the result:
-   images as `![…](…)`, videos alone on a line, which GitHub plays inline.
+   images as a thumbnail gallery under the claims table, videos alone on a
+   line in their claim's details, which GitHub plays inline.
 6. Reload the page and check each image rendered (the site interface says
    how).
 

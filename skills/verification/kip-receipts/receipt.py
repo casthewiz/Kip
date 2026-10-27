@@ -928,6 +928,12 @@ def render_markdown(rec, sink=None, github=False):
         ev = cell(handed(to, code)) if to else "<br>".join(cell(s) + (f" ×{n}" if n > 1 else "") for s, n in seen.items()) or "—"
         unit = f" {cell(c.get('unit') or '—')} |" if units else ""
         out.append(f"| {c['id']} |{unit} {cell(c['text'])} | {c['provider'] or 'generic'} | {ev} | {cell(v)} |")
+    # GitHub shows uploaded screenshots as thumbnails up here, where the folded details would hide them
+    shots = [(c["id"], html.escape(Path(f["path"]).name), f["uploads"][sink]) for c in rec["claims"]
+             for f in c["files"] if github and f["type"] == "image" and f["uploads"].get(sink)]
+    if shots:
+        out += ["", "**Screenshots**", "", " ".join(
+            f'<img src="{url}" width="240" alt="{cid}: {name}" title="{cid}: {name}">' for cid, name, url in shots)]
     for c in rec["claims"]:
         if not c["evidence"] and not c["files"]:
             continue
@@ -941,7 +947,9 @@ def render_markdown(rec, sink=None, github=False):
         for f in c["files"]:
             name = Path(f["path"]).name
             url = f["uploads"].get(sink)
-            if url and f["type"] == "image":
+            if url and f["type"] == "image" and github:
+                continue  # in the gallery
+            elif url and f["type"] == "image":
                 out += ["", f"![{name}]({url})"]
             elif url and f["type"] == "video" and github:  # alone on a line, GitHub renders a player
                 out += ["", url]
@@ -1359,6 +1367,11 @@ def looping(hook):
 
 def tool_input(hook):
     ti = hook.get("tool_input")
+    if isinstance(ti, str):  # Cursor's beforeMCPExecution sends it as JSON text
+        try:
+            ti = json.loads(ti)
+        except ValueError:
+            pass
     return ti if isinstance(ti, dict) else {}
 
 
@@ -1564,6 +1577,8 @@ def append_event(payload, **fields):
 def log_tool(hook, kind="tool"):
     """A tool call, or Claude Code asking to approve one: its name and a short, redacted line of what it was asked
     to do. No git: this runs on every call."""
+    if str(hook.get("tool_name")).startswith("MCP:"):  # Cursor's preToolUse has no server; beforeMCPExecution logs it
+        return
     ti = tool_input(hook)
     what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
                  if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
@@ -2125,6 +2140,8 @@ def cmd_check(a):
         log_said(hook, "response", hook.get("last_assistant_message"))
     if a.hook and (a.hook != "pr" or opens_pr(hook)) and (a.hook != "edit" or blocked):  # the tool hook logs the rest
         log_gate(a.hook, hook, blocked, msg)
+    if a.hook == "pr" and isinstance(hook, dict) and hook.get("mcp_server_name"):
+        log_tool({**hook, "tool_name": f"mcp__{hook['mcp_server_name']}__{hook.get('tool_name')}"})
     if a.hook == "start":
         try:
             ensure_server()

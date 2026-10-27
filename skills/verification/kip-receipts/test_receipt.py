@@ -685,7 +685,9 @@ def main():
         rc("record", "--sink", "github", "--file", "files/c3f2-demo.mp4", "--url", vid)
         assert "not uploaded" not in rc("publish", extra_env=ghenv)
         pr_body = body.read_text()
-        assert f"![c3f1-shot.png]({img})" in pr_body and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
+        thumb = f'<img src="{img}" width="240" alt="c3: c3f1-shot.png"'
+        assert thumb in pr_body and pr_body.index(thumb) < pr_body.index("<details>"), pr_body
+        assert pr_body.count(img) == 1 and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
 
         # The github-issue sink posts the ledger as one issue comment, like Linear, then updates that comment.
         assert "github-issue: posted https://github.test/issues/7#issuecomment-99" in \
@@ -1730,6 +1732,13 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
                  ("Bash", {"command": "curl http://127.0.0.1:7377/api/sessions"})]
         for name, tool_input in calls:
             check("--hook", "tool", event={**sid, "tool_name": name, "tool_input": tool_input}, extra_env=seg)
+        # Cursor names the MCP server only on beforeMCPExecution, with its input as JSON text
+        cursor = {**sid, "workspace_roots": [str(repo)]}
+        check("--hook", "tool", event={**cursor, "tool_name": "MCP:get_issue", "tool_input": {"id": "ENG-77"}},
+              extra_env=seg)
+        assert check("--hook", "pr", event={**cursor, "tool_name": "get_issue", "tool_input": '{"id":"ENG-77"}',
+                                            "mcp_server_name": "linear"}, extra_env=seg) == \
+            (0, '{"permission": "allow"}')
         check("--hook", "prompt", event={**sid, "prompt": "fix it, see https://linear.test/ENG-42."}, extra_env=seg)
         sh("git", "checkout", "-q", "-")
         sh("git", "checkout", "-q", "-")
@@ -1743,11 +1752,11 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
             assert row["runs"][0]["sinks"] == [{"name": "local", "url": None}, {"name": "linear", "url": None}] and \
                 row["runs"][0]["issue"] == "ENG-9" and row["runs"][0]["claims"] == {"✅ verified": 1}, row["runs"][0]
             assert sorted((i["key"], i["via"]) for i in row["issues"]) == \
-                [("ENG-42", "linear"), ("ENG-9", "linear"), ("PROJ-7", "claude_ai_Atlassian"),
+                [("ENG-42", "linear"), ("ENG-77", "linear"), ("ENG-9", "linear"), ("PROJ-7", "claude_ai_Atlassian"),
                  ("me/demo#12", "github")], row["issues"]
             assert sorted((s["kind"], s["name"], s["count"]) for s in row["sources"]) == [
                 ("link", "https://linear.test/ENG-42", 1), ("mcp", "claude_ai_Atlassian", 1), ("mcp", "github", 2),
-                ("mcp", "linear", 2), ("search", "UTF-8 decode error", 1), ("web", "https://api.test/v1", 1),
+                ("mcp", "linear", 3), ("search", "UTF-8 decode error", 1), ("web", "https://api.test/v1", 1),
                 ("web", "https://docs.test/a", 1)], row["sources"]
             detail = json.loads(get(port, f"/api/runs/{first.name}"))
             c1 = detail["claims"][0]
