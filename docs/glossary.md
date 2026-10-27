@@ -151,4 +151,4 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
 - `receipt.py check`: the gate, run by hooks with `--hook` (or `--pr N` in CI).
 - `receipt.py serve`: run the dashboard.
 
-`--hook` modes, one per host event: `start`, `stop`, `subagent`, `pr`, `edit`, `tool`, `prompt`, `response`, `end`.
+`--hook` modes, one per host event: `start`, `stop`, `subagent`, `pr`, `edit`, `tool`, `ask` (a tool call waiting on approval), `prompt`, `response`, `end`.
