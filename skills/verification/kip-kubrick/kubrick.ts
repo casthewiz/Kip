@@ -1,5 +1,5 @@
-// Kubrick's capture helpers for Playwright specs. Import by absolute path:
-//   import { shot } from '<HOME>/.kip/skills/kip-kubrick/kubrick.ts';
+// Kubrick's capture helpers for Playwright specs run by desktest.py:
+//   import { shot } from 'kip-kubrick/kubrick';
 // Take shots after the assertions that prove the page is ready, never instead of them.
 import { test, type Page } from '@playwright/test';
 
