@@ -74,7 +74,7 @@ Point receipts at what's being verified:
 Falsifiability doesn't require having made the change. Run the same check
 with `--red` against a **baseline** that lacks the behavior: the base
 branch, prod when the change is on staging, the previous deploy. With no
-baseline available, an ultra claim stays ⚠️ "falsifiability not shown",
+baseline available, an ultra claim stays 🧪 "falsifiability not shown",
 which is the honest result.
 
 ## Desk testing websites
@@ -228,12 +228,12 @@ database is. What makes it deterministic:
   longer matches.
 - **Same record, same output.** Rendering is a pure function of the run's
   record and the code it's rendered against (which decides what's
-  ⚠️ stale).
+  🕰️ stale).
 
 Prefer `run` over `observe`. An observation is your account of what you saw,
 which is weaker; use it only when the check is an agent tool (a browser pane)
 with no command equivalent, and attach the screenshot. Without an attachment
-it stays ⚠️ self-reported.
+it stays 🗣️ self-reported.
 
 ## Verdicts
 
@@ -243,24 +243,24 @@ it stays ⚠️ self-reported.
 - ❌ **refuted**: a check on the new code failed. Fix it within its
   [fix loop](#fix-loops), or report it plainly. Never quietly drop a refuted
   claim.
-- ❌ **check can't fail**: a `--red` run passed, so the check proves nothing.
+- 🙈 **check can't fail**: a `--red` run passed, so the check proves nothing.
   Write a check that would fail without the change.
 - ⚠️ **unverified**: no evidence, or marked `unverified` with a reason (needs
   prod credentials, needs hardware, no test harness) and what would verify it.
-- ⚠️ **falsifiability not shown**: the claim is at ultra and has no `--red` run.
-- ⚠️ **stale**: the code changed since a check last passed (compared by
+- 🧪 **falsifiability not shown**: the claim is at ultra and has no `--red` run.
+- 🕰️ **stale**: the code changed since a check last passed (compared by
   content, so committing the checked code doesn't count). Re-run it; claims
   that share a check re-run together (`run c1 c2 c3 -- …`).
-- ⚠️ **self-reported**: the only evidence is observations, with no file
+- 🗣️ **self-reported**: the only evidence is observations, with no file
   attached.
-- ⚠️ **flaky**: the same check failed and passed on the same code. Find out
+- 🎲 **flaky**: the same check failed and passed on the same code. Find out
   why before claiming anything.
-- ⚠️ **check changed after failing**: the check's own files (a spec in the
+- 🥅 **check changed after failing**: the check's own files (a spec in the
   run, a script outside the repo) changed between failing and passing. Show
   the new check fails without the fix (`--red`), or say why it changed.
-- ⚠️ **passed after failing, code not pinned**: a remote target passed a
+- 🌐 **passed after failing, code not pinned**: a remote target passed a
   check it had failed, but nothing records whether its code changed.
-- ⚠️ **served from another checkout**: the local URL the check hit was
+- 🔀 **served from another checkout**: the local URL the check hit was
   served from another checkout of this repo (worktrees share ports), not the
   code the evidence pins. Restart the dev server from this worktree, or use
   its own port, and re-run.
@@ -437,12 +437,12 @@ the latest run on the current branch.
   and the code as the session found it is remembered.
 - **Stop**: once code has changed since the run's `init` or since the
   session started, finishing a turn is blocked while any claim has neither
-  evidence nor an `unverified` reason, has ⚠️ stale evidence, or is a
+  evidence nor an `unverified` reason, has 🕰️ stale evidence, or is a
   required check that hasn't passed. With no run on the branch, a session
   that changed code is blocked until it starts one.
 - **PR**: opening a PR (`gh pr create`, a POST to `/pulls` through `gh api`,
   or an MCP `create_pull_request` tool) is blocked while any claim is open as
-  at stop or ❌, a stage has no claim, the run has no claims at all, or the
+  at stop, ❌ or 🙈, a stage has no claim, the run has no claims at all, or the
   branch has changes and no run at all. A branch with commits ahead of the
   base branch, or uncommitted changes, is judged on them however late its
   run's `init` came. A PR opened some other way (the web UI) is caught by CI.

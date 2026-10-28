@@ -218,7 +218,7 @@ const MOODS = { waiting: "idle", working: "working", asking: "needs you: an unve
 // Kip as a run's claims stand: finished, a claim failing, or one unverified and not accepted; null otherwise.
 function claimMood(x) {
   if (x.finished) return "success";
-  if (Object.keys(x.claims).some(v => v.startsWith("❌"))) return "failure";
+  if (Object.keys(x.claims).some(v => tone(v) === "bad")) return "failure";
   return x.asking ? "asking" : null;
 }
 
@@ -294,7 +294,8 @@ function eventItem(e, fresh) {
       prompt || blocked ? text : h("details", {}, h("summary", {}, gist(e, text)), text)));
 }
 
-const tone = v => v.startsWith("✅") ? "ok" : v.startsWith("❌") ? "bad" : "warn";
+// Read from a verdict's words (receipt.py's verdict()), never its emoji.
+const tone = v => { const w = v.slice(v.indexOf(" ") + 1); return w === "verified" ? "ok" : /^(refuted|check can't fail)/.test(w) ? "bad" : "warn"; };
 const link = (href, text) => href ? h("a", { href, target: "_blank", rel: "noopener" }, text) : text;
 let review = null;  // the run open in the review panel: { id, body, data }
 

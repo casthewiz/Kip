@@ -31,7 +31,7 @@ def glossary_terms():
         for r in (n for n in ast.walk(fn) if isinstance(n, ast.Return)):
             head = r.value.values[0] if isinstance(r.value, ast.JoinedStr) else r.value
             if isinstance(head, ast.Constant) and isinstance(head.value, str):
-                verdicts.add(re.split(r"[:;]", head.value.lstrip("✅❌⚠️ "))[0].strip())
+                verdicts.add(re.split(r"[:;]", head.value.split(" ", 1)[-1])[0].strip())
     defaults = json.loads((ROOT / "defaults.json").read_text())
     return ([f"`receipt.py {c}" for c in choices(RECEIPT)] + [f"`kip.py {c}" for c in choices(ROOT / "kip.py")] +
             [f"`{m}`" for m in choices(RECEIPT, "check")] + [f"**{s}**" for s in stages] +

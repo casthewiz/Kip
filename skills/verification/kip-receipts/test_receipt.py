@@ -149,14 +149,14 @@ def main():
         rc("attach", "c1", str(shot))
 
         # Evidence speaks for the code it ran on: app.py changed after c1 passed, so c1 is stale until re-run.
-        assert "| c1 | app prints hi | generic |" in rc("render") and "⚠️ stale" in rc("render")
+        assert "| c1 | app prints hi | generic |" in rc("render") and "🕰️ stale" in rc("render")
         rc("run", "c1", "--", sys.executable, "app.py")
         md = rc("render")
         assert "| c1 | app prints hi | generic |" in md and "✅ verified" in md, md
         assert "⚠️ unverified: needs PDF service" in md, md
-        assert "❌ check can't fail" in md, md
+        assert "🙈 check can't fail" in md, md
         assert "❌ refuted" in md and "exit 127" in md, md
-        assert "| c6 | billing claim at ultra floor | generic | `true` (exit 0) | ⚠️ falsifiability not shown |" in md, md
+        assert "| c6 | billing claim at ultra floor | generic | `true` (exit 0) | 🧪 falsifiability not shown |" in md, md
         assert "`c1f1-shot.png` (sha256" in md and "not uploaded" in md, md
         assert md.endswith(f"`kip-receipt {run.name}`"), md
         assert md == rc("render"), "render is not deterministic"
@@ -252,7 +252,7 @@ def main():
         assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
         # A desk test is one check per spec and viewport, whatever its URL: mobile failed on one host and
         # passed on another, and nothing pins either host's code.
-        assert "⚠️ passed after failing, code not pinned" in md, md
+        assert "🌐 passed after failing, code not pinned" in md, md
         # Viewports come from config: a project that only cares about mobile drops the others.
         (repo / ".kip" / "config.json").write_text(json.dumps(
             {**PROJECT_CONFIG, "evidence": {"frontend": {"viewports": {"tablet": None, "desktop": None}}}}))
@@ -728,16 +728,16 @@ def main():
         (repo / "app.py").write_text('print("5")\n')
         rc("run", "c1", "--", "grep", "-q", "5", "app.py")
         rc("observe", "c2", "--passed", "renders 5")
-        assert verdicts()["c2"] == "⚠️ self-reported: an observation with nothing attached", verdicts()
+        assert verdicts()["c2"] == "🗣️ self-reported: an observation with nothing attached", verdicts()
         rc("attach", "c2", str(shot))
         assert verdicts()["c2"] == "✅ verified", verdicts()
         sh("git", "commit", "-qam", "5")
         assert verdicts()["c1"] == "✅ verified" and check("--hook", "stop", event={})[0] == 0, "a commit made it stale"
         (repo / "app.py").write_text('print("6")\n')
         code, out = check("--hook", "stop", event={})
-        assert code == 2 and "c1 ⚠️ stale" in out and "c2 ⚠️ stale" in out, out
+        assert code == 2 and "c1 🕰️ stale" in out and "c2 🕰️ stale" in out, out
         code, out = check("--hook", "pr", event=gh_create)
-        assert code == 2 and "c1 ⚠️ stale" in out, out
+        assert code == 2 and "c1 🕰️ stale" in out, out
 
         # Required checks: workflow.checks become claims at init that only their own command settles,
         # and they hold stop and PR until they pass on the current code.
@@ -823,7 +823,7 @@ def main():
         rc("claim", "red re-run", "--level", "full")
         flag.write_text("")
         rc("run", "c7", "--red", "--", *has_flag)  # flag exists, so this "red" run passes: can't fail
-        assert verdicts()["c7"] == "❌ check can't fail", verdicts()
+        assert verdicts()["c7"] == "🙈 check can't fail", verdicts()
         flag.unlink()
         rc("run", "c7", "--red", "--", *has_flag)
         rc("run", "c7", "--", "true")
@@ -835,9 +835,9 @@ def main():
         assert verdicts()["c8"] == "✅ verified", verdicts()
         (repo / "added.txt").unlink()
         v = verdicts()
-        assert v["c1"] == v["c8"] == "⚠️ stale: the code changed since it was checked", v
-        assert v["c2"] == "⚠️ flaky: failed and passed on the same code", v
-        assert v["c3"].startswith("⚠️ check changed after failing"), v
+        assert v["c1"] == v["c8"] == "🕰️ stale: the code changed since it was checked", v
+        assert v["c2"] == "🎲 flaky: failed and passed on the same code", v
+        assert v["c3"].startswith("🥅 check changed after failing"), v
         assert v["c4"] == "❌ refuted" and v["c5"] == "❌ refuted" and v["c6"] == "✅ verified", v
         (repo / "app.py").write_text('print("fixed")\n')  # the changed check fails without the fix
         rc("run", "c3", "--red", "--", "sh", str(check_sh))
@@ -850,7 +850,7 @@ def main():
         new_spec.write_text("grep -q again app.py\n")
         rc("run", "c9", "--", "sh", str(old_spec))
         rc("run", "c9", "--", "sh", str(new_spec))
-        assert verdicts()["c9"].startswith("⚠️ check changed after failing"), verdicts()
+        assert verdicts()["c9"].startswith("🥅 check changed after failing"), verdicts()
         (repo / "app.py").write_text('print("fixed")\n')
         rc("run", "c9", "--red", "--", "sh", str(new_spec))
         (repo / "app.py").write_text('print("fixed again")\n')
@@ -862,7 +862,7 @@ def main():
         new_spec.write_text('case "$BASE_URL" in *baseline*) exit 1;; esac\n')
         rc("run", "c10", "--", "env", "BASE_URL=https://change.test", "sh", str(old_spec))
         rc("run", "c10", "--", "env", "BASE_URL=https://change.test", "sh", str(new_spec))
-        assert verdicts()["c10"].startswith("⚠️ check changed after failing"), verdicts()
+        assert verdicts()["c10"].startswith("🥅 check changed after failing"), verdicts()
         rc("run", "c10", "--red", "--", "env", "BASE_URL=https://baseline.test", "sh", str(new_spec))
         assert verdicts()["c10"] == "✅ verified", verdicts()
         remote = rc("init", "--target", "https://staging.example.test")
@@ -870,7 +870,7 @@ def main():
         rc("run", "c1", "--", *has_flag)
         flag.write_text("")
         rc("run", "c1", "--", *has_flag)
-        assert verdicts(("--run", remote))["c1"] == "⚠️ passed after failing, code not pinned"
+        assert verdicts(("--run", remote))["c1"] == "🌐 passed after failing, code not pinned"
 
         # Fix loops: a failed run opens one; each rerun of its check, or a corrected command (--replace), is an
         # attempt that supersedes the one before. After 3 failed attempts or 10 minutes it closes for a person.
@@ -886,7 +886,7 @@ def main():
         rc("run", "c3", "--replace", "--", "grep", "-q", "loopfix", "app.py")
         v = verdicts()
         assert v["c1"] == v["c2"] == "✅ verified", v
-        assert v["c3"].startswith("⚠️ check changed after failing"), v
+        assert v["c3"].startswith("🥅 check changed after failing"), v
         (repo / "app.py").write_text('print("fixed again")\n')  # the replacement fails without the fix
         rc("run", "c3", "--red", "--", "grep", "-q", "loopfix", "app.py")
         (repo / "app.py").write_text('print("fixed again, loopfix")\n')
@@ -1352,7 +1352,7 @@ def main():
         assert code == 2 and "c4 ⚠️ unverified: u2 c" in out and not re.search(r"  c[123] ", out), out
         fsh("git", "merge", "-q", "--no-ff", "unit1", "-m", "merge unit1")
         code, out = check("--hook", "pr", event=pr_event, cwd=fin)
-        assert "c1 ⚠️ stale" in out and not re.search(r"  c[23] ", out), out
+        assert "c1 🕰️ stale" in out and not re.search(r"  c[23] ", out), out
         frc("run", "c1")
         assert "c1 " not in check("--hook", "pr", event=pr_event, cwd=fin)[1]
         child2 = Path(urc(u2, "init", "--parent", plan_run, "--unit", "2")).name
@@ -1500,9 +1500,9 @@ def main():
 
         info, v = served_by(srv_wt)
         assert info["checkout"] == str(srv_wt.resolve()) and info["here"] == str(pol.resolve()), info
-        assert v == f"⚠️ served from another checkout: {srv_wt.resolve()}", v
+        assert v == f"🔀 served from another checkout: {srv_wt.resolve()}", v
         code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}}, cwd=pol)
-        assert code == 2 and "c1 ⚠️ served from another checkout" in out, out
+        assert code == 2 and "c1 🔀 served from another checkout" in out, out
         assert served_by(pol)[1] == "✅ verified"
         info, v = served_by(Path(tmp))
         assert info["cwd"] and info["checkout"] is None and v == "✅ verified", (info, v)
