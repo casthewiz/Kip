@@ -13,8 +13,10 @@ export default {
   use: {
     baseURL: process.env.BASE_URL,
     screenshot: 'on',
-    video: level === 'ultra' ? 'on' : 'off',
     trace: level === 'ultra' ? 'on' : 'off',
   },
-  projects: Object.entries(viewports).map(([name, use]) => ({ name, use })),
+  // Video at the viewport's own size; Playwright's default scales it down to fit 800×800.
+  projects: Object.entries(viewports).map(([name, use]) => ({
+    name, use: { ...use, video: { mode: level === 'ultra' ? 'on' : 'off', size: use.viewport } },
+  })),
 };
