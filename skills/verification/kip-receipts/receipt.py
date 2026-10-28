@@ -884,12 +884,12 @@ def rerun_note(fails, passes, last, reds):
     """Why a check that failed and later passed still isn't verified, or None when the pass is a fix:
     the same check, unchanged, passing on code that changed since it failed."""
     if last.get("remote"):
-        return "passed after failing, code not pinned"
+        return "🌐 passed after failing, code not pinned"
     if any(code_key(f) == code_key(p) and inputs_key(f) == inputs_key(p) for f in fails for p in passes):
-        return "flaky: failed and passed on the same code"
+        return "🎲 flaky: failed and passed on the same code"
     if any(inputs_key(f) != inputs_key(last) for f in fails) and \
             not any(inputs_key(r) == inputs_key(last) and r["passed"] for r in reds):
-        return "check changed after failing; show the new check fails without the fix (--red)"
+        return "🥅 check changed after failing; show the new check fails without the fix (--red)"
     return None
 
 
@@ -928,7 +928,7 @@ def verdict(c, rec):
         return "❌ refuted" + (f": fix loop closed ({closed['why']}), a person reopens it "
                                f"(`receipt.py reopen {c['id']}`)" if closed else "")
     if any(r["red"] and not r["red"][-1]["passed"] for r in runs.values()):
-        return "❌ check can't fail"
+        return "🙈 check can't fail"
     shown = any(e["phase"] == "red" for e in ev)
     latest = next((e for e in reversed(ev) if "attempt" in e and not e.get("superseded")), None)
     for r in runs.values():
@@ -944,23 +944,23 @@ def verdict(c, rec):
             mine = runs[check_key(latest)]
             note = None if any(x["passed"] for x in mine["red"]) or \
                 any(not x["passed"] for x in mine["superseded"]) else \
-                "check changed after failing; show the new check fails without the fix (--red)"
+                "🥅 check changed after failing; show the new check fails without the fix (--red)"
         if note:
-            return f"⚠️ {note}"
+            return note
         shown = True
     now = current_tree() if holds(rec) else None  # another checkout's code says nothing
     if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
-        return "⚠️ stale: the code changed since it was checked"
+        return "🕰️ stale: the code changed since it was checked"
     latest = [r["green"][-1].get("served") or {} for r in runs.values() if r["green"]]
     away = [s["checkout"] for s in latest if s.get("checkout") not in (None, s.get("here"))]
     if away:
-        return f"⚠️ served from another checkout: {away[0]}"
+        return f"🔀 served from another checkout: {away[0]}"
     if c["unverified"] or not ev:
         return "⚠️ unverified"
     if all(e["kind"] == "observed" for e in ev) and not c["files"]:
-        return "⚠️ self-reported: an observation with nothing attached"
+        return "🗣️ self-reported: an observation with nothing attached"
     if level == "ultra" and not shown:
-        return "⚠️ falsifiability not shown"
+        return "🧪 falsifiability not shown"
     return "✅ verified"
 
 
@@ -1271,7 +1271,12 @@ def rehome():
         yield f"re-homed {rid}: {repo} -> {home.name}"
 
 
-STALE = ("⚠️ stale", "⚠️ served")
+STALE, FAILING = ("stale", "served"), ("refuted", "check can't fail")
+
+
+def words(v):
+    """A verdict without its emoji, which code reads so the emoji stays free to change."""
+    return v.split(" ", 1)[1]
 
 
 def blocking(rec, pr=False):
@@ -1279,8 +1284,8 @@ def blocking(rec, pr=False):
     checks that haven't passed and, before a PR, refuted claims, workflow stages (tidy, review)
     with no claim, or no claims at all."""
     def open_(c, v):
-        return (not c["evidence"] and not c["unverified"]) or v.startswith(STALE) or \
-            (c.get("check") and not v.startswith("✅")) or (pr and v.startswith("❌")) or \
+        return (not c["evidence"] and not c["unverified"]) or words(v).startswith(STALE) or \
+            (c.get("check") and words(v) != "verified") or (pr and words(v).startswith(FAILING)) or \
             (c.get("loop") and not c["loop"]["fixed"])
     out = [f"{c['id']} {v}: {c['text']}" for c in rec["claims"] for v in [verdict(c, rec)]
            if open_((delegate(c) or (c,))[0], v)]
@@ -1788,8 +1793,8 @@ def stop_servers(hook):
 def reason_kind(line):
     """A blocking() line's kind, read from its verdict (claim lines start with their id), never its text."""
     v = re.match(r"c\d+ (.*)", line)
-    return ("missing stage" if not v else "stale" if v[1].startswith(STALE) else
-            "failing check" if v[1].startswith("❌") else "unaddressed")
+    return ("missing stage" if not v else "stale" if words(v[1]).startswith(STALE) else
+            "failing check" if words(v[1]).startswith(FAILING) else "unaddressed")
 
 
 def sources(tool, what):
@@ -1932,7 +1937,7 @@ def triage(seen):
             ("sessions linked only by branch", branch_only),
             ("settled before Kip recorded how", settled and "via" not in settled),
             ("its worktree was removed with work not merged", state == "open" and tree and tree["linked"] and not tree["live"]),
-            ("evidence served from another checkout", any(v.startswith("⚠️ served") for v in summary["claims"]))) if on]
+            ("evidence served from another checkout", any(words(v).startswith("served") for v in summary["claims"]))) if on]
         newest.setdefault(key, rid)
         if rec.get("parent"):
             children.setdefault(rec["parent"], []).append(rid)

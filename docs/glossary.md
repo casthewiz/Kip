@@ -69,15 +69,15 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 
 - ✅ **verified**: all evidence passed.
 - ❌ **refuted**: a check on the new code failed.
-- ❌ **check can't fail**: a `--red` run passed, so the check proves nothing.
+- 🙈 **check can't fail**: a `--red` run passed, so the check proves nothing.
 - ⚠️ **unverified**: no evidence, or marked `unverified` with a reason.
-- ⚠️ **falsifiability not shown**: an ultra claim with no `--red` run.
-- ⚠️ **stale**: the code changed since the check last passed.
-- ⚠️ **self-reported**: only observations, nothing attached.
-- ⚠️ **flaky**: the same check failed and passed on the same code.
-- ⚠️ **check changed after failing**: the check's own files changed between failing and passing.
-- ⚠️ **passed after failing, code not pinned**: a remote target passed after failing, with no record of whether its code changed.
-- ⚠️ **served from another checkout**: the local URL was served by another worktree's dev server.
+- 🧪 **falsifiability not shown**: an ultra claim with no `--red` run.
+- 🕰️ **stale**: the code changed since the check last passed.
+- 🗣️ **self-reported**: only observations, nothing attached.
+- 🎲 **flaky**: the same check failed and passed on the same code.
+- 🥅 **check changed after failing**: the check's own files changed between failing and passing.
+- 🌐 **passed after failing, code not pinned**: a remote target passed after failing, with no record of whether its code changed.
+- 🔀 **served from another checkout**: the local URL was served by another worktree's dev server.
 - **accepted**: not a verdict; the user took an unverified claim as it stands (`receipt.py accept`), so the dashboard stops asking.
 
 ## Run lifecycle
