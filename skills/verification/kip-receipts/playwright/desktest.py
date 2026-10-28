@@ -106,10 +106,12 @@ def main():
     for vp in viewports:
         with tempfile.TemporaryDirectory(prefix=f"kip-{vp}-") as out:
             # Every input is spelled out in the recorded command, so the evidence reruns exactly.
-            # NODE_PATH lets specs anywhere (e.g. a custom $KIP_RECEIPTS_DIR) import Kip's @playwright/test.
+            # NODE_PATH lets specs anywhere (e.g. a custom $KIP_RECEIPTS_DIR) import Kip's @playwright/test,
+            # and kip-kubrick's capture helpers as 'kip-kubrick/kubrick'.
             vp_json = json.dumps({vp: configured[vp]}, separators=(",", ":"))
+            node_path = f"{kip.KIP_HOME / 'node_modules'}{os.pathsep}{HERE.parents[1]}"
             cmd = ["env", f"BASE_URL={a.url}", f"KIP_VIEWPORTS={vp_json}", f"KIP_LEVEL={level}",
-                   f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={kip.KIP_HOME / 'node_modules'}",
+                   f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={node_path}",
                    *pw, "test", str(spec), "--config", str(CONFIG), f"--project={vp}"]
             r = subprocess.run([sys.executable, str(RECEIPT), "run", a.claim, *run_args,
                                 *(["--red"] if a.red else []), "--collect", out,

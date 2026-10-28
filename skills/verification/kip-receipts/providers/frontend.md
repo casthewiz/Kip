@@ -43,6 +43,10 @@ exactly that. The spec should:
 - Assert the outcome through roles, labels, and text (`getByRole`,
   `getByLabel`, `getByText`), not CSS selectors or screenshots.
 - Fail on console errors and horizontal overflow.
+- Capture with kip-kubrick's `shot(page, name)` (`import { shot } from
+  'kip-kubrick/kubrick'`) after the assertions, not `page.screenshot`: a
+  stable name, animations finished, and the full height even when the app
+  scrolls inside a container.
 
 ## ultra
 Everything in full, plus:
@@ -64,6 +68,6 @@ Playwright list output, and the screenshots. Use `observe` only for checks
 done in an agent browser tool, and attach the screenshot.
 
 ## Files
-Collected automatically by `desktest.py`: an end-state screenshot per test
-per viewport at every level, plus a video and a Playwright trace (`.zip`,
-open with `npx playwright show-trace`) at ultra.
+Collected automatically by `desktest.py`: each `shot()` and an end-state
+screenshot per test per viewport at every level, plus a video and a
+Playwright trace (`.zip`, open with `npx playwright show-trace`) at ultra.
