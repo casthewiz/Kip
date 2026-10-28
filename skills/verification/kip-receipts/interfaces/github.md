@@ -24,8 +24,8 @@ which come back as a `https://github.com/user-attachments/files/<id>/<name>`
 link. A `.log` set through Claude in Chrome's `file_upload` is refused ("We
 don't support that file type", the form gets `is-bad-file`) though GitHub lists
 LOG, likely for the MIME type it's sent with: upload a byte-identical `.txt`
-copy and record that URL against the run's `.log`. Make a big or other
-video an MP4 under 10 MB first (`ffmpeg -i in -vf scale=1280:-2 -crf 28 out.mp4`).
+copy and record that URL against the run's `.log`. Make a WebM or a big
+video an MP4 under 10 MB first: `kubrick.py mp4 VIDEO` (kip-kubrick).
 
 - Find the file input: it carries the `hidden` attribute, so an
   accessibility-tree `find` can miss it and return the "Attach files"
@@ -48,5 +48,8 @@ cookie: the cookie is a credential and the endpoint is undocumented.
 Last verified: 2026-10-24, on casthewiz/Kip#24 (public repo) through Claude
 in Chrome: unhiding the file input still needed; four JPGs uploaded through one
 ref and rendered in the PR body (`naturalWidth` 800); two `.log` files were
-refused and went up as `.txt` copies, linked; no comment posted. Video not yet
-checked.
+refused and went up as `.txt` copies, linked; no comment posted. Video:
+2026-10-28, on casthewiz/Kip#42 through Claude in Chrome: a `kubrick.py mp4`
+MP4 (41 KB) came back as a bare `user-attachments/assets` URL and, alone on
+a line in its claim's details, played inline (`<video>` 1280×800,
+`readyState` 4); no comment posted.

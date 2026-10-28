@@ -61,6 +61,8 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **required check**: a `workflow.checks` command; `init` adds one claim for it, and only that command settles it. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#required-checks)
 - **desk test**: one Playwright spec run against a URL at each configured viewport, via `playwright/desktest.py`. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#desk-testing-websites)
 - **viewport**: a named browser size (mobile, tablet, desktop) under `evidence.frontend.viewports`.
+- **capture**: a screenshot or recording of a site made by `kip-kubrick`, in a spec or with no spec (`kubrick.py shot|record`), collected as a claim's attachments. [kip-kubrick](../skills/verification/kip-kubrick/SKILL.md)
+- **shot**: a named PNG from `shot(page, name)`, taken after the assertions with animations finished, at full height even inside a scrolling container. [kip-kubrick](../skills/verification/kip-kubrick/SKILL.md#steps)
 - **provider**: the procedure for producing evidence on one claim surface (frontend, browser, api, generic), with a `fallback`; an `evidence` surface. [providers](../skills/verification/kip-receipts/providers/CONTRACT.md)
 
 ### Verdicts
@@ -154,5 +156,10 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
 - `receipt.py path` / `receipt.py json` / `receipt.py db`: the run's folder, its record, the database.
 - `receipt.py check`: the gate, run by hooks with `--hook` (or `--pr N` in CI).
 - `receipt.py serve`: run the dashboard.
+
+`kubrick.py` (captures; `~/.kip/skills/kip-kubrick/kubrick.py`):
+
+- `kubrick.py shot CLAIM URL` / `kubrick.py record CLAIM URL`: a PNG or WebM per viewport through `desktest.py`, with no spec (`--viewports`, `--run`).
+- `kubrick.py mp4 VIDEO [OUT]`: an H.264 MP4 under 10 MB that GitHub plays inline.
 
 `--hook` modes, one per host event: `start`, `stop`, `subagent`, `pr`, `edit`, `tool`, `ask` (a tool call waiting on approval), `prompt`, `response`, `end`.

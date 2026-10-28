@@ -40,6 +40,7 @@ opened it.
 | [kip-messy-bun](skills/implementation/kip-messy-bun/SKILL.md) | Laziest solution that actually works |
 | [kip-marie-kondo](skills/implementation/kip-marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
 | [kip-receipts](skills/verification/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
+| [kip-kubrick](skills/verification/kip-kubrick/SKILL.md) | Capture screenshots and recordings with Playwright the same way every time |
 
 Plus always-on [rules](rules/user-rules.md) that tie them together.
 

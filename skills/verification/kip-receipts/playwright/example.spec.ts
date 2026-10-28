@@ -3,6 +3,7 @@
 //   cp example.spec.ts "$(python3 receipt.py path)/specs/c1.spec.ts"
 // The site under test comes from BASE_URL, so use relative paths.
 import { test, expect } from '@playwright/test';
+import { shot } from 'kip-kubrick/kubrick';
 
 test('signup shows a confirmation', async ({ page }) => {
   const errors: string[] = [];
@@ -15,6 +16,7 @@ test('signup shows a confirmation', async ({ page }) => {
 
   // The behavior the claim promises.
   await expect(page.getByText('Check your inbox')).toBeVisible();
+  await shot(page, 'confirmation'); // after the assertion, so the shot shows the proven state
 
   // Holds at every viewport: no horizontal overflow, no console errors.
   // Compare against the emulated viewport, not window.innerWidth: mobile
