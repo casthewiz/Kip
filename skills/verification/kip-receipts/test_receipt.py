@@ -729,6 +729,11 @@ def main():
         rc("run", "c1", "--", "grep", "-q", "5", "app.py")
         rc("observe", "c2", "--passed", "renders 5")
         assert verdicts()["c2"] == "🗣️ self-reported: an observation with nothing attached", verdicts()
+        # Free text is shown literally: a tag in an observation would otherwise swallow the rest of the ledger
+        rc("observe", "c2", "--passed", "details render a <video> & `<b>` player")
+        for sink in ("local", "github"):
+            md = rc("render", "--sink", sink)
+            assert "<video>" not in md and "- observed: details render a &lt;video> & `<b>` player ·" in md, md
         rc("attach", "c2", str(shot))
         assert verdicts()["c2"] == "✅ verified", verdicts()
         sh("git", "commit", "-qam", "5")

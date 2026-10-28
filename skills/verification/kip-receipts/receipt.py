@@ -1019,9 +1019,11 @@ def has_units(rec):
 
 
 def render_markdown(rec, sink=None, github=False):
-    def cell(s):  # a tag in claim text would render as HTML; code spans already show it literally
-        s = re.sub(r"(`[^`]*`)|<", lambda m: m.group(1) or "&lt;", str(s))
-        return s.replace("|", "\\|").replace("\n", " ")
+    def lit(s):  # a tag in free text would render as HTML; code spans already show it literally
+        return re.sub(r"(`[^`]*`)|<", lambda m: m.group(1) or "&lt;", str(s))
+
+    def cell(s):
+        return lit(s).replace("|", "\\|").replace("\n", " ")
 
     def code(s):
         return f"`{s}`"
@@ -1048,9 +1050,9 @@ def render_markdown(rec, sink=None, github=False):
             continue
         # GitHub folds each claim's evidence into a dropdown; the table above is the summary
         out += ["", f"<details><summary><b>{c['id']}</b>: {html.escape(c['text'])}</summary>"] if github else \
-            ["", f"**{c['id']}**: {c['text']}"]
+            ["", f"**{c['id']}**: {lit(c['text'])}"]
         for e in c["evidence"]:
-            out += ["", f"- {summarize(e, full=True)} · {evidence_meta(e, code)}"]
+            out += ["", f"- {lit(summarize(e, full=True))} · {evidence_meta(e, code)}"]
             if e.get("excerpt"):
                 out += ["", "```", e["excerpt"], "```"]
         for f in c["files"]:
