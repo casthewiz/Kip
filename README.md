@@ -3,7 +3,7 @@
 <img src="assets/mascot/kip-working.svg" width="96" alt="Kip, a round pixel-art mascot with glasses and a messy bun, typing on a laptop">
 
 **A portable harness for agentic software development.** Skills, rules, and
-hooks that make Claude Code and Cursor work like a careful senior engineer,
+hooks that make Claude Code, Cursor, and Codex work like a careful senior engineer,
 in any project.
 
 Agents are fast but overconfident: they over-build, leave clutter behind, and
@@ -46,8 +46,8 @@ Plus always-on [rules](rules/user-rules.md) that tie them together.
 
 ## Highlights
 
-- **Works where you work.** One install wires Claude Code and Cursor; a
-  `git pull` updates both.
+- **Works where you work.** One install wires Claude Code, Cursor, and
+  Codex; a `git pull` updates them all.
 - **Evidence, not vibes.** Receipts record commands, outputs, screenshots, and
   videos, including Playwright desk tests across viewports, and publish them
   locally or to Linear, Jira, a GitHub issue, or the PR.

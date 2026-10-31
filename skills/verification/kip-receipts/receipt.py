@@ -147,12 +147,25 @@ def github_url():
     return m and f"https://github.com/{m[1]}"
 
 
-OWNERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID")  # Codex first: launched from Claude Code, it inherits Claude's
+OWNERS = {"codex": "CODEX_THREAD_ID", "claude": "CLAUDE_CODE_SESSION_ID"}  # host process name: its session's variable
 
 
 def writer():
-    """The agent session running this command, from its shell; None where the host doesn't say (Cursor)."""
-    return next((os.environ[k] for k in OWNERS if os.environ.get(k)), None)
+    """The agent session running this command, from its shell; None where the host doesn't say (Cursor). One host
+    started from the other's shell inherits its variable too, so then the nearest host process up the tree decides."""
+    found = [k for k in OWNERS.values() if os.environ.get(k)]
+    if len(found) > 1:
+        pid = os.getpid()
+        for _ in range(30):
+            r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+            ppid, _, comm = r.stdout.strip().partition(" ")
+            if r.returncode or not ppid.isdigit():
+                break
+            host = os.path.basename(comm.strip())
+            if host in OWNERS:
+                return os.environ[OWNERS[host]]
+            pid = int(ppid)
+    return os.environ[found[0]] if found else None
 
 
 def sha256(path):
@@ -1339,7 +1352,7 @@ def worktree_policy():
 def use_a_worktree(where):
     return (f"kip: {where} is in the main checkout; work in a linked worktree instead: "
             "`python3 ~/.kip/kip/kip.py worktree new NAME` (prints its path), or your host's own "
-            "(`claude --worktree`, EnterWorktree, a Cursor worktree), then make the change there.")
+            "(`claude --worktree`, EnterWorktree, a Cursor or Codex worktree), then make the change there.")
 
 
 NUDGES = ROOT / "nudges"  # <session id>: nudged once off a main checkout; <session id>.<stage>: that skill is settled
@@ -1358,8 +1371,11 @@ def edit_gate(hook):
     are worktree work under workflow.worktrees, and workflow.skills' decompose and implement skills come first. One
     git call decides a file outside a repo; one in a linked worktree adds none once those skills are used."""
     ti = tool_input(hook)
-    paths = PATCH_FILE.findall(str(ti.get("command") or "")) if hook.get("tool_name") == "apply_patch" else \
-        [ti.get("file_path") or ti.get("notebook_path")]
+    command = str(ti.get("command") or "")
+    # Codex's apply_patch tool, or the same patch run through its shell (`apply_patch <<'EOF'`); relative paths are
+    # taken from the session's folder (messy-bun: a `cd X &&` before the patch isn't followed)
+    paths = PATCH_FILE.findall(command) if hook.get("tool_name") == "apply_patch" or "*** Begin Patch" in command \
+        else [ti.get("file_path") or ti.get("notebook_path")]
     in_repo, blocked, msg = False, False, ""
     for path in [os.path.abspath(p) for p in paths if p]:  # before a chdir below moves what a relative one means
         folder = Path(path).parent
@@ -1773,7 +1789,7 @@ def ensure_server():
             return
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, env={k: v for k, v in os.environ.items() if k not in OWNERS})  # shared: no session's to stop
+                     start_new_session=True, env={k: v for k, v in os.environ.items() if k not in OWNERS.values()})  # shared: no session's to stop
 
 
 def session_end(hook):
@@ -2286,6 +2302,9 @@ def cmd_check(a):
             ensure_server()
         except Exception:
             pass
+        if HOST == "codex":  # always a line: the rules tell a Codex session that starts without one its hooks aren't trusted
+            ctx = "\n".join(["kip: hooks are running.", msg] if msg else ["kip: hooks are running."])
+            return print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}))
         return print(json.dumps({"additional_context": msg} if msg else {}) if "workspace_roots" in hook else msg)
     if "workspace_roots" in hook:
         if a.hook in ("pr", "edit"):  # preToolUse ignores a followup_message: the edit would go through

@@ -5,8 +5,8 @@
 The hooks keep a session log, one file per day in `~/.kip/receipts/events/`
 (the dashboard keeps 14 days): every gate decision and every tool call,
 redacted and cut short. Neither host has a hook for skills, so a skill counts
-as used when a prompt names it (`/name`) or attaches it, or a tool reads its
-`SKILL.md`. A tool call waiting on your approval is logged too: Claude Code's
+as used when a prompt names it (`/name`, or `$name` in Codex) or attaches it, or a tool reads its
+`SKILL.md`. A tool call waiting on your approval is logged too: Claude Code's and Codex's
 `PermissionRequest` hook notes it, and since Cursor has no hook for it, the
 dashboard reads Cursor's own `renderer.log` (under the folders in `defaults.json`'s
 `hosts.cursor.logs`) for when a session asks and when it resumes. Each prompt and the agent's reply are kept too (redacted, up to

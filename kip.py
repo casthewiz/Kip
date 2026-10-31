@@ -398,14 +398,18 @@ def hooks_trust(hooks):
 
 
 def install_hooks(hooks, path):
-    """Replace Kip's own hook groups in the host's settings; leave every other hook alone."""
+    """Replace Kip's own hook groups in the host's settings; leave every other hook alone. True if Kip's groups
+    changed, which a host that trusts hooks by their hash (Codex) stops running until they're trusted again."""
     settings = {**hooks.get("init", {}), **read_settings(path)}
     on = settings.setdefault("hooks", {})
+    changed = False
     for event, groups in hook_groups(hooks).items():
+        changed |= [g for g in on.get(event, []) if is_kip(g)] != groups
         on[event] = [g for g in on.get(event, []) if not is_kip(g)] + groups
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n")
     print(f"  hooks: {', '.join(hooks['events'])} in {path}")
+    return changed
 
 
 def hosts(a):
@@ -572,9 +576,8 @@ def cmd_install(a):
         if h.get("rules") and not a.project:
             install_rules(h["rules"])
         if h.get("hooks"):
-            install_hooks(h["hooks"], where(h["hooks"], "settings", top))
-            if h["hooks"].get("trust"):
-                print("  hooks: " + h["hooks"]["trust"]["project_manual" if top else "manual"])
+            if install_hooks(h["hooks"], where(h["hooks"], "settings", top)) and h["hooks"].get("trust"):
+                print("  hooks: new or changed; " + h["hooks"]["trust"]["project_manual" if top else "manual"])
     if not a.project:
         install_service()
         if git_hooks_dir():

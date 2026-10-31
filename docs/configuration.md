@@ -13,7 +13,7 @@ surface needs and whether it's here.
 
 | Kind | What it is | Defaults |
 | --- | --- | --- |
-| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, `sqlite` databases with a `key` to write the rules into, or `manual` instructions as the fallback), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (stop, subagent, edit and PR gates; logs tools and prompts), cursor |
+| `hosts` | Agent tools that load skills: `skills` dir, `project_skills` dir, how `rules` are installed (`append` an import line, a `file` to keep a copy in, `sqlite` databases with a `key` to write the rules into, or `manual` instructions as the fallback), and `hooks` merged into the host's `settings` (or `project_settings`) | kip, claude-code (stop, subagent, edit and PR gates; logs tools and prompts), cursor, codex (Claude Code's hooks, `--host codex`, with `trust` read from Codex's app server) |
 | `connectors` | The agent's own tools a surface can run through: `kind` is `mcp` or `tool` | browser |
 | `evidence` | [Receipts providers](../skills/verification/kip-receipts/providers/CONTRACT.md): a `doc` procedure, plus a `fallback` | frontend (Playwright `viewports`), browser, api, generic |
 | `destinations` | [Receipts sinks](../skills/verification/kip-receipts/sinks/CONTRACT.md): a module `type` with its `settings`, or `via` a connector; plus `default_destination` | local, linear, jira, github, github-issue |

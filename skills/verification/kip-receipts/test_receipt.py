@@ -1498,11 +1498,18 @@ def main():
                     + "*** End Patch"}
 
         logged = len(lines())
-        assert codex("start", "SessionStart")[0] == 0
+        code, out = codex("start", "SessionStart")
+        start = json.loads(out)["hookSpecificOutput"]
+        assert code == 0 and start["hookEventName"] == "SessionStart" and \
+            start["additionalContext"].startswith("kip: "), "a trusted Codex session got no kip: line to tell it apart"
         assert codex("prompt", "UserPromptSubmit") == (0, "")
         assert json.loads(lines()[-1])["input"] == "probe-agents", "a `$name` in .agents/skills didn't count"
         code, out = codex("edit", "PreToolUse:apply_patch")
         assert code == 2 and "/kip-decompose" in out and "/kip-messy-bun" in out, out
+        heredoc = {"command": "apply_patch <<'EOF'\n" + patch(cx / "a.txt")["command"] + "\nEOF"}
+        code, out = codex("edit", "PreToolUse:Bash", tool_input=heredoc)
+        assert code == 2 and "/kip-decompose" in out, "a patch run through Codex's shell skipped the edit gate"
+        assert codex("edit", "PreToolUse:Bash", tool_input={"command": "git status"}) == (0, "")
         codex("tool", "PreToolUse:apply_patch", tool_input=patch(cx / ".agents/skills/kip-decompose/SKILL.md"))
         assert "/kip-decompose" in codex("edit", "PreToolUse:apply_patch")[1], "patching a SKILL.md counted as using it"
         codex("prompt", "UserPromptSubmit", prompt="$kip-decompose this first")
@@ -1516,9 +1523,18 @@ def main():
         assert codex("edit", "PreToolUse:apply_patch", tool_input=patch(Path(tmp, "outside.txt"))) == (0, "")
         (cx / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
         cx_run = Path(rc("init", cwd=cx))
-        assert rc("claim", "a.txt says hello", cwd=cx, extra_env={
-            "CODEX_THREAD_ID": fixture["Stop"]["session_id"], "CLAUDE_CODE_SESSION_ID": "stray"}) == "c1"
-        assert run_json(cx_run)["claims"][0]["session"] == fixture["Stop"]["session_id"]
+        # Hosts started from each other's shells inherit both ids; the nearest host process (a shell named codex or
+        # claude here) says whose session it is
+        both = {"CODEX_THREAD_ID": fixture["Stop"]["session_id"], "CLAUDE_CODE_SESSION_ID": "claude-session"}
+        for host in ("codex", "claude"):
+            Path(tmp, host).symlink_to("/bin/sh")
+        def claim_in(host, text):
+            return sh(str(Path(tmp, host)), "-c", f'"{sys.executable}" "{SCRIPT}" claim "{text}"; true', cwd=cx,
+                      extra_env=both)
+        assert claim_in("codex", "a.txt says hello") == "c1"
+        assert claim_in("claude", "nested claim") == "c2"
+        sessions = [c["session"] for c in run_json(cx_run)["claims"]]
+        assert sessions == [fixture["Stop"]["session_id"], "claude-session"], sessions
         (cx / "a.txt").write_text("hello\n")
         code, out = codex("pr", "PreToolUse:Bash", tool_input={"command": "gh pr create --fill"})
         assert code == 2 and "c1 ⚠️ unverified: a.txt says hello" in out, out

@@ -40,7 +40,7 @@
           "SubagentStop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook subagent --host codex"}]}],
           "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr --host codex"}]},
                          {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr --host codex"}]},
-                         {"matcher": "apply_patch|Edit|Write", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook edit --host codex"}]},
+                         {"matcher": "apply_patch|Edit|Write|Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook edit --host codex"}]},
                          {"matcher": "*", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook tool --host codex"}]}],
           "PermissionRequest": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook ask --host codex"}]}],
           "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook prompt --host codex"}]}],

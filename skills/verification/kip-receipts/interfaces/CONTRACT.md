@@ -8,7 +8,8 @@ Kip splits work that runs through a browser into two parts:
   written only in the browser operations below.
 - An **interface** says how one surface does it, and lives here, one file
   per surface. An agent host (where the agent runs) supplies the operations:
-  [claude-code](claude-code.md), [cursor](cursor.md), [playwright-mcp](playwright-mcp.md).
+  [claude-code](claude-code.md), [cursor](cursor.md), [codex](codex.md),
+  [playwright-mcp](playwright-mcp.md).
   A site (what the agent works on) supplies its URLs, selectors, and results:
   [github](github.md).
 

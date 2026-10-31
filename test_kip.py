@@ -327,7 +327,7 @@ def main():
         assert sorted(on["hooks"]) == sorted(["SessionStart", "Stop", "SubagentStop", "PreToolUse", "PermissionRequest",
                                               "UserPromptSubmit", "SessionEnd"]), on
         pre = on["hooks"]["PreToolUse"]
-        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "apply_patch|Edit|Write", "*"]
+        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "apply_patch|Edit|Write|Bash", "*"]
         assert [g["hooks"][0]["command"].split()[-3] for g in pre] == ["pr", "pr", "edit", "tool"], pre
         kips = [h["command"] for gs in on["hooks"].values() for g in gs for h in g["hooks"] if g != mine]
         assert len(kips) == 10 and all(c.endswith(" --host codex") for c in kips), kips
@@ -335,8 +335,14 @@ def main():
         assert text.startswith("# my own\n\n<!-- kip rules: ") and text.count("<!-- /kip rules -->") == 1, text
         assert RULES.read_text().strip() in text
         first = codex_hooks.read_text(), agents.read_text()
-        assert "rules: already in" in kip("install", "--host", "codex")
+        again = kip("install", "--host", "codex")
+        assert "rules: already in" in again and "trust Kip's hooks" not in again, again  # unchanged hooks keep their trust
         assert (codex_hooks.read_text(), agents.read_text()) == first, "second install changed Codex's files"
+        changed = json.loads(first[0])
+        changed["hooks"]["Stop"][-1]["hooks"][0]["command"] += " --old"
+        write(codex_hooks, changed)
+        assert "hooks: new or changed; open Codex and trust" in kip("install", "--host", "codex"), \
+            "a changed hook Codex now skips went unmentioned"
         assert "codex          ready · hooks installed · 10 of 10 hooks untrusted (open Codex" in kip("doctor")
         assert "hooks installed · hooks trusted · rules current" in kip("doctor", FAKE_TRUST="trusted")
         agents.write_text(text.replace("Lazy senior developer", "Old rule"))

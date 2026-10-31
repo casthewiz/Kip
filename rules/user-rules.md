@@ -14,13 +14,13 @@ On any coding task, follow the `/kip-messy-bun` skill: it holds the ladder (YAGN
 
 ## Question tool for fixed choices
 
-When asking clarifying questions with fixed choices, always use the structured question tool (AskQuestion in Cursor, AskUserQuestion in Claude Code) instead of listing options inline in chat. Prefer one focused question per turn. Only fall back to inline questions if no question tool is available in the current session.
+When asking clarifying questions with fixed choices, always use the structured question tool (AskQuestion in Cursor, AskUserQuestion in Claude Code, request_user_input in Codex) instead of listing options inline in chat. Prefer one focused question per turn. Only fall back to inline questions if no question tool is available in the current session.
 
 ---
 
 ## Claims and evidence
 
-Anything you believe you accomplished is a claim until evidence settles it. Evidence is a rerunnable, deterministic check (command, test, request, query) plus its observed output, and it must be capable of failing if the claim is false. "I read the code and it looks right" is not evidence. Never report something as done, fixed, working, or passing without evidence; label it unverified and say why. Follow the `/kip-receipts` skill for thoroughness levels and the claims ledger. Where the host supports hooks, this is enforced: unaddressed claims block ending the turn.
+Anything you believe you accomplished is a claim until evidence settles it. Evidence is a rerunnable, deterministic check (command, test, request, query) plus its observed output, and it must be capable of failing if the claim is false. "I read the code and it looks right" is not evidence. Never report something as done, fixed, working, or passing without evidence; label it unverified and say why. Follow the `/kip-receipts` skill for thoroughness levels and the claims ledger. Where the host supports hooks, this is enforced: unaddressed claims block ending the turn. Codex runs Kip's hooks only once the user trusts them, and then every session starts with a `kip:` line; in Codex without one, tell the user to trust Kip's hooks with `/hooks` (`python3 ~/.kip/kip/kip.py doctor` shows which).
 
 ---
 
