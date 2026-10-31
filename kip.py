@@ -380,15 +380,22 @@ def codex_hash(event, group, hook):
                                                  ensure_ascii=False).encode()).hexdigest()
 
 
+TRUSTED_HASH = re.compile(r'^\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*\n\s*trusted_hash\s*=\s*"([^"]+)"', re.M)
+
+
 def config_trust(path):
     """How many of Kip's hooks in Codex's hooks.json are untrusted, and of how many, from the trusted hashes Codex
-    keeps in config.toml beside it. None when that can't decide: no tomllib, or a hash that differs, which is a
-    modified hook or a hash Kip no longer computes as Codex does."""
+    keeps in config.toml beside it. None when that can't decide: a config.toml that won't parse, or a hash that
+    differs, which is a modified hook or a hash Kip no longer computes as Codex does."""
+    conf = path.parent / "config.toml"
     try:
-        import tomllib
-        conf = path.parent / "config.toml"
-        state = tomllib.loads(conf.read_text()).get("hooks", {}).get("state", {}) if conf.exists() else {}
-    except (ImportError, OSError, ValueError):
+        text = conf.read_text() if conf.exists() else ""
+        try:
+            import tomllib
+            state = tomllib.loads(text).get("hooks", {}).get("state", {})
+        except ImportError:  # before Python 3.11: Codex writes each entry as a table holding its trusted_hash
+            state = {json.loads(k): {"trusted_hash": v} for k, v in TRUSTED_HASH.findall(text)}
+    except (OSError, ValueError):
         return None
     untrusted = mine = 0
     for event, groups in read_settings(path).get("hooks", {}).items():
