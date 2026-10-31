@@ -1490,6 +1490,11 @@ def main():
             sh("git", *cmd, cwd=cx)
         fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", str(cx)))
 
+        # The dashboard's question tools, as hooks see them (codex exec's is request_user_input_async)
+        asked = re.search(r'r\.hook === "tool" && /(.+?)/\.test', SCRIPT.with_name("dashboard.html").read_text())[1]
+        for name in ("AskUserQuestion", "AskQuestion", fixture["PreToolUse:request_user_input_async"]["tool_name"]):
+            assert re.search(asked, name), f"the dashboard doesn't see {name} as asking"
+
         def codex(kind, name, **over):
             return check("--hook", kind, "--host", "codex", event={**fixture[name], **over}, cwd=cx)
 

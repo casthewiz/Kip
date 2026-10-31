@@ -329,6 +329,8 @@ def main():
         pre = on["hooks"]["PreToolUse"]
         assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "apply_patch|Edit|Write|Bash", "*"]
         assert [g["hooks"][0]["command"].split()[-3] for g in pre] == ["pr", "pr", "edit", "tool"], pre
+        mcp = json.loads(RECEIPT.with_name("codex-hooks.json").read_text())["PreToolUse:mcp__github__create_pull_request"]
+        assert re.fullmatch(pre[1]["matcher"], mcp["tool_name"]), "the PR gate misses Codex's real MCP tool name"
         kips = [h["command"] for gs in on["hooks"].values() for g in gs for h in g["hooks"] if g != mine]
         assert len(kips) == 10 and all(c.endswith(" --host codex") for c in kips), kips
         text = agents.read_text()

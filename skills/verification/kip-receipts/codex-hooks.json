@@ -1,5 +1,5 @@
 {
-  "_about": "Real Codex hook payloads (codex-cli 0.155.0, codex exec, 2026-10-30); repo path replaced by /repo.",
+  "_about": "Real Codex hook payloads (codex-cli 0.155.0, codex exec, 2026-10-30); repo path replaced by /repo. MCP and question tool calls: codex exec, 2026-10-31, an MCP server named github.",
   "SessionStart": {
     "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
     "cwd": "/repo",
@@ -79,5 +79,77 @@
     "cwd": "/repo",
     "hook_event_name": "SessionEnd",
     "reason": "other"
+  },
+  "PreToolUse:mcp__github__create_pull_request": {
+    "session_id": "01a192c3-b33c-7a91-b281-8c519953f20d",
+    "turn_id": "01a192c3-b3ad-7222-9164-506b6f4cf70f",
+    "transcript_path": "~/.codex/sessions/2026/10/31/rollout-2026-10-31T10-21-01-01a192c3-b33c-7a91-b281-8c519953f20d.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6-astra",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "mcp__github__create_pull_request",
+    "tool_input": {
+      "title": "capture"
+    },
+    "tool_use_id": "exec-e91bbf01-f175-42a3-946d-5b20ab260b10"
+  },
+  "PermissionRequest:mcp__github__create_pull_request": {
+    "session_id": "01a192c3-b33c-7a91-b281-8c519953f20d",
+    "turn_id": "01a192c3-b3ad-7222-9164-506b6f4cf70f",
+    "transcript_path": "~/.codex/sessions/2026/10/31/rollout-2026-10-31T10-21-01-01a192c3-b33c-7a91-b281-8c519953f20d.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "PermissionRequest",
+    "model": "gpt-6-astra",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "mcp__github__create_pull_request",
+    "tool_input": {
+      "title": "capture"
+    }
+  },
+  "PreToolUse:request_user_input_async": {
+    "session_id": "01a192c3-b33c-7a91-b281-8c519953f20d",
+    "turn_id": "01a192c3-b3ad-7222-9164-506b6f4cf70f",
+    "transcript_path": "~/.codex/sessions/2026/10/31/rollout-2026-10-31T10-21-01-01a192c3-b33c-7a91-b281-8c519953f20d.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6-astra",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "request_user_input_async",
+    "tool_input": {
+      "questions": [
+        {
+          "title": "Proceed?",
+          "options": [
+            "Yes",
+            "No"
+          ]
+        }
+      ]
+    },
+    "tool_use_id": "call_559c209e503c492cbb10010009a1c431"
+  },
+  "PostToolUse:request_user_input_async": {
+    "session_id": "01a192c3-b33c-7a91-b281-8c519953f20d",
+    "turn_id": "01a192c3-b3ad-7222-9164-506b6f4cf70f",
+    "transcript_path": "~/.codex/sessions/2026/10/31/rollout-2026-10-31T10-21-01-01a192c3-b33c-7a91-b281-8c519953f20d.jsonl",
+    "cwd": "/repo",
+    "hook_event_name": "PostToolUse",
+    "model": "gpt-6-astra",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "request_user_input_async",
+    "tool_input": {
+      "questions": [
+        {
+          "title": "Proceed?",
+          "options": [
+            "Yes",
+            "No"
+          ]
+        }
+      ]
+    },
+    "tool_response": "{\"accepted\":true}",
+    "tool_use_id": "call_559c209e503c492cbb10010009a1c431"
   }
 }
