@@ -147,9 +147,12 @@ def github_url():
     return m and f"https://github.com/{m[1]}"
 
 
+OWNERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID")  # Codex first: launched from Claude Code, it inherits Claude's
+
+
 def writer():
     """The agent session running this command, from its shell; None where the host doesn't say (Cursor)."""
-    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    return next((os.environ[k] for k in OWNERS if os.environ.get(k)), None)
 
 
 def sha256(path):
@@ -1351,29 +1354,31 @@ def nudge_once(name):
 
 
 def edit_gate(hook):
-    """(blocked, message) for a file edit in a repo: the main checkout's files are worktree work under
-    workflow.worktrees, and workflow.skills' decompose and implement skills come first. One git call decides a
-    file outside a repo; one in a linked worktree adds none once those skills are used."""
+    """(blocked, message) for a file edit in a repo, or each file a Codex patch touches: the main checkout's files
+    are worktree work under workflow.worktrees, and workflow.skills' decompose and implement skills come first. One
+    git call decides a file outside a repo; one in a linked worktree adds none once those skills are used."""
     ti = tool_input(hook)
-    path = ti.get("file_path") or ti.get("notebook_path")
-    if not path:
-        return False, ""
-    folder = Path(os.path.abspath(path)).parent
-    while not folder.is_dir():
-        folder = folder.parent
-    dirs = (git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", cwd=folder) or "").splitlines()
-    if len(dirs) != 2:
-        return False, ""
-    os.chdir(folder)
-    blocked, msg = False, ""
-    if dirs[0] == dirs[1]:
-        policy, sid = worktree_policy(), session_id(hook)
-        if not (policy == "off" or policy == "nudge" and (not sid or (NUDGES / sid).exists())):  # no session: nothing to nudge once
-            if policy == "nudge":
-                nudge_once(sid)
-            blocked, msg = True, use_a_worktree(path) + (" This is a nudge, once a session: retrying edits here anyway."
-                                                         if policy == "nudge" else "")
-    return with_due(skills_due(hook, ("decompose", "implement")), blocked, msg)
+    paths = PATCH_FILE.findall(str(ti.get("command") or "")) if hook.get("tool_name") == "apply_patch" else \
+        [ti.get("file_path") or ti.get("notebook_path")]
+    in_repo, blocked, msg = False, False, ""
+    for path in [os.path.abspath(p) for p in paths if p]:  # before a chdir below moves what a relative one means
+        folder = Path(path).parent
+        while not folder.is_dir():
+            folder = folder.parent
+        dirs = (git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", cwd=folder) or "").splitlines()
+        if len(dirs) != 2:
+            continue
+        os.chdir(folder)
+        in_repo = True
+        if dirs[0] == dirs[1]:
+            policy, sid = worktree_policy(), session_id(hook)
+            if not (policy == "off" or policy == "nudge" and (not sid or (NUDGES / sid).exists())):  # no session: nothing to nudge once
+                if policy == "nudge":
+                    nudge_once(sid)
+                blocked, msg = True, use_a_worktree(path) + (
+                    " This is a nudge, once a session: retrying edits here anyway." if policy == "nudge" else "")
+                break
+    return with_due(skills_due(hook, ("decompose", "implement")), blocked, msg) if in_repo else (False, "")
 
 
 
@@ -1670,15 +1675,17 @@ EVENTS = ROOT / "events"  # one <UTC date>.jsonl per day, so old days can be dro
 KEEP_DAYS = 14
 ACTIVE = datetime.timedelta(minutes=30)
 PORT = int(os.environ.get("KIP_DASHBOARD_PORT", 7377))
-SERVERS = ROOT / "servers"  # <pid>.json for each dashboard a Claude Code session started, for its end hook to stop
-OWNER = "CLAUDE_CODE_SESSION_ID"
+SERVERS = ROOT / "servers"  # <pid>.json for each dashboard an agent session started, for its end hook to stop
 STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
 SKILL_STAGES = {"kip-decompose": "decompose", "kip-messy-bun": "implement", "kip-marie-kondo": "tidy",
                 "code-review": "review", "kip-receipts": "receipts"}
 SKILL_OF = {stage: skill for skill, stage in SKILL_STAGES.items()}
-EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit"}
+EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit", "apply_patch"}
+PATCH_FILE = re.compile(r"^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+?)\s*$", re.M)  # Codex's apply_patch
+HOST = None  # check --host: the host the event log names
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
-SKILL_FILE = re.compile(r"/skills/(?:\S*/)?([\w.-]+)/SKILL\.md$")  # reading one is using that skill (Cursor has no skill hook)
+# Reading one, even mid-command, is using that skill (Cursor has no skill hook)
+SKILL_FILE = re.compile(r"/skills/(?:[^\s;|&'\"`]*/)?([\w.-]+)/SKILL\.md(?![\w.-])")
 ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 TRACKER = re.compile(r"linear|jira|atlassian|github-issue", re.I)  # an MCP server or sink whose issue keys are issues
 GITHUB_ISSUE = [re.compile(rf'"{k}": "?([\w.-]+)') for k in ("owner", "repo", "issue_number")]  # in a GitHub MCP call
@@ -1696,7 +1703,7 @@ def append_event(payload, **fields):
     try:
         e = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
              "session": session_id(payload),
-             "host": "cursor" if "workspace_roots" in payload else "claude", **fields}
+             "host": HOST or ("cursor" if "workspace_roots" in payload else "claude"), **fields}
         EVENTS.mkdir(parents=True, exist_ok=True)
         with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
@@ -1733,16 +1740,16 @@ def log_said(hook, kind, text):
 
 
 def log_prompt(hook):
-    """The prompt, then the skills it invokes, by `/name` or by attaching its SKILL.md, logged as Skill calls;
-    neither host has a hook for that. A `/name` counts when a skill folder has it, or it's a stage's skill
+    """The prompt, then the skills it invokes, by `/name` (`$name` in Codex) or by attaching its SKILL.md, logged as
+    Skill calls; no host has a hook for that. A name counts when a skill folder has it, or it's a stage's skill
     (built-ins like code-review have no folder)."""
     log_said(hook, "prompt", hook.get("prompt"))
-    roots = [Path.home() / d for d in (".kip/skills", ".claude/skills", ".cursor/skills")] + \
-        [Path(w) / d for w in (hook.get("workspace_roots") or [hook.get("cwd")]) if w
-         for d in (".claude/skills", ".cursor/skills")]
+    folders = (".claude/skills", ".cursor/skills", ".codex/skills", ".agents/skills")
+    roots = [Path.home() / d for d in (".kip/skills", *folders)] + \
+        [Path(w) / d for w in (hook.get("workspace_roots") or [hook.get("cwd")]) if w for d in folders]
     attached = [m[1] for a in (hook.get("attachments") or []) if isinstance(a, dict)
                 for m in [SKILL_FILE.search(str(a.get("file_path") or ""))] if m]
-    named = [n for n in re.findall(r"(?:^|\s)/([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
+    named = [n for n in re.findall(r"(?:^|\s)[/$]([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
              if n in SKILL_STAGES or any((r / n / "SKILL.md").exists() for r in roots)]
     for name in dict.fromkeys(named + attached):
         append_event(hook, hook="tool", tool="Skill", input=name)
@@ -1766,7 +1773,7 @@ def ensure_server():
             return
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, env={k: v for k, v in os.environ.items() if k != OWNER})  # shared: no session's to stop
+                     start_new_session=True, env={k: v for k, v in os.environ.items() if k not in OWNERS})  # shared: no session's to stop
 
 
 def session_end(hook):
@@ -2225,9 +2232,9 @@ def cmd_serve(a):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so a stopped server drops its record too
     record = SERVERS / f"{os.getpid()}.json"
     try:
-        if os.environ.get(OWNER):
+        if writer():
             SERVERS.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"session": os.environ[OWNER]}))
+            record.write_text(json.dumps({"session": writer()}))
         print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
         server.serve_forever()
     finally:
@@ -2235,8 +2242,10 @@ def cmd_serve(a):
 
 
 def cmd_check(a):
-    """The gate host hooks and CI call. Claude Code: exit 2 blocks, reasons on stderr. Cursor (its
+    """The gate host hooks and CI call. Claude Code and Codex: exit 2 blocks, reasons on stderr. Cursor (its
     events carry workspace_roots): JSON on stdout, a follow-up message at stop, a deny before a PR or a gated edit."""
+    global HOST
+    HOST = a.host
     if a.pr:
         return check_pr(a.pr)
     if a.hook in ("tool", "ask", "prompt", "response", "end"):  # never blocks, never adds to the agent's context
@@ -2392,6 +2401,8 @@ def main():
     g = s.add_mutually_exclusive_group()
     g.add_argument("--hook", choices=["start", "stop", "subagent", "pr", "edit", "tool", "ask", "prompt", "response", "end"], help="read a host hook's JSON event from stdin")
     g.add_argument("--pr", help="check the ledger published on this pull request (CI; needs gh)")
+    s.add_argument("--host", help="the host whose hook this is (codex), for the event log; default claude, or cursor "
+                                  "when its event has workspace_roots")
     s.set_defaults(fn=cmd_check)
 
     s = sub.add_parser("serve", parents=[common])
