@@ -575,7 +575,7 @@ def main():
         (repo / ".claude" / "skills" / "my-skill").mkdir(parents=True)
         (repo / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text("---\nname: my-skill\n---\n")
         prompt = {"session_id": "p1", "cwd": str(repo),
-                  "prompt": "/kip-decompose this, see /help, then /my-skill; not /code-review/notes.md"}
+                  "prompt": "/kip-decompose this, see /help, then /my-skill; not /code-review/notes.md or $kip-receipts"}
         assert check("--hook", "prompt", event=prompt, extra_env=home) == (0, "")
         assert [(e["session"], e["tool"], e["input"]) for e in map(json.loads, lines()[-2:])] == \
             [("p1", "Skill", "kip-decompose"), ("p1", "Skill", "my-skill")], lines()[-2:]
@@ -1512,6 +1512,9 @@ def main():
         assert codex("edit", "PreToolUse:Bash", tool_input={"command": "git status"}) == (0, "")
         codex("tool", "PreToolUse:apply_patch", tool_input=patch(cx / ".agents/skills/kip-decompose/SKILL.md"))
         assert "/kip-decompose" in codex("edit", "PreToolUse:apply_patch")[1], "patching a SKILL.md counted as using it"
+        for write in ("sed -i '' s/a/b/ {}", "echo x > {}", "echo x | tee -a {}"):
+            codex("tool", "PreToolUse:Bash", tool_input={"command": write.format(cx / ".codex/skills/kip-decompose/SKILL.md")})
+            assert "/kip-decompose" in codex("edit", "PreToolUse:apply_patch")[1], f"`{write}` counted as using a skill"
         codex("prompt", "UserPromptSubmit", prompt="$kip-decompose this first")
         code, out = codex("edit", "PreToolUse:apply_patch")
         assert code == 2 and "/kip-decompose" not in out and "/kip-messy-bun" in out, out

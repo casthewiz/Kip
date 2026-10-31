@@ -1702,6 +1702,7 @@ HOST = None  # check --host: the host the event log names
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
 # Reading one, even mid-command, is using that skill (Cursor has no skill hook)
 SKILL_FILE = re.compile(r"/skills/(?:[^\s;|&'\"`]*/)?([\w.-]+)/SKILL\.md(?![\w.-])")
+SHELL_WRITE = re.compile(r"(?:>|\btee(?:\s+-\S+)*)\s*\S*SKILL\.md|\bsed\s+(?:-\S+\s+)*-i")  # in one shell command
 ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 TRACKER = re.compile(r"linear|jira|atlassian|github-issue", re.I)  # an MCP server or sink whose issue keys are issues
 GITHUB_ISSUE = [re.compile(rf'"{k}": "?([\w.-]+)') for k in ("owner", "repo", "issue_number")]  # in a GitHub MCP call
@@ -1709,8 +1710,12 @@ URL = re.compile(r"https?://(?!(?:localhost|127\.0\.0\.1|\[::1\])[:/])[^\s<>()\"
 
 
 def used_skill(tool, what):
-    """The skill a tool call uses: a Skill call, or reading its SKILL.md (Cursor has no skill hook); editing one isn't."""
-    m = tool not in EDITS and SKILL_FILE.search(what)
+    """The skill a tool call uses: a Skill call, or reading its SKILL.md (Cursor has no skill hook); editing one isn't,
+    nor is a shell command writing one."""
+    if tool in EDITS:
+        return None
+    m = next((m for part in re.split(r"[;|&\n]", what)
+              if (m := SKILL_FILE.search(part)) and not SHELL_WRITE.search(part)), None)
     return m[1] if m else what if tool == "Skill" else None
 
 
@@ -1765,7 +1770,8 @@ def log_prompt(hook):
         [Path(w) / d for w in (hook.get("workspace_roots") or [hook.get("cwd")]) if w for d in folders]
     attached = [m[1] for a in (hook.get("attachments") or []) if isinstance(a, dict)
                 for m in [SKILL_FILE.search(str(a.get("file_path") or ""))] if m]
-    named = [n for n in re.findall(r"(?:^|\s)[/$]([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
+    sigil = "[/$]" if HOST == "codex" else "/"
+    named = [n for n in re.findall(rf"(?:^|\s){sigil}([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
              if n in SKILL_STAGES or any((r / n / "SKILL.md").exists() for r in roots)]
     for name in dict.fromkeys(named + attached):
         append_event(hook, hook="tool", tool="Skill", input=name)

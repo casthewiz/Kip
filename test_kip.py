@@ -343,14 +343,34 @@ def main():
         write(codex_hooks, changed)
         assert "hooks: new or changed; open Codex and trust" in kip("install", "--host", "codex"), \
             "a changed hook Codex now skips went unmentioned"
+        # Trust comes from the hashes Codex keeps in config.toml (none yet: untrusted, no app server needed);
+        # a hash Kip can't match falls back to asking the app server.
+        nope = {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(Path(tmp, "nope"))]}}}}}
+        write(repo / ".kip" / "config.json", nope)
         assert "codex          ready · hooks installed · 10 of 10 hooks untrusted (open Codex" in kip("doctor")
+        sys.path.insert(0, str(ROOT))
+        import kip as kip_py
+        on = json.loads(codex_hooks.read_text())["hooks"]
+        state = {f"{codex_hooks}:{kip_py.snake(e)}:{i}:{j}": kip_py.codex_hash(kip_py.snake(e), g, h)
+                 for e, gs in on.items() for i, g in enumerate(gs) for j, h in enumerate(g["hooks"]) if g != mine}
+        conf = codex / "config.toml"
+        conf.write_text("".join(f'[hooks.state."{k}"]\ntrusted_hash = "{v}"\n' for k, v in state.items()))
+        assert "hooks installed · hooks trusted · rules current" in kip("doctor")
+        conf.write_text(conf.read_text().replace(next(iter(state.values())), "sha256:old", 1))
+        assert "hooks installed · hook trust unknown (Codex not found)" in kip("doctor")
+        write(repo / ".kip" / "config.json", {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(fake)]}}}}})
         assert "hooks installed · hooks trusted · rules current" in kip("doctor", FAKE_TRUST="trusted")
         agents.write_text(text.replace("Lazy senior developer", "Old rule"))
         assert "rules stale (run install)" in kip("doctor", FAKE_TRUST="trusted")
         kip("install", "--host", "codex")
         assert (codex_hooks.read_text(), agents.read_text()) == first
-        write(repo / ".kip" / "config.json", {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(Path(tmp, "nope"))]}}}}})
-        assert "hooks installed · hook trust unknown (Codex not found)" in kip("doctor")
+        conf.unlink()
+        # Codex's own hashes for two of Kip's hooks (codex-cli 0.155.0, hooks/list currentHash).
+        cmd = "python3 /Users/cassidyschaufele/Documents/GitHub/Kip/skills/verification/kip-receipts/receipt.py check --hook {} --host codex"
+        assert kip_py.codex_hash("session_end", {}, {"type": "command", "command": cmd.format("end")}) == \
+            "sha256:d15a6eaac498953a5b36d54e9b580281272fcd542eb0156c19666fa40bab5ac8"
+        assert kip_py.codex_hash("pre_tool_use", {"matcher": "Bash"}, {"type": "command", "command": cmd.format("pr")}) == \
+            "sha256:be40177aafb274aabdd694bc752d2ad2de00ee19a355f17cb3487839cb6313ec"
         out = kip("install", "--host", "codex", "--project")
         assert "trust this project" in out and "Stop" in json.loads((repo / ".codex" / "hooks.json").read_text())["hooks"]
         assert sorted(p.name for p in (repo / ".codex" / "skills").iterdir()) == skills
@@ -383,8 +403,6 @@ def main():
         assert not (repo / ".claude" / "settings.json").exists() and not list((repo / ".claude" / "skills").iterdir())
         # The dashboard service: KIP_DASHBOARD=0 and --project write none; Linux's restarts it whenever it exits.
         assert not [p for p in home.rglob("*") if "kip.dashboard" in p.name or "kip-dashboard" in p.name]
-        sys.path.insert(0, str(ROOT))
-        import kip as kip_py
         path, text, load, unload = kip_py.service("linux")
         assert path.name == "kip-dashboard.service" and "Restart=always" in text and "serve --idle 0" in text, text
         assert kip_py.service("win32") is None
