@@ -44,6 +44,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -206,7 +207,9 @@ def cmd_doctor(a):
                 s += " · rules only, no hooks"
             if kind == "setup" and s != "ready":
                 s += f" → {entry['run']}"
-            if kind == "hosts" and rules_db(entry.get("rules", {})):
+            if kind == "hosts" and entry.get("hooks", {}).get("trust") and hooks_installed(entry["hooks"]):
+                s += " · " + hooks_trust(entry["hooks"])
+            if kind == "hosts" and rules_store(entry.get("rules", {})):
                 s += " · rules " + rules_copy_status(entry["rules"])
             print(f"  {name:14} {s}")
     print_receipts()
@@ -252,9 +255,9 @@ def link(dest, found):
 
 
 def install_rules(rules):
-    db = rules_db(rules)
-    if db:
-        return install_rules_sqlite(db, rules["key"])
+    store = rules_store(rules)
+    if store:
+        return install_rules_copy(rules, store)
     if "manual" in rules:
         print("  rules: " + rules["manual"].format(rules=RULES))
         return
@@ -273,36 +276,62 @@ def rules_db(rules):
                 None)
 
 
+def rules_store(rules):
+    """Where a host keeps a copy of the rules: a plain file, or an app's key-value store when it exists."""
+    return Path(rules["file"]).expanduser() if "file" in rules else rules_db(rules)
+
+
 def is_import(line):
     return line.startswith("@") and Path(line[1:].strip()).expanduser().resolve() == RULES
 
 
-def user_rules(con, key):
-    """The rules value split around Kip's block: (row, Kip's block or None, the user's own rules)."""
-    row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
-    value = row[0] if row else ""
-    return row, RULES_BLOCK.search(value), RULES_BLOCK.sub("", value).strip()
+def read_rules(rules, store):
+    """The rules value a host keeps, or None when there's none."""
+    if "file" in rules:
+        return store.read_text() if store.exists() else None
+    with sqlite3.connect(store) as con:
+        row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (rules["key"],)).fetchone()
+    return row[0] if row else None
+
+
+def write_rules(rules, store, value):
+    """Set the rules value a host keeps; None removes it."""
+    if "file" in rules:
+        if value is None:
+            store.unlink()
+        else:
+            store.parent.mkdir(parents=True, exist_ok=True)
+            store.write_text(value if value.endswith("\n") else value + "\n")
+        return
+    with sqlite3.connect(store) as con:
+        if value is None:
+            con.execute("DELETE FROM ItemTable WHERE key = ?", (rules["key"],))
+        else:
+            con.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (rules["key"], value))
+
+
+def user_rules(value):
+    """A rules value split around Kip's block: (Kip's block or None, the user's own rules)."""
+    return RULES_BLOCK.search(value or ""), RULES_BLOCK.sub("", value or "").strip()
 
 
 def rules_copy_status(rules):
     """A host holding a copy of the rules (not an import) goes stale when they change."""
-    with sqlite3.connect(rules_db(rules)) as con:
-        _, block, _ = user_rules(con, rules["key"])
+    block, _ = user_rules(read_rules(rules, rules_store(rules)))
     if not block:
         return "not installed (run install)"
     return "current" if block.group(1) == RULES.read_text().strip() else "stale (run install)"
 
 
-def install_rules_sqlite(db, key):
-    """Replace Kip's block in a rules value kept in an app's key-value store; keep the user's own rules."""
-    with sqlite3.connect(db) as con:
-        row, _, mine = user_rules(con, key)
-        block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text().strip()}\n<!-- /kip rules -->"
-        value = "\n\n".join(filter(None, [mine, block])) + "\n"
-        if row and row[0] == value:
-            return print(f"  rules: already in {db}")
-        con.execute("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)", (key, value))
-    print(f"  rules: written to {db} (restart the app to load them; re-run install after pulling)")
+def install_rules_copy(rules, store):
+    """Replace Kip's block in a rules value the host keeps; keep the user's own rules."""
+    old = read_rules(rules, store)
+    block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text().strip()}\n<!-- /kip rules -->"
+    value = "\n\n".join(filter(None, [user_rules(old)[1], block])) + "\n"
+    if old == value:
+        return print(f"  rules: already in {store}")
+    write_rules(rules, store, value)
+    print(f"  rules: written to {store} (restart the app to load them; re-run install after pulling)")
 
 
 def is_kip(group):
@@ -332,6 +361,40 @@ def read_settings(path):
 def hooks_installed(hooks):
     on = read_settings(Path(hooks["settings"]).expanduser()).get("hooks", {})
     return all([g for g in on.get(event, []) if is_kip(g)] == groups for event, groups in hook_groups(hooks).items())
+
+
+def hooks_trust(hooks):
+    """Whether the host trusts Kip's user hooks, from its app server's hooks/list (Codex's)."""
+    path = Path(hooks["settings"]).expanduser()
+    exe = next(filter(None, map(shutil.which, hooks["trust"]["app_server"])), None)
+    if not exe:
+        return "hook trust unknown (Codex not found)"
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "kip", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {"cwds": [str(path.parent.parent)]}}]
+    p = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True)
+    timer = threading.Timer(20, p.kill)  # a server that never answers closes stdout, ending the read
+    timer.start()
+    try:
+        p.stdin.write("".join(json.dumps(m) + "\n" for m in msgs))
+        p.stdin.flush()
+        reply = next((m for m in map(json.loads, filter(lambda l: l.startswith("{"), p.stdout)) if m.get("id") == 2), {})
+    except (OSError, ValueError):  # it exited early, or was killed mid-line
+        reply = {}
+    finally:
+        timer.cancel()
+        p.kill()
+    if "result" not in reply:
+        return "hook trust unknown (Codex didn't answer)"
+    listed = [h for d in reply["result"].get("data", []) for h in d.get("hooks", [])]
+    mine = [h for h in listed if is_kip(h) and Path(h.get("sourcePath", "")).resolve() == path.resolve()]
+    untrusted = [h for h in mine if h.get("trustStatus") != "trusted"]
+    if not mine:
+        return "hooks not listed by Codex"
+    if untrusted:
+        return f"{len(untrusted)} of {len(mine)} hooks untrusted ({hooks['trust']['manual']})"
+    return "hooks trusted"
 
 
 def install_hooks(hooks, path):
@@ -510,6 +573,8 @@ def cmd_install(a):
             install_rules(h["rules"])
         if h.get("hooks"):
             install_hooks(h["hooks"], where(h["hooks"], "settings", top))
+            if h["hooks"].get("trust"):
+                print("  hooks: " + h["hooks"]["trust"]["project_manual" if top else "manual"])
     if not a.project:
         install_service()
         if git_hooks_dir():
@@ -537,17 +602,13 @@ def uninstall_hooks(hooks, path):
 
 
 def uninstall_rules(rules):
-    db = rules_db(rules)
-    if db:
-        with sqlite3.connect(db) as con:
-            row, block, mine = user_rules(con, rules["key"])
-            if not block:
-                return
-            if mine:
-                con.execute("UPDATE ItemTable SET value = ? WHERE key = ?", (mine, rules["key"]))
-            elif row:
-                con.execute("DELETE FROM ItemTable WHERE key = ?", (rules["key"],))
-        return print(f"  rules: removed from {db}")
+    store = rules_store(rules)
+    if store:
+        block, mine = user_rules(read_rules(rules, store))
+        if not block:
+            return
+        write_rules(rules, store, mine or None)  # a file Kip's block alone was in goes
+        return print(f"  rules: removed from {store}")
     target = Path(rules["append"]).expanduser() if "append" in rules else None
     if target and target.exists():
         lines = [l for l in target.read_text().splitlines() if not is_import(l)]

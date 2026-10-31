@@ -23,6 +23,31 @@
         }
       }
     },
+    "codex": {
+      "requires": {"file": ["~/.codex"]},
+      "skills": "~/.codex/skills",
+      "project_skills": ".codex/skills",
+      "rules": {"file": "~/.codex/AGENTS.md"},
+      "hooks": {
+        "settings": "~/.codex/hooks.json",
+        "project_settings": ".codex/hooks.json",
+        "trust": {"app_server": ["codex", "/Applications/ChatGPT.app/Contents/Resources/codex"],
+                  "manual": "open Codex and trust Kip's hooks with /hooks; Codex skips hooks it doesn't trust",
+                  "project_manual": "open Codex, trust this project, then trust Kip's hooks with /hooks; Codex skips both until trusted"},
+        "events": {
+          "SessionStart": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook start --host codex"}]}],
+          "Stop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook stop --host codex"}]}],
+          "SubagentStop": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook subagent --host codex"}]}],
+          "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr --host codex"}]},
+                         {"matcher": "mcp__.*(create_pull_request|create_pr)", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook pr --host codex"}]},
+                         {"matcher": "apply_patch|Edit|Write", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook edit --host codex"}]},
+                         {"matcher": "*", "hooks": [{"type": "command", "command": "python3 {receipt} check --hook tool --host codex"}]}],
+          "PermissionRequest": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook ask --host codex"}]}],
+          "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook prompt --host codex"}]}],
+          "SessionEnd": [{"hooks": [{"type": "command", "command": "python3 {receipt} check --hook end --host codex"}]}]
+        }
+      }
+    },
     "cursor": {
       "requires": {"file": ["~/.cursor"]},
       "skills": "~/.cursor/skills",
