@@ -1477,6 +1477,58 @@ def main():
         (pol / ".kip" / "config.json").write_text('{"workflow": {"skills": {"tidy": "sometimes"}}}')
         assert "workflow.skills must map" in edit(pol / "a.py", "sk4")[1]
         (pol / "tidy-me.txt").unlink()
+        # Codex: its real hook payloads (codex-hooks.json, /repo standing for this repo) through the gate, logged as
+        # host codex. Edits come as apply_patch; skills as `$name` in a prompt or a SKILL.md read in any shell command.
+        cx = Path(tmp, "cx")
+        (cx / ".kip").mkdir(parents=True)
+        (cx / ".kip" / "config.json").write_text(json.dumps({"workflow": {"stages": [], "worktrees": "off", "skills": {
+            "decompose": "required", "implement": "required"}}}))
+        (cx / ".agents" / "skills" / "probe-agents").mkdir(parents=True)
+        (cx / ".agents" / "skills" / "probe-agents" / "SKILL.md").write_text("---\nname: probe-agents\n---\n")
+        (cx / "a.txt").write_text("hi\n")
+        for cmd in (["init", "-q"], ["add", "."], ["commit", "-qm", "cx"]):
+            sh("git", *cmd, cwd=cx)
+        fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", str(cx)))
+
+        def codex(kind, name, **over):
+            return check("--hook", kind, "--host", "codex", event={**fixture[name], **over}, cwd=cx)
+
+        def patch(*paths):
+            return {"command": "*** Begin Patch\n" + "".join(f"*** Update File: {p}\n@@\n-hi\n+hello\n" for p in paths)
+                    + "*** End Patch"}
+
+        logged = len(lines())
+        assert codex("start", "SessionStart")[0] == 0
+        assert codex("prompt", "UserPromptSubmit") == (0, "")
+        assert json.loads(lines()[-1])["input"] == "probe-agents", "a `$name` in .agents/skills didn't count"
+        code, out = codex("edit", "PreToolUse:apply_patch")
+        assert code == 2 and "/kip-decompose" in out and "/kip-messy-bun" in out, out
+        codex("tool", "PreToolUse:apply_patch", tool_input=patch(cx / ".agents/skills/kip-decompose/SKILL.md"))
+        assert "/kip-decompose" in codex("edit", "PreToolUse:apply_patch")[1], "patching a SKILL.md counted as using it"
+        codex("prompt", "UserPromptSubmit", prompt="$kip-decompose this first")
+        code, out = codex("edit", "PreToolUse:apply_patch")
+        assert code == 2 and "/kip-decompose" not in out and "/kip-messy-bun" in out, out
+        codex("tool", "PreToolUse:Bash", tool_input={"command": f"cat {cx}/.codex/skills/kip-messy-bun/SKILL.md; cat a.txt"})
+        assert codex("edit", "PreToolUse:apply_patch") == (0, "")
+        (cx / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "required"}}')
+        code, out = codex("edit", "PreToolUse:apply_patch", tool_input=patch(Path(tmp, "outside.txt"), cx / "a.txt"))
+        assert code == 2 and "is in the main checkout" in out, out
+        assert codex("edit", "PreToolUse:apply_patch", tool_input=patch(Path(tmp, "outside.txt"))) == (0, "")
+        (cx / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
+        cx_run = Path(rc("init", cwd=cx))
+        assert rc("claim", "a.txt says hello", cwd=cx, extra_env={
+            "CODEX_THREAD_ID": fixture["Stop"]["session_id"], "CLAUDE_CODE_SESSION_ID": "stray"}) == "c1"
+        assert run_json(cx_run)["claims"][0]["session"] == fixture["Stop"]["session_id"]
+        (cx / "a.txt").write_text("hello\n")
+        code, out = codex("pr", "PreToolUse:Bash", tool_input={"command": "gh pr create --fill"})
+        assert code == 2 and "c1 ⚠️ unverified: a.txt says hello" in out, out
+        assert codex("pr", "PreToolUse:Bash", tool_input={"command": "git status"}) == (0, "check: not opening a PR")
+        code, out = codex("stop", "Stop")
+        assert code == 2 and "c1 ⚠️ unverified: a.txt says hello" in out, out
+        assert codex("stop", "Stop", stop_hook_active=True)[0] == 0, "Codex's stop hook could loop"
+        assert codex("end", "SessionEnd")[0] == 0
+        assert {(e["session"], e["host"]) for e in map(json.loads, lines()[logged:])} == \
+            {(fixture["Stop"]["session_id"], "codex")}, lines()[logged:]
         # Evidence against a local URL records the folder its server runs in. Served by another checkout of this
         # repo (worktrees share ports), it doesn't speak for the code it pinned: flagged, and it holds the gate.
         # Served from this checkout, or from outside any checkout of the repo, it counts.
