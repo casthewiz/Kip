@@ -8,7 +8,7 @@ rerunnable, deterministic check whose observed output confirms or refutes it.
 
 `install` adds the receipts
 [gate](../skills/verification/kip-receipts/SKILL.md#gate) to each host's hooks
-(Claude Code's `settings.json`, Cursor's `hooks.json`), leaving your own
+(Claude Code's `settings.json`, Cursor's and Codex's `hooks.json`), leaving your own
 hooks alone: once code changes, the agent can't end a turn with unaddressed
 claims, evidence the code has since outgrown, or failing
 [required checks](../skills/verification/kip-receipts/SKILL.md#required-checks),

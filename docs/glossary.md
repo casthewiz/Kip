@@ -8,10 +8,11 @@ missing.
 ## Packaging
 
 - **Kip**: this repo, a portable harness of skills, rules, and hooks, linked at `~/.kip/kip`. Also the mascot, whose pose shows a session's or run's state. [README](../README.md)
-- **host**: an agent tool that loads skills (Claude Code, Cursor, and `kip` for the host-neutral `~/.kip/skills`). [configuration](configuration.md)
+- **host**: an agent tool that loads skills (Claude Code, Cursor, Codex, and `kip` for the host-neutral `~/.kip/skills`). [configuration](configuration.md)
 - **skill**: a folder with a `SKILL.md` (frontmatter and instructions), grouped under category folders (`analysis/`, `implementation/`, `verification/`) and flattened on install. [install](install.md#adding-a-skill)
-- **rules**: the always-on instructions in [`rules/user-rules.md`](../rules/user-rules.md), installed into each host (an `@` import for Claude Code, a copy for Cursor).
+- **rules**: the always-on instructions in [`rules/user-rules.md`](../rules/user-rules.md), installed into each host (an `@` import for Claude Code, a copy for Cursor and Codex).
 - **hooks**: host events (session start, stop, tool use, prompt) wired to `receipt.py check`. [receipts](receipts.md#the-gate)
+- **hook trust**: a host's own approval of each hook before it runs (Codex's `/hooks`); `install` never grants it, and `doctor` reports it. [install](install.md#per-host)
 - **gate**: what the hooks enforce: no edit before decomposing, no stop with open claims, no PR without its stages. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#gate)
 - **surface**: anything Kip plugs into, declared in config under one of the surface kinds. [configuration](configuration.md)
 - **connector**: one of the agent's own tools (`mcp` or `tool`) that a surface can run through with `via`. [configuration](configuration.md)

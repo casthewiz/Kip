@@ -122,7 +122,7 @@ claims is unaddressed. If the user changes the plan, start a new run.
 **Parallel units go in worktrees.** Each unit marked parallel runs in its own
 linked worktree, on its own branch, so units don't step on each other's
 files, dev servers, or uncommitted work. Start one with the host's own
-(`claude --worktree`, a worktree-isolated subagent, a Cursor worktree) or
+(`claude --worktree`, a worktree-isolated subagent, a Cursor or Codex worktree) or
 Kip's, which also starts the unit's run:
 
 ```bash

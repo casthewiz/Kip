@@ -224,10 +224,10 @@ function claimMood(x) {
 
 // Kip as the session stands: blocked or failing a claim, mid-turn, asking the user to settle an unverified claim,
 // let stop by the gate or done with its run, or idle. A question to the user (Claude Code's AskUserQuestion, Cursor's
-// AskQuestion) or a tool call waiting on their approval isn't working: it waits on them until the next event.
+// AskQuestion, Codex's request_user_input) or a tool call waiting on their approval isn't working: it waits on them until the next event.
 function mood(r) {
   if (r.blocked) return "failure";
-  const asked = r.hook === "tool" && /^Ask(User)?Question\b/.test(r.tool || "");
+  const asked = r.hook === "tool" && /^(Ask(User)?Question|request_user_input)\b/.test(r.tool || "");
   if (r.active && !["stop", "start", "ask"].includes(r.hook) && !asked) return "working";
   const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop()), m = run && claimMood(run);
   if (m && !(m === "asking" && r.pr)) return m;

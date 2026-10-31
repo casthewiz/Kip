@@ -15,6 +15,17 @@ ROOT = Path(__file__).resolve().parent
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
 GLOSSARY = ROOT / "docs" / "glossary.md"
+FAKE_CODEX = """
+import json, os, sys
+from pathlib import Path
+path = Path.home() / ".codex" / "hooks.json"
+for line in sys.stdin:  # Codex's app server, as far as doctor asks it: hooks/list over ~/.codex/hooks.json
+    m = json.loads(line)
+    if m.get("method") == "hooks/list":
+        hooks = [{"command": h["command"], "sourcePath": str(path), "trustStatus": os.environ.get("FAKE_TRUST", "untrusted")}
+                 for groups in json.loads(path.read_text())["hooks"].values() for g in groups for h in g["hooks"]]
+        print(json.dumps({"id": m["id"], "result": {"data": [{"hooks": hooks}]}}), flush=True)
+"""
 
 
 def glossary_terms():
@@ -294,6 +305,67 @@ def main():
         with sqlite3.connect(db) as con:
             value = con.execute("SELECT value FROM ItemTable WHERE key = 'aicontext.personalContext'").fetchone()[0]
         assert value.count("<!-- /kip rules -->") == 1 and "rules current" in kip("doctor"), value
+        # Codex: Claude Code's hook layout, each command naming its host, beside the user's own hooks; rules as a
+        # marked block in AGENTS.md beside the user's text. Kip never trusts its own hooks; doctor asks Codex.
+        fake = Path(tmp, "fake-codex")
+        fake.write_text(f"#!{sys.executable}\n{FAKE_CODEX}")
+        fake.chmod(0o755)
+        write(repo / ".kip" / "config.json", {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(fake)]}}}}})
+        assert "codex          missing ~/.codex" in kip("doctor")
+        codex = home / ".codex"
+        codex.mkdir()
+        codex_hooks, agents = codex / "hooks.json", codex / "AGENTS.md"
+        write(codex_hooks, {"hooks": {"Stop": [mine]}})
+        agents.write_text("# my own\n")
+        assert "codex          ready · hooks not installed (run install) · rules not installed" in kip("doctor")
+        out = kip("install")
+        assert "codex\n" in out and "trust Kip's hooks with /hooks" in out, out
+        assert sorted(p.name for p in (codex / "skills").iterdir()) == skills
+        on = json.loads(codex_hooks.read_text())
+        assert on["hooks"]["Stop"] == [mine, {"hooks": [{"type": "command",
+                                                         "command": f"python3 {RECEIPT} check --hook stop --host codex"}]}], on
+        assert sorted(on["hooks"]) == sorted(["SessionStart", "Stop", "SubagentStop", "PreToolUse", "PermissionRequest",
+                                              "UserPromptSubmit", "SessionEnd"]), on
+        pre = on["hooks"]["PreToolUse"]
+        assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "apply_patch|Edit|Write|Bash", "*"]
+        assert [g["hooks"][0]["command"].split()[-3] for g in pre] == ["pr", "pr", "edit", "tool"], pre
+        kips = [h["command"] for gs in on["hooks"].values() for g in gs for h in g["hooks"] if g != mine]
+        assert len(kips) == 10 and all(c.endswith(" --host codex") for c in kips), kips
+        text = agents.read_text()
+        assert text.startswith("# my own\n\n<!-- kip rules: ") and text.count("<!-- /kip rules -->") == 1, text
+        assert RULES.read_text().strip() in text
+        first = codex_hooks.read_text(), agents.read_text()
+        again = kip("install", "--host", "codex")
+        assert "rules: already in" in again and "trust Kip's hooks" not in again, again  # unchanged hooks keep their trust
+        assert (codex_hooks.read_text(), agents.read_text()) == first, "second install changed Codex's files"
+        changed = json.loads(first[0])
+        changed["hooks"]["Stop"][-1]["hooks"][0]["command"] += " --old"
+        write(codex_hooks, changed)
+        assert "hooks: new or changed; open Codex and trust" in kip("install", "--host", "codex"), \
+            "a changed hook Codex now skips went unmentioned"
+        assert "codex          ready · hooks installed · 10 of 10 hooks untrusted (open Codex" in kip("doctor")
+        assert "hooks installed · hooks trusted · rules current" in kip("doctor", FAKE_TRUST="trusted")
+        agents.write_text(text.replace("Lazy senior developer", "Old rule"))
+        assert "rules stale (run install)" in kip("doctor", FAKE_TRUST="trusted")
+        kip("install", "--host", "codex")
+        assert (codex_hooks.read_text(), agents.read_text()) == first
+        write(repo / ".kip" / "config.json", {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(Path(tmp, "nope"))]}}}}})
+        assert "hooks installed · hook trust unknown (Codex not found)" in kip("doctor")
+        out = kip("install", "--host", "codex", "--project")
+        assert "trust this project" in out and "Stop" in json.loads((repo / ".codex" / "hooks.json").read_text())["hooks"]
+        assert sorted(p.name for p in (repo / ".codex" / "skills").iterdir()) == skills
+        assert not (repo / ".codex" / "AGENTS.md").exists() and agents.read_text() == first[1]
+        kip("uninstall", "--host", "codex", "--project")
+        assert not (repo / ".codex" / "hooks.json").exists() and not list((repo / ".codex" / "skills").iterdir())
+        kip("uninstall", "--host", "codex")
+        assert agents.read_text() == "# my own\n" and json.loads(codex_hooks.read_text()) == {"hooks": {"Stop": [mine]}}
+        assert not list((codex / "skills").iterdir())
+        agents.unlink()
+        kip("install", "--host", "codex")
+        kip("uninstall", "--host", "codex")
+        assert not agents.exists(), "uninstall left an AGENTS.md only Kip wrote to"
+        (repo / ".kip" / "config.json").unlink()
+
         # The conversation switch: install saves it into the user's layer (the repo's with --project),
         # beside what's already there; no flag leaves it as it was.
         kip("install", "--host", "cursor", "--no-conversation")

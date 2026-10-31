@@ -1,0 +1,83 @@
+{
+  "_about": "Real Codex hook payloads (codex-cli 0.155.0, codex exec, 2026-10-30); repo path replaced by /repo.",
+  "SessionStart": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "cwd": "/repo",
+    "hook_event_name": "SessionStart",
+    "permission_mode": "bypassPermissions",
+    "source": "startup"
+  },
+  "UserPromptSubmit": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "turn_id": "01a18fec-f667-7b52-97cd-71346305f13b",
+    "cwd": "/repo",
+    "hook_event_name": "UserPromptSubmit",
+    "permission_mode": "bypassPermissions",
+    "prompt": "$probe-agents Run `echo $CODEX_THREAD_ID` in the shell. Then change a.txt so it says \"hello\" instead of \"hi\". Then create b.txt containing \"new\". Then reply done."
+  },
+  "PreToolUse:Bash": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "turn_id": "01a18fec-f667-7b52-97cd-71346305f13b",
+    "cwd": "/repo",
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo $CODEX_THREAD_ID"
+    },
+    "tool_use_id": "exec-d05ef22b-ddd6-4307-8470-91732985693f"
+  },
+  "PostToolUse:Bash": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "turn_id": "01a18fec-f667-7b52-97cd-71346305f13b",
+    "cwd": "/repo",
+    "hook_event_name": "PostToolUse",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo $CODEX_THREAD_ID"
+    },
+    "tool_response": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74\n",
+    "tool_use_id": "exec-d05ef22b-ddd6-4307-8470-91732985693f"
+  },
+  "PreToolUse:apply_patch": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "turn_id": "01a18fec-f667-7b52-97cd-71346305f13b",
+    "cwd": "/repo",
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "apply_patch",
+    "tool_input": {
+      "command": "*** Begin Patch\n*** Update File: /repo/a.txt\n@@\n-hi\n+hello\n*** Add File: /repo/b.txt\n+new\n*** End Patch"
+    },
+    "tool_use_id": "exec-9b6a1b46-ec19-4f22-a8d9-4b241726cda6"
+  },
+  "PostToolUse:apply_patch": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "turn_id": "01a18fec-f667-7b52-97cd-71346305f13b",
+    "cwd": "/repo",
+    "hook_event_name": "PostToolUse",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "apply_patch",
+    "tool_input": {
+      "command": "*** Begin Patch\n*** Update File: /repo/a.txt\n@@\n-hi\n+hello\n*** Add File: /repo/b.txt\n+new\n*** End Patch"
+    },
+    "tool_response": "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess. Updated the following files:\nA /repo/b.txt\nM /repo/a.txt\n",
+    "tool_use_id": "exec-9b6a1b46-ec19-4f22-a8d9-4b241726cda6"
+  },
+  "Stop": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "turn_id": "01a18fec-f667-7b52-97cd-71346305f13b",
+    "cwd": "/repo",
+    "hook_event_name": "Stop",
+    "permission_mode": "bypassPermissions",
+    "stop_hook_active": false,
+    "last_assistant_message": "done"
+  },
+  "SessionEnd": {
+    "session_id": "01a18fec-f5df-7b70-a5aa-0cbc886ffe74",
+    "cwd": "/repo",
+    "hook_event_name": "SessionEnd",
+    "reason": "other"
+  }
+}

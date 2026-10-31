@@ -426,7 +426,8 @@ or `unverified` is refused. Until it's ✅ on the current code, it blocks stop a
 `kip.py install` wires `receipt.py check` into each host's hooks (Claude
 Code: `SessionStart`, `Stop`, `SubagentStop`, and `PreToolUse` on Bash and
 PR-opening MCP tools and on `Edit|MultiEdit|Write|NotebookEdit`; Cursor:
-`sessionStart`, `stop`, `beforeShellExecution` and `beforeMCPExecution`).
+`sessionStart`, `stop`, `beforeShellExecution` and `beforeMCPExecution`;
+Codex: Claude Code's, with `apply_patch` among the edits).
 The rest only log for the dashboard and never block: Claude Code's
 `PreToolUse` on `*`, `PermissionRequest`, `UserPromptSubmit` and
 `SessionEnd`; Cursor's `afterFileEdit`, `preToolUse`, `beforeSubmitPrompt`

@@ -2,7 +2,7 @@
 name: kip-receipts-github
 description: >
   Gets a receipts run's images and videos onto a GitHub pull request or issue from any
-  agent host (Claude Code, Cursor, anything with Playwright MCP), and keeps
+  agent host (Claude Code, Cursor, Codex, anything with Playwright MCP), and keeps
   that working. GitHub has no API for attachments, so the agent uploads
   each file through the PR's or issue's comment box with its own host's browser tools,
   reads back the github.com/user-attachments URL, records it with
@@ -30,7 +30,7 @@ Before starting, read:
 
 - the **host interface** for where you're running:
   [claude-code](../interfaces/claude-code.md), [cursor](../interfaces/cursor.md),
-  or [playwright-mcp](../interfaces/playwright-mcp.md) (none fits: add one,
+  [codex](../interfaces/codex.md), or [playwright-mcp](../interfaces/playwright-mcp.md) (none fits: add one,
   per the contract);
 - the **site interface** [github](../interfaces/github.md), for the
   selectors, accepted files, and result URLs these steps rely on.
