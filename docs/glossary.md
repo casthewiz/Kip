@@ -51,6 +51,7 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **check**: the command behind evidence; runs of the same command in the same directory are one check, and its latest run decides it. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#verdicts)
 - **fix loop**: what a claim's failed run opens: each rerun of that check, or a corrected command (`run --replace`), is an **attempt** that supersedes the one before; after `workflow.loop`'s attempts or minutes it **closes**, refusing runs until a person reopens it. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#fix-loops)
 - **superseded**: an earlier attempt in a fix loop; it stays in the record and the ledger but no longer decides the verdict.
+- **retired**: a check a person set aside (`receipt.py retire`) because it no longer speaks for its claim, say it probed state outside the repo; its runs stay in the ledger with the reason but no longer decide the verdict.
 - **observation**: evidence that is the agent's account (`receipt.py observe`), for checks with no command equivalent such as a browser pane.
 - **attachment**: a screenshot, video, trace, or log on a claim (`receipt.py attach`, or `run --collect`).
 - **ledger**: the rendered table of claims, verdicts, and evidence (`receipt.py render`), posted verbatim by every sink.
@@ -148,6 +149,7 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
 - `receipt.py unverified`: mark a claim unverified with a reason.
 - `receipt.py accept`: accept an unverified claim.
 - `receipt.py reopen`: a person reopens a claim's closed fix loop.
+- `receipt.py retire`: a person retires one of a claim's checks (`--check`, `--reason`) so its runs stop deciding the verdict.
 - `receipt.py orphan`: set the run aside.
 - `receipt.py sweep`: settle the repo's leftover runs.
 - `receipt.py render`: print the ledger (`--sink` for one sink's markup).

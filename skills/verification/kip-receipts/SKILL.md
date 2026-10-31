@@ -300,6 +300,17 @@ latest attempt decides; earlier ones stay in the ledger, marked superseded.
 - Other checks on the claim (another viewport, another test) are ordinary
   evidence, not attempts, and never supersede the failing one.
 
+### Retired checks
+
+A check that no longer speaks for its claim (it probed state outside the
+repo, and that state legitimately changed) can leave the claim stale or
+refuted while its other checks pass. Hand it to the user: only they retire it
+(`receipt.py retire CLAIM --check EVIDENCE --reason TEXT`, from their own
+terminal), so every run of that check stops deciding the verdict and stays in
+the ledger, marked retired with the reason. It refuses a claim's only check
+and, like `reopen`, a Claude Code or Codex agent's shell; on other hosts,
+never run it yourself.
+
 An unverified claim is never reported as done. "Should work" is ⚠️.
 
 ## Thoroughness
