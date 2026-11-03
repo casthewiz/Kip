@@ -575,7 +575,7 @@ def main():
         (repo / ".claude" / "skills" / "my-skill").mkdir(parents=True)
         (repo / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text("---\nname: my-skill\n---\n")
         prompt = {"session_id": "p1", "cwd": str(repo),
-                  "prompt": "/kip-decompose this, see /help, then /my-skill; not /code-review/notes.md"}
+                  "prompt": "/kip-decompose this, see /help, then /my-skill; not /code-review/notes.md or $kip-receipts"}
         assert check("--hook", "prompt", event=prompt, extra_env=home) == (0, "")
         assert [(e["session"], e["tool"], e["input"]) for e in map(json.loads, lines()[-2:])] == \
             [("p1", "Skill", "kip-decompose"), ("p1", "Skill", "my-skill")], lines()[-2:]
@@ -870,7 +870,24 @@ def main():
         assert verdicts()["c10"].startswith("🥅 check changed after failing"), verdicts()
         rc("run", "c10", "--red", "--", "env", "BASE_URL=https://baseline.test", "sh", str(new_spec))
         assert verdicts()["c10"] == "✅ verified", verdicts()
-        remote = rc("init", "--target", "https://staging.example.test")
+        # A person retires a check that no longer speaks for its claim: its runs stop deciding the verdict.
+        rc("claim", "outside state changed", "--level", "full")
+        flag.write_text("")
+        rc("run", "c11", "--", *has_flag)
+        flag.unlink()
+        rc("run", "c11", "--", "grep", "-q", "again", "app.py")
+        (repo / "app.py").write_text('print("fixed again, retired")\n')
+        rc("run", "c11", "--", "grep", "-q", "again", "app.py")
+        assert verdicts()["c11"].startswith("🕰️ stale"), verdicts()
+        assert "a person's call" in rc("retire", "c11", "--check", "c11e1", "--reason", "x",
+                                       extra_env={"CLAUDE_CODE_SESSION_ID": "agent"}, ok=False)
+        assert "no evidence c11e9" in rc("retire", "c11", "--check", "c11e9", "--reason", "x", ok=False)
+        assert rc("retire", "c11", "--check", "c11e1", "--reason", "flag lives outside the repo") == "retired c11e1"
+        assert verdicts()["c11"] == "✅ verified", verdicts()
+        assert "(exit 0, retired: flag lives outside the repo)" in rc("render"), rc("render")
+        assert "already retired" in rc("retire", "c11", "--check", "c11e1", "--reason", "x", ok=False)
+        assert "c11's only one" in rc("retire", "c11", "--check", "c11e3", "--reason", "x", ok=False)
+        remote =rc("init", "--target", "https://staging.example.test")
         rc("claim", "staging fixed")
         rc("run", "c1", "--", *has_flag)
         flag.write_text("")
@@ -1490,6 +1507,11 @@ def main():
             sh("git", *cmd, cwd=cx)
         fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", str(cx)))
 
+        # The dashboard's question tools, as hooks see them (codex exec's is request_user_input_async)
+        asked = re.search(r'r\.hook === "tool" && /(.+?)/\.test', SCRIPT.with_name("dashboard.html").read_text())[1]
+        for name in ("AskUserQuestion", "AskQuestion", fixture["PreToolUse:request_user_input_async"]["tool_name"]):
+            assert re.search(asked, name), f"the dashboard doesn't see {name} as asking"
+
         def codex(kind, name, **over):
             return check("--hook", kind, "--host", "codex", event={**fixture[name], **over}, cwd=cx)
 
@@ -1512,6 +1534,9 @@ def main():
         assert codex("edit", "PreToolUse:Bash", tool_input={"command": "git status"}) == (0, "")
         codex("tool", "PreToolUse:apply_patch", tool_input=patch(cx / ".agents/skills/kip-decompose/SKILL.md"))
         assert "/kip-decompose" in codex("edit", "PreToolUse:apply_patch")[1], "patching a SKILL.md counted as using it"
+        for write in ("sed -i '' s/a/b/ {}", "echo x > {}", "echo x | tee -a {}"):
+            codex("tool", "PreToolUse:Bash", tool_input={"command": write.format(cx / ".codex/skills/kip-decompose/SKILL.md")})
+            assert "/kip-decompose" in codex("edit", "PreToolUse:apply_patch")[1], f"`{write}` counted as using a skill"
         codex("prompt", "UserPromptSubmit", prompt="$kip-decompose this first")
         code, out = codex("edit", "PreToolUse:apply_patch")
         assert code == 2 and "/kip-decompose" not in out and "/kip-messy-bun" in out, out

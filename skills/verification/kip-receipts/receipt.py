@@ -15,6 +15,8 @@
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
   receipt.py accept CLAIM [--reason TEXT]                   the user takes an unverified claim as it stands
   receipt.py reopen CLAIM [--reason TEXT]                   a person gives a claim whose fix loop closed a new one
+  receipt.py retire CLAIM --check EVIDENCE --reason TEXT    a person sets aside a check that no longer speaks for
+                                                            the claim; its runs stop deciding the verdict
   receipt.py orphan [--reason TEXT]                         set aside a run whose work was abandoned: it leaves
                                                             the dashboard and its branch needs a new run
   receipt.py sweep                                          finish this repo's runs whose branch merged, orphan
@@ -755,6 +757,29 @@ def cmd_reopen(a):
                          reopened={"why": why, "reason": a.reason})
 
 
+def cmd_retire(a):
+    """A person retires one of a claim's checks (the one behind evidence a.check) whose runs no longer speak for
+    it, say one that probed state outside the repo that has since legitimately changed. Only a person: an agent
+    that could retire checks could clear its own stale or failing evidence and the gate with it."""
+    if writer():
+        sys.exit("retiring a check is a person's call; ask the user to run it from their own terminal")
+    with mutate(adding_to(a)) as rec:
+        c = find_claim(rec, a.claim)
+        e = next((e for e in c["evidence"] if e["id"] == a.check), None)
+        if not e:
+            sys.exit(f"{c['id']} has no evidence {a.check}; evidence: {', '.join(e['id'] for e in c['evidence']) or 'none'}")
+        runs = [x for x in c["evidence"] if check_key(x) == check_key(e) and not x.get("retired")]
+        if not runs:
+            sys.exit(f"{a.check}'s check is already retired")
+        if len(runs) == sum(not x.get("retired") for x in c["evidence"]):
+            sys.exit(f"{a.check}'s check is {c['id']}'s only one; record another before retiring it")
+        retired = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                   "by": git("config", "user.name"), "reason": a.reason}
+        for x in runs:
+            x["retired"] = retired
+    print(f"retired {', '.join(x['id'] for x in runs)}")
+
+
 def set_aside(d, reason, via, at=None, **extra):
     """Orphan the run in d (at defaults to now); returns its record."""
     with mutate(d) as rec:
@@ -929,12 +954,12 @@ def verdict(c, rec):
     """The latest run of each check decides it, and a fix loop's latest attempt supersedes its earlier ones.
     A failure clears only when the same check passes on changed code, which also shows the check can fail; a
     different check that replaced it must show that itself (--red), unless the failed run never started.
-    A delegated claim's verdict is its unit run's."""
+    A retired check's runs don't count. A delegated claim's verdict is its unit run's."""
     handed_to = delegate(c)
     if handed_to:
         return verdict(*handed_to)
     level = c.get("level") or rec["level"]
-    ev = c["evidence"]
+    ev = [e for e in c["evidence"] if not e.get("retired")]
     runs = {}
     for e in ev:
         runs.setdefault(check_key(e), {"green": [], "red": [], "superseded": []})[
@@ -957,7 +982,8 @@ def verdict(c, rec):
         elif all(f.get("exit_code") in (126, 127) for f in fails):  # never started, so it tested nothing
             continue
         else:  # replaced by the loop's latest attempt, another check: shown by its own red, or its own fix
-            mine = runs[check_key(latest)]
+            # a retired latest attempt shows nothing about the check it replaced
+            mine = runs[check_key(latest)] if latest else {"red": [], "superseded": []}
             note = None if any(x["passed"] for x in mine["red"]) or \
                 any(not x["passed"] for x in mine["superseded"]) else \
                 "🥅 check changed after failing; show the new check fails without the fix (--red)"
@@ -997,10 +1023,12 @@ def verify_hashes(d, rec):
 
 def summarize(e, full=False):
     """Table rows use the evidence's label when it has one; details always show the full command."""
+    retired = f" (retired: {e['retired']['reason']})" if e.get("retired") else ""
     if e["kind"] == "observed":
-        return f"observed: {e['observation']}"
+        return f"observed: {e['observation']}{retired}"
     red = ", red" if e["phase"] == "red" else ""
     gone = ", superseded" if e.get("superseded") else ""
+    gone += f", retired: {e['retired']['reason']}" if e.get("retired") else ""
     cmd = f"`{shlex.join(e['command'])}`"
     label = e.get("label")
     head = (f"{label}: {cmd}" if label else cmd) if full else (label or cmd)
@@ -1702,6 +1730,7 @@ HOST = None  # check --host: the host the event log names
 SAID = 20000  # a prompt or reply is kept whole up to here, for the dashboard to read back
 # Reading one, even mid-command, is using that skill (Cursor has no skill hook)
 SKILL_FILE = re.compile(r"/skills/(?:[^\s;|&'\"`]*/)?([\w.-]+)/SKILL\.md(?![\w.-])")
+SHELL_WRITE = re.compile(r"(?:>|\btee(?:\s+-\S+)*)\s*\S*SKILL\.md|\bsed\s+(?:-\S+\s+)*-i")  # in one shell command
 ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 TRACKER = re.compile(r"linear|jira|atlassian|github-issue", re.I)  # an MCP server or sink whose issue keys are issues
 GITHUB_ISSUE = [re.compile(rf'"{k}": "?([\w.-]+)') for k in ("owner", "repo", "issue_number")]  # in a GitHub MCP call
@@ -1709,8 +1738,12 @@ URL = re.compile(r"https?://(?!(?:localhost|127\.0\.0\.1|\[::1\])[:/])[^\s<>()\"
 
 
 def used_skill(tool, what):
-    """The skill a tool call uses: a Skill call, or reading its SKILL.md (Cursor has no skill hook); editing one isn't."""
-    m = tool not in EDITS and SKILL_FILE.search(what)
+    """The skill a tool call uses: a Skill call, or reading its SKILL.md (Cursor has no skill hook); editing one isn't,
+    nor is a shell command writing one."""
+    if tool in EDITS:
+        return None
+    m = next((m for part in re.split(r"[;|&\n]", what)
+              if (m := SKILL_FILE.search(part)) and not SHELL_WRITE.search(part)), None)
     return m[1] if m else what if tool == "Skill" else None
 
 
@@ -1765,7 +1798,8 @@ def log_prompt(hook):
         [Path(w) / d for w in (hook.get("workspace_roots") or [hook.get("cwd")]) if w for d in folders]
     attached = [m[1] for a in (hook.get("attachments") or []) if isinstance(a, dict)
                 for m in [SKILL_FILE.search(str(a.get("file_path") or ""))] if m]
-    named = [n for n in re.findall(r"(?:^|\s)[/$]([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
+    sigil = "[/$]" if HOST == "codex" else "/"
+    named = [n for n in re.findall(rf"(?:^|\s){sigil}([\w.-]+)(?![\w./-])", str(hook.get("prompt") or ""))
              if n in SKILL_STAGES or any((r / n / "SKILL.md").exists() for r in roots)]
     for name in dict.fromkeys(named + attached):
         append_event(hook, hook="tool", tool="Skill", input=name)
@@ -2382,6 +2416,12 @@ def main():
     s.add_argument("claim")
     s.add_argument("--reason", help="what the person changed or decided")
     s.set_defaults(fn=cmd_reopen)
+
+    s = sub.add_parser("retire", parents=[common])
+    s.add_argument("claim")
+    s.add_argument("--check", required=True, help="an evidence id from the check to retire")
+    s.add_argument("--reason", required=True, help="why it no longer speaks for the claim")
+    s.set_defaults(fn=cmd_retire)
 
     s = sub.add_parser("orphan", parents=[common])
     s.add_argument("--reason", help="why its work was abandoned")

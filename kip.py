@@ -35,6 +35,7 @@ for the schema.
 Standard library only, Python 3.8+.
 """
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -363,9 +364,69 @@ def hooks_installed(hooks):
     return all([g for g in on.get(event, []) if is_kip(g)] == groups for event, groups in hook_groups(hooks).items())
 
 
+def snake(event):
+    """Codex's name for a hook event in its keys and hashes: SessionStart → session_start."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower()
+
+
+def codex_hash(event, group, hook):
+    """Codex's trust hash for one hook (event in snake case): sha256 over the sorted, compact JSON of its event,
+    matcher and handler, with the timeout Codex fills in (codex-rs hooks/src/engine/discovery.rs hook_hash)."""
+    t = hook.get("timeout")
+    hook = {**hook, "async": hook.get("async", False),
+            "timeout": min(max(t or 1, 1), 3) if event == "session_end" else max(t or 600, 1)}
+    identity = {"event_name": event, "hooks": [hook], **({"matcher": group["matcher"]} if "matcher" in group else {})}
+    return "sha256:" + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                                                 ensure_ascii=False).encode()).hexdigest()
+
+
+TRUSTED_HASH = re.compile(r'^\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*\n\s*trusted_hash\s*=\s*"([^"]+)"', re.M)
+
+
+def config_trust(path):
+    """How many of Kip's hooks in Codex's hooks.json are untrusted, and of how many, from the trusted hashes Codex
+    keeps in config.toml beside it. None when that can't decide: a config.toml that won't parse, or a hash that
+    differs, which is a modified hook or a hash Kip no longer computes as Codex does."""
+    conf = path.parent / "config.toml"
+    try:
+        text = conf.read_text() if conf.exists() else ""
+        try:
+            import tomllib
+            state = tomllib.loads(text).get("hooks", {}).get("state", {})
+        except ImportError:  # before Python 3.11: Codex writes each entry as a table holding its trusted_hash
+            state = {json.loads(k): {"trusted_hash": v} for k, v in TRUSTED_HASH.findall(text)}
+    except (OSError, ValueError):
+        return None
+    untrusted = mine = 0
+    for event, groups in read_settings(path).get("hooks", {}).items():
+        event = snake(event)
+        for i, g in enumerate(groups):
+            for j, h in enumerate(g.get("hooks", [])):
+                if not is_kip(h):
+                    continue
+                trusted = next((state[k].get("trusted_hash") for p in (str(path), str(path.resolve()))
+                                if (k := f"{p}:{event}:{i}:{j}") in state), None)
+                if trusted and trusted != codex_hash(event, g, h):
+                    return None
+                mine += 1
+                untrusted += not trusted
+    return untrusted, mine
+
+
+def trust_status(untrusted, mine, hooks):
+    if not mine:
+        return "hooks not listed by Codex"
+    if untrusted:
+        return f"{untrusted} of {mine} hooks untrusted ({hooks['trust']['manual']})"
+    return "hooks trusted"
+
+
 def hooks_trust(hooks):
-    """Whether the host trusts Kip's user hooks, from its app server's hooks/list (Codex's)."""
+    """Whether the host trusts Kip's user hooks: from the hashes in Codex's config.toml, else its app server's
+    hooks/list, which takes starting Codex."""
     path = Path(hooks["settings"]).expanduser()
+    if counted := config_trust(path):
+        return trust_status(*counted, hooks)
     exe = next(filter(None, map(shutil.which, hooks["trust"]["app_server"])), None)
     if not exe:
         return "hook trust unknown (Codex not found)"
@@ -389,12 +450,7 @@ def hooks_trust(hooks):
         return "hook trust unknown (Codex didn't answer)"
     listed = [h for d in reply["result"].get("data", []) for h in d.get("hooks", [])]
     mine = [h for h in listed if is_kip(h) and Path(h.get("sourcePath", "")).resolve() == path.resolve()]
-    untrusted = [h for h in mine if h.get("trustStatus") != "trusted"]
-    if not mine:
-        return "hooks not listed by Codex"
-    if untrusted:
-        return f"{len(untrusted)} of {len(mine)} hooks untrusted ({hooks['trust']['manual']})"
-    return "hooks trusted"
+    return trust_status(sum(h.get("trustStatus") != "trusted" for h in mine), len(mine), hooks)
 
 
 def install_hooks(hooks, path):
