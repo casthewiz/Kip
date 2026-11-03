@@ -1722,7 +1722,7 @@ PORT = int(os.environ.get("KIP_DASHBOARD_PORT", 7377))
 SERVERS = ROOT / "servers"  # <pid>.json for each dashboard an agent session started, for its end hook to stop
 STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
 SKILL_STAGES = {"kip-decompose": "decompose", "kip-messy-bun": "implement", "kip-marie-kondo": "tidy",
-                "code-review": "review", "kip-receipts": "receipts"}
+                "code-review": "review", "kip-objection": "review", "kip-receipts": "receipts"}
 SKILL_OF = {stage: skill for skill, stage in SKILL_STAGES.items()}
 EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit", "apply_patch"}
 PATCH_FILE = re.compile(r"^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+?)\s*$", re.M)  # Codex's apply_patch

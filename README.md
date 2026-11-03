@@ -23,7 +23,7 @@ Every non-trivial task follows the same loop:
 2. **Implement, lazily**: YAGNI, reuse, stdlib, native, one line before
    fifty. The best code is the code never written.
 3. **Tidy**: strip the branch's diff of dead code, duplication, and noise.
-4. **Review**: a pass for correctness bugs.
+4. **Review**: an adversarial pass for what breaks.
 5. **Receipts**: every claim backed by rerunnable, deterministic evidence.
 
 The loop isn't a suggestion. Kip's gate hooks into the agent: it can't edit
@@ -39,6 +39,7 @@ opened it.
 | [kip-decompose](skills/analysis/kip-decompose/SKILL.md) | Understand a problem and break it into units of work |
 | [kip-messy-bun](skills/implementation/kip-messy-bun/SKILL.md) | Laziest solution that actually works |
 | [kip-marie-kondo](skills/implementation/kip-marie-kondo/SKILL.md) | Tidy the current branch diff before a PR |
+| [kip-objection](skills/verification/kip-objection/SKILL.md) | Adversarial review that runs the same way on every host |
 | [kip-receipts](skills/verification/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
 | [kip-kubrick](skills/verification/kip-kubrick/SKILL.md) | Capture screenshots and recordings with Playwright the same way every time |
 

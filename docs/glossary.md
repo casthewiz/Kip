@@ -29,10 +29,14 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **decompose**: understand the problem and cut it into units of work with claims (`kip-decompose`). [kip-decompose](../skills/analysis/kip-decompose/SKILL.md)
 - **implement**: build it the laziest way that works (`kip-messy-bun`). [kip-messy-bun](../skills/implementation/kip-messy-bun/SKILL.md)
 - **tidy**: strip the branch's diff of noise and dead weight (`kip-marie-kondo`); a PR needs a `--stage tidy` claim. [kip-marie-kondo](../skills/implementation/kip-marie-kondo/SKILL.md)
-- **review**: a correctness pass over the branch diff; a PR needs a `--stage review` claim. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#stages)
+- **review**: an adversarial pass over the branch diff (`kip-objection`); a PR needs a `--stage review` claim. [kip-objection](../skills/verification/kip-objection/SKILL.md)
 - **receipts**: back every claim with evidence (`kip-receipts`). [kip-receipts](../skills/verification/kip-receipts/SKILL.md)
-- **level**: `lite`, `full` (default), or `ultra`. Each skill reads it its own way: effort (decompose), intensity (messy-bun), what gets cut (marie-kondo), thoroughness (receipts).
+- **level**: `lite`, `full` (default), or `ultra`. Each skill reads it its own way: effort (decompose, objection), intensity (messy-bun), what gets cut (marie-kondo), thoroughness (receipts).
 - **the ladder**: messy-bun's order of preference: YAGNI, reuse, stdlib, native, installed dependency, one line, minimum code. [kip-messy-bun](../skills/implementation/kip-messy-bun/SKILL.md#the-ladder)
+- **objection**: one way a change can break, raised by `kip-objection` along an attack **axis** with a fixed **severity** (High, Medium, Low). [kip-objection](../skills/verification/kip-objection/SKILL.md#4-attack)
+- **sustained** / **unproven** / **overruled**: an objection's ruling: a probe proves it, it's reasoned from reading only, or the trace or a probe shows it can't happen. [kip-objection](../skills/verification/kip-objection/SKILL.md#5-rule)
+- **probe**: a throwaway test in a scratch worktree that passes only if an objection's bug is real. [kip-objection](../skills/verification/kip-objection/SKILL.md#5-rule)
+- **ruling**: kip-objection's report: block, fix first, or ship, then the ranked objections. [kip-objection](../skills/verification/kip-objection/SKILL.md#6-ruling)
 - **nudge**: a gate block that fires once a session, then lets the action through; the middle of `required`, `nudge`, `off`. [configuration](configuration.md)
 
 ## Planning
