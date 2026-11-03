@@ -405,10 +405,9 @@ A run carries the workflow `stages` from Kip's config when it starts
 before a PR can open:
 
 - **tidy**: the `kip-marie-kondo` pass, which records itself.
-- **review**: a correctness pass over the branch diff (the host's
-  `/code-review` if it has one). With nothing to fix, record
-  `claim "Review: no open correctness findings" --stage review` with the
-  review's output as evidence. Each finding you fix is its own
+- **review**: the `kip-objection` pass over the branch diff. With nothing
+  to fix, record `claim "Review: no sustained objections" --stage review`
+  with its ruling as evidence. Each finding you fix is its own
   `--stage review` claim ("Fixed: …") with a check that shows the fix, so an
   unfixed finding stays open and blocks the PR.
 
