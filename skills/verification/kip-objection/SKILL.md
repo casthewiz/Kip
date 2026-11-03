@@ -25,7 +25,7 @@ review tool. Subagents may split the axes, but each follows this file.
 
 ## Persistence
 
-Runs once per review target. Default: **full**. Switch:
+Runs once per review target. In Kip's loop, once per task, after tidy. Default: **full**. Switch:
 `/kip-objection lite|full|ultra`.
 
 ## Effort
@@ -143,8 +143,12 @@ this PR**, **callout**, **new ticket**, or **intentional** (with the question
 tool, if available). Never post without this.
 
 Reviewing this session's own branch for Kip's review stage, there's nothing
-to post: fix every sustained High and Medium without asking, and triage only
-the rest. Each fix is recorded as its own
+to post, and the review runs once. Every sustained High and Medium is fixed
+without asking; triage only the rest. Take the ones to fix back to
+`/kip-decompose` as new units (each objection's repro becomes the unit's
+claim), then implement and tidy them; Kip's gate holds the next edit until
+decompose has run. Don't run kip-objection again on the fixes. Each fix is
+recorded as its own
 `--stage review` claim ("Fixed: …") with the probe, now failing, as
 evidence. With no objection to fix, record
 `claim "Review: no sustained objections" --stage review` with the ruling as

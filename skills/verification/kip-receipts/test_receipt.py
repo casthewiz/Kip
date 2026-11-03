@@ -927,6 +927,12 @@ def main():
         (repo / "app.py").write_text('print("fixed again, loopfix, twice")\n')
         rc("run", "c6", "--replace", "--", "grep", "-q", "twice", "app.py")
         assert verdicts()["c6"] == "✅ verified", verdicts()
+        rc("claim", "reworded check")  # c7: a check passed, then failed on changed code and was replaced
+        rc("run", "c7", "--", "grep", "-q", "twice", "app.py")
+        (repo / "app.py").write_text('print("fixed again, loopfix, two times")\n')
+        rc("run", "c7", "--", "grep", "-q", "twice", "app.py")
+        rc("run", "c7", "--replace", "--", "grep", "-q", "two times", "app.py")
+        assert not verdicts()["c7"].startswith("🕰️"), "a replaced check's old pass kept the claim stale: " + verdicts()["c7"]
         rc("orphan", "--reason", "fix loop tests done")
 
         # Finished runs: once a run's commits are on the base branch and nothing changed since, the
@@ -1456,6 +1462,33 @@ def main():
         check("--hook", "end", event=sk)
         assert "/kip-messy-bun" in edit(pol / "a.py", "sk")[1], "a session's end didn't forget its skill nudges"
         assert "/kip-messy-bun" not in edit(pol / "a.py", "sk3")[1], "a session's end forgot another session's nudges"
+        # review: a stop after a change waits for kip-objection, once. Using it sends the next edit back through
+        # kip-decompose and, once the session edits again, the next stop back through kip-marie-kondo.
+        (pol / ".kip" / "config.json").write_text(json.dumps({"workflow": {"stages": [], "worktrees": "off", "skills": {
+            "decompose": "required", "tidy": "required", "review": "required"}}}))
+        ob = {"session_id": "ob", "cwd": str(pol)}
+        check("--hook", "start", event=ob, cwd=pol)
+        used("ob", "Skill", "kip-decompose")
+        assert edit(pol / "a.py", "ob") == (0, "")
+        (pol / "object-me.txt").write_text("1\n")
+        used("ob", "Skill", "kip-marie-kondo")
+        out = check("--hook", "stop", event=ob, cwd=pol)[1]
+        assert "/kip-objection" in out and "/kip-marie-kondo" not in out, out
+        used("ob", "Skill", "kip-objection")
+        out = check("--hook", "stop", event=ob, cwd=pol)[1]
+        assert not any(s in out for s in ("/kip-objection", "/kip-decompose", "/kip-marie-kondo")), \
+            "objection with nothing to fix still sent the session back: " + out
+        assert "/kip-decompose" in edit(pol / "a.py", "ob")[1], "an edit after kip-objection skipped kip-decompose"
+        used("ob", "Skill", "kip-decompose")
+        assert edit(pol / "a.py", "ob") == (0, "")
+        used("ob", "Write", str(pol / "a.py"))
+        out = check("--hook", "stop", event=ob, cwd=pol)[1]
+        assert "/kip-marie-kondo" in out and "/kip-objection" not in out, "objection ran twice, or tidy wasn't owed: " + out
+        used("ob", "Skill", "kip-marie-kondo")
+        assert "/kip-" not in check("--hook", "stop", event=ob, cwd=pol)[1]
+        check("--hook", "prompt", event={**ob, "prompt": "$kip-objection again"})  # Codex names a skill in the prompt
+        assert "/kip-decompose" in edit(pol / "a.py", "ob")[1], "a prompt's kip-objection didn't send the session back"
+        (pol / "object-me.txt").unlink()
         # By default (no home config nulling the gates) kip-messy-bun is required, not a nudge: every edit waits for
         # it until the session uses it.
         (pol / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')

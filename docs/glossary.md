@@ -29,7 +29,7 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **decompose**: understand the problem and cut it into units of work with claims (`kip-decompose`). [kip-decompose](../skills/analysis/kip-decompose/SKILL.md)
 - **implement**: build it the laziest way that works (`kip-messy-bun`). [kip-messy-bun](../skills/implementation/kip-messy-bun/SKILL.md)
 - **tidy**: strip the branch's diff of noise and dead weight (`kip-marie-kondo`); a PR needs a `--stage tidy` claim. [kip-marie-kondo](../skills/implementation/kip-marie-kondo/SKILL.md)
-- **review**: an adversarial pass over the branch diff (`kip-objection`); a PR needs a `--stage review` claim. [kip-objection](../skills/verification/kip-objection/SKILL.md)
+- **review**: an adversarial pass over the branch diff (`kip-objection`), once a session; its objections go back to decompose. A PR needs a `--stage review` claim. [kip-objection](../skills/verification/kip-objection/SKILL.md)
 - **receipts**: back every claim with evidence (`kip-receipts`). [kip-receipts](../skills/verification/kip-receipts/SKILL.md)
 - **level**: `lite`, `full` (default), or `ultra`. Each skill reads it its own way: effort (decompose, objection), intensity (messy-bun), what gets cut (marie-kondo), thoroughness (receipts).
 - **the ladder**: messy-bun's order of preference: YAGNI, reuse, stdlib, native, installed dependency, one line, minimum code. [kip-messy-bun](../skills/implementation/kip-messy-bun/SKILL.md#the-ladder)
@@ -114,7 +114,7 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
   - `workflow.stages`: stages a PR needs a claim for (default `tidy`, `review`).
   - `workflow.checks`: required check commands.
   - `workflow.worktrees`: how hard edits are steered off a main checkout (`nudge`, `required`, `off`).
-  - `workflow.skills`: which workflow skills the gate holds a session to (`decompose`, `implement`, `tidy`).
+  - `workflow.skills`: which workflow skills the gate holds a session to (`decompose`, `implement`, `tidy`, `review`).
   - `workflow.loop`: a fix loop's bound, `attempts` and wall-clock `minutes` from the first failure (default 3 and 10).
   - `workflow.worktree.setup`: a command run in each new `kip.py worktree new` worktree.
 - `dashboard`: `dashboard.conversation`, whether the session log keeps prompts and replies.

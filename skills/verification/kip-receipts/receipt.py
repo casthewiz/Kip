@@ -965,7 +965,9 @@ def verdict(c, rec):
             return note
         shown = True
     now = current_tree() if holds(rec) else None  # another checkout's code says nothing
-    if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
+    last = {check_key(e): e for e in ev}  # a check whose latest attempt was replaced no longer speaks for the code
+    if now and any(r["green"] and not last[k].get("superseded") and r["green"][-1].get("tree") not in (None, now)
+                   for k, r in runs.items()):
         return "🕰️ stale: the code changed since it was checked"
     latest = [r["green"][-1].get("served") or {} for r in runs.values() if r["green"]]
     away = [s["checkout"] for s in latest if s.get("checkout") not in (None, s.get("here"))]
@@ -1394,14 +1396,14 @@ def edit_gate(hook):
                 blocked, msg = True, use_a_worktree(path) + (
                     " This is a nudge, once a session: retrying edits here anyway." if policy == "nudge" else "")
                 break
-    return with_due(skills_due(hook, ("decompose", "implement")), blocked, msg) if in_repo else (False, "")
+    return with_due(skills_due(hook, ("decompose", "implement"), editing=True), blocked, msg) if in_repo else (False, "")
 
 
 
 def session_skills(sid):
-    """The skills a session has used, from the event log."""
-    used = set()
-    for p in EVENTS.glob("*.jsonl"):
+    """The skills a session has used, in order from the event log, with an "edit" for each file edit."""
+    used = []
+    for p in sorted(EVENTS.glob("*.jsonl")):
         with open(p, encoding="utf-8", errors="replace") as f:
             for line in f:
                 if sid not in line:
@@ -1411,11 +1413,22 @@ def session_skills(sid):
                 except ValueError:
                     continue
                 if e.get("session") == sid and e.get("hook") == "tool":
-                    used.add(used_skill(str(e.get("tool")), str(e.get("input") or "")))
+                    used.append("edit" if e.get("tool") in EDITS else used_skill(str(e.get("tool")), str(e.get("input") or "")))
     return used
 
 
-def skills_due(hook, stages):
+def settled(stage, used, editing):
+    """The stage's skill was used, and a stage kip-objection reopens was used again after it if the session edits
+    after it. messy-bun: edits made through a shell aren't seen here."""
+    if SKILL_OF[stage] not in used:
+        return False
+    if stage not in REOPENS or SKILL_OF["review"] not in used:
+        return True
+    after = used[len(used) - used[::-1].index(SKILL_OF["review"]):]
+    return SKILL_OF[stage] in after or not (editing or "edit" in after)
+
+
+def skills_due(hook, stages, editing=False):
     """What this session still owes of workflow.skills' stages: a required skill until it's used, a nudged one once.
     A stage settled (used, or nudged) gets a nudge file, so later edits skip the log; config is read only once
     a skill is missing."""
@@ -1425,9 +1438,9 @@ def skills_due(hook, stages):
         return ""
     used = session_skills(sid)
     for s in todo:
-        if SKILL_OF[s] in used:
+        if settled(s, used, editing=True):  # settled whatever the session edits next
             nudge_once(f"{sid}.{s}")
-    todo = [s for s in todo if SKILL_OF[s] not in used]
+    todo = [s for s in todo if not settled(s, used, editing)]
     if not todo:
         return ""
     policy = kip.load().get("workflow", {}).get("skills", {})
@@ -1449,7 +1462,7 @@ def gate(a, hook):
         return False, NUDGED
     if hook.get("status") in ("aborted", "error"):  # Cursor: the user stopped it, or it crashed; don't re-prompt
         return False, f"check: turn {hook['status']}"
-    due = skills_due(hook, ("decompose", "tidy")) if a.hook == "stop" and session_changed(hook) else ""
+    due = skills_due(hook, ("decompose", "tidy", "review")) if a.hook == "stop" and session_changed(hook) else ""
     return with_due(due, *branch_gate(a, hook))
 
 
@@ -1696,6 +1709,7 @@ STAGES = ["decompose", "implement", "tidy", "review", "receipts"]
 SKILL_STAGES = {"kip-decompose": "decompose", "kip-messy-bun": "implement", "kip-marie-kondo": "tidy",
                 "code-review": "review", "kip-objection": "review", "kip-receipts": "receipts"}
 SKILL_OF = {stage: skill for skill, stage in SKILL_STAGES.items()}
+REOPENS = ("decompose", "tidy")  # stages kip-objection sends the session back through for what it found
 EDITS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "afterFileEdit", "apply_patch"}
 PATCH_FILE = re.compile(r"^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+?)\s*$", re.M)  # Codex's apply_patch
 HOST = None  # check --host: the host the event log names
@@ -1738,6 +1752,15 @@ def log_tool(hook, kind="tool"):
         (json.dumps(ti, ensure_ascii=False) if ti else "")
     append_event(hook, hook=kind, tool=hook.get("tool_name") or hook.get("hook_event_name") or "tool",
                  input=redact(str(what))[:200])
+    if kind == "tool":
+        reopen(hook, used_skill(str(hook.get("tool_name")), str(what)))
+
+
+def reopen(hook, skill):
+    """Using kip-objection unsettles the stages it sends the session back through (see settled)."""
+    if skill == SKILL_OF["review"]:
+        for s in REOPENS:
+            (NUDGES / f"{session_id(hook)}.{s}").unlink(missing_ok=True)
 
 
 def log_said(hook, kind, text):
@@ -1769,6 +1792,7 @@ def log_prompt(hook):
              if n in SKILL_STAGES or any((r / n / "SKILL.md").exists() for r in roots)]
     for name in dict.fromkeys(named + attached):
         append_event(hook, hook="tool", tool="Skill", input=name)
+        reopen(hook, name)
 
 
 def log_gate(event, hook, blocked, msg):

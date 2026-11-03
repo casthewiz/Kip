@@ -23,11 +23,12 @@ Every non-trivial task follows the same loop:
 2. **Implement, lazily**: YAGNI, reuse, stdlib, native, one line before
    fifty. The best code is the code never written.
 3. **Tidy**: strip the branch's diff of dead code, duplication, and noise.
-4. **Review**: an adversarial pass for what breaks.
+4. **Review**: an adversarial pass for what breaks, once. Its objections go
+   back to step 1 as new units, then through implement and tidy again.
 5. **Receipts**: every claim backed by rerunnable, deterministic evidence.
 
 The loop isn't a suggestion. Kip's gate hooks into the agent: it can't edit
-before decomposing, end a turn without tidying or with unproven claims or
+before decomposing, end a turn without tidying and reviewing or with unproven claims or
 failing checks, or open a PR without its tidy and review passes. A
 [GitHub Action](docs/receipts.md#ci) holds every PR to the same bar, whoever
 opened it.

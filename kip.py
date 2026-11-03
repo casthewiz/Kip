@@ -59,7 +59,8 @@ CONNECTOR_KINDS = ("mcp", "tool")
 POLICIES = ("off", "nudge", "required")
 ASK = {"decompose": "`/kip-decompose` (lite is enough for a small change)",  # workflow.skills' stages, as a gate asks
        "implement": "`/kip-messy-bun` (lite is enough for a small change)",
-       "tidy": "`/kip-marie-kondo` over this session's changes"}
+       "tidy": "`/kip-marie-kondo` over this session's changes",
+       "review": "`/kip-objection` over this session's changes (once; fix its objections through `/kip-decompose`)"}
 RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\s*(.*?)\s*<!-- /kip rules -->\s*", re.S)  # Kip's block in a rules value
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 

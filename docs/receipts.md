@@ -15,7 +15,8 @@ claims, evidence the code has since outgrown, or failing
 or without a receipts run, or open a PR with refuted claims or without its
 tidy and review [stages](../skills/verification/kip-receipts/SKILL.md#stages).
 Edits wait for `kip-decompose` and `kip-messy-bun`, and a
-turn that changed code can't end before `kip-marie-kondo`
+turn that changed code can't end before `kip-marie-kondo` and, once a
+session, `kip-objection`, whose objections go back through `kip-decompose`
 ([`workflow.skills`](configuration.md)); Cursor has no hook before an edit, so
 there only the stop holds it.
 Each session starts knowing where the branch's run stands; a run whose work has

@@ -104,7 +104,7 @@
   },
   "default_destination": "local",
   "workflow": {"stages": ["tidy", "review"], "checks": {}, "worktrees": "nudge", "loop": {"attempts": 3, "minutes": 10},
-               "skills": {"decompose": "required", "implement": "required", "tidy": "required"}},
+               "skills": {"decompose": "required", "implement": "required", "tidy": "required", "review": "required"}},
   "dashboard": {"conversation": true},
   "setup": {
     "playwright": {

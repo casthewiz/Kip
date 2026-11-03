@@ -405,7 +405,8 @@ A run carries the workflow `stages` from Kip's config when it starts
 before a PR can open:
 
 - **tidy**: the `kip-marie-kondo` pass, which records itself.
-- **review**: the `kip-objection` pass over the branch diff. With nothing
+- **review**: the `kip-objection` pass over the branch diff, once; its
+  objections go back through `kip-decompose`. With nothing
   to fix, record `claim "Review: no sustained objections" --stage review`
   with its ruling as evidence. Each finding you fix is its own
   `--stage review` claim ("Fixed: …") with a check that shows the fix, so an
