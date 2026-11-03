@@ -991,7 +991,9 @@ def verdict(c, rec):
             return note
         shown = True
     now = current_tree() if holds(rec) else None  # another checkout's code says nothing
-    if now and any(r["green"] and r["green"][-1].get("tree") not in (None, now) for r in runs.values()):
+    last = {check_key(e): e for e in ev}  # a check whose latest attempt was replaced no longer speaks for the code
+    if now and any(r["green"] and not last[k].get("superseded") and r["green"][-1].get("tree") not in (None, now)
+                   for k, r in runs.items()):
         return "🕰️ stale: the code changed since it was checked"
     latest = [r["green"][-1].get("served") or {} for r in runs.values() if r["green"]]
     away = [s["checkout"] for s in latest if s.get("checkout") not in (None, s.get("here"))]

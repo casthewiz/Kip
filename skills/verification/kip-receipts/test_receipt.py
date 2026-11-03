@@ -944,6 +944,12 @@ def main():
         (repo / "app.py").write_text('print("fixed again, loopfix, twice")\n')
         rc("run", "c6", "--replace", "--", "grep", "-q", "twice", "app.py")
         assert verdicts()["c6"] == "✅ verified", verdicts()
+        rc("claim", "reworded check")  # c7: a check passed, then failed on changed code and was replaced
+        rc("run", "c7", "--", "grep", "-q", "twice", "app.py")
+        (repo / "app.py").write_text('print("fixed again, loopfix, two times")\n')
+        rc("run", "c7", "--", "grep", "-q", "twice", "app.py")
+        rc("run", "c7", "--replace", "--", "grep", "-q", "two times", "app.py")
+        assert not verdicts()["c7"].startswith("🕰️"), "a replaced check's old pass kept the claim stale: " + verdicts()["c7"]
         rc("orphan", "--reason", "fix loop tests done")
 
         # Finished runs: once a run's commits are on the base branch and nothing changed since, the
