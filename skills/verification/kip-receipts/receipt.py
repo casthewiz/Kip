@@ -159,7 +159,10 @@ def writer():
     if len(found) > 1:
         pid = os.getpid()
         for _ in range(30):
-            r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+            try:
+                r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+            except OSError:  # no ps (Windows): the first variable found decides
+                break
             ppid, _, comm = r.stdout.strip().partition(" ")
             if r.returncode or not ppid.isdigit():
                 break
@@ -1823,7 +1826,9 @@ def ensure_server():
             return
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, env={k: v for k, v in os.environ.items() if k not in OWNERS.values()})  # shared: no session's to stop
+                     start_new_session=True,  # Windows: no console window, out of the host's Ctrl+C group
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                     env={k: v for k, v in os.environ.items() if k not in OWNERS.values()})  # shared: no session's to stop
 
 
 def session_end(hook):
@@ -1838,15 +1843,39 @@ def stop_servers(hook):
     sid = session_id(hook)
     for p in SERVERS.glob("*.json") if sid else ():
         try:
-            if json.loads(p.read_text()).get("session") != sid:
-                continue
+            rec = json.loads(p.read_text())
         except (OSError, ValueError):  # still being written, or another end hook took it
             continue
-        cmd = subprocess.run(["ps", "-o", "command=", "-p", p.stem], capture_output=True, text=True).stdout
-        # messy-bun: a crashed server's pid reused by another dashboard would be stopped; record start times if that bites
-        if "receipt.py" in cmd and " serve" in cmd:  # a dead server's pid may belong to something else by now
-            os.kill(int(p.stem), signal.SIGTERM)
+        if rec.get("session") != sid:
+            continue
+        if rec.get("started") and started(int(p.stem)) == rec["started"]:  # a dead server's pid may be another's now
+            try:
+                os.kill(int(p.stem), signal.SIGTERM)  # TerminateProcess on Windows: no handler runs, so drop the record here
+            except OSError:
+                pass
         p.unlink(missing_ok=True)
+
+
+def started(pid):
+    """When a process started, which tells it from a later one given the same pid; None when there's none."""
+    if os.name != "nt":
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                           env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+        return r.stdout.strip() or None
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32")
+    k32.OpenProcess.restype = wintypes.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    times = [wintypes.FILETIME() for _ in range(4)]  # creation, exit, kernel, user
+    try:
+        if not k32.GetProcessTimes(wintypes.HANDLE(h), *map(ctypes.byref, times)):
+            return None
+    finally:
+        k32.CloseHandle(wintypes.HANDLE(h))
+    return times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
 
 
 def reason_kind(line):
@@ -2284,7 +2313,7 @@ def cmd_serve(a):
     try:
         if writer():
             SERVERS.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"session": writer()}))
+            record.write_text(json.dumps({"session": writer(), "started": started(os.getpid())}))
         print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
         server.serve_forever()
     finally:
