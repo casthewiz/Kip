@@ -64,6 +64,7 @@ import select
 import shutil
 import signal
 import socket
+import socketserver
 import sqlite3
 import subprocess
 import sys
@@ -82,7 +83,7 @@ FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image
 
 
 def git(*args, cwd=None):
-    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
+    r = subprocess.run([shutil.which("git") or "git", *args], capture_output=True, text=True, cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -364,7 +365,7 @@ def import_json():
             if con.execute("SELECT 1 FROM runs WHERE id = ?", (p.parent.name,)).fetchone():
                 continue
             try:
-                save(p.parent, json.loads(p.read_text()))
+                save(p.parent, json.loads(p.read_text(encoding="utf-8")))
             except (ValueError, KeyError) as err:
                 print(f"kip-receipts: skipped {p}: {err}", file=sys.stderr)
                 continue
@@ -372,7 +373,7 @@ def import_json():
     for p in ROOT.glob("*/sessions/*"):
         with tx() as con:
             sessions += con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)",
-                                    (p.parent.parent.name, p.name, p.read_text().strip())).rowcount
+                                    (p.parent.parent.name, p.name, p.read_text(encoding="utf-8").strip())).rowcount
     return runs, sessions
 
 
@@ -394,9 +395,9 @@ def staged(*commands):
         real = git("rev-parse", "--git-path", "index")
         if real and Path(real).exists():
             shutil.copy2(real, index)
-        subprocess.run(["git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
+        subprocess.run([shutil.which("git") or "git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
                        env=env, capture_output=True)
-        runs = [subprocess.run(["git", *args], env=env, capture_output=True) for args in commands]
+        runs = [subprocess.run([shutil.which("git") or "git", *args], env=env, capture_output=True) for args in commands]
     return [r.stdout if r.returncode == 0 else b"" for r in runs]  # bytes: new files needn't be UTF-8
 
 
@@ -1845,7 +1846,7 @@ def stop_servers(hook):
     sid = session_id(hook)
     for p in SERVERS.glob("*.json") if sid else ():
         try:
-            rec = json.loads(p.read_text())
+            rec = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):  # still being written, or another end hook took it
             continue
         if rec.get("session") != sid:
@@ -2240,7 +2241,7 @@ def cmd_serve(a):
             if path == "/":
                 self.send(page, "text/html")
             elif mascot:
-                self.send((MASCOT / mascot[1]).read_text(), "image/svg+xml")
+                self.send((MASCOT / mascot[1]).read_text(encoding="utf-8"), "image/svg+xml")
             elif path == "/api/runs":
                 with lock:
                     seen = {}
@@ -2338,8 +2339,13 @@ def cmd_serve(a):
                 streams.discard(q)
                 live["busy"] = time.time()
 
+    def bind(self):  # HTTPServer's own reverse-resolves 127.0.0.1 (getfqdn), which can hang for minutes on macOS
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     try:
-        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True})(
+        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True,
+                                                         "server_bind": bind})(
             ("127.0.0.1", a.port), Handler)  # the default backlog of 5 refuses a page's burst of requests
     except OSError as err:
         sys.exit(f"kip dashboard: can't listen on 127.0.0.1:{a.port} ({err.strerror}); is it already running?")
@@ -2361,7 +2367,7 @@ def cmd_serve(a):
     try:
         if writer():
             SERVERS.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"session": writer(), "started": started(os.getpid())}))
+            record.write_text(json.dumps({"session": writer(), "started": started(os.getpid())}), encoding="utf-8")
         print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
         server.serve_forever()
     finally:
@@ -2564,4 +2570,6 @@ def main():
 
 
 if __name__ == "__main__":
+    for s in (sys.stdout, sys.stderr):  # Windows pipes default to the ANSI code page, which can't print → or ·
+        s.reconfigure(encoding="utf-8")
     main()

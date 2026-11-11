@@ -8,6 +8,8 @@ import os
 import re
 import queue
 import shutil
+import shlex
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -19,8 +21,20 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+if os.name == "nt":  # write and read the test's files as POSIX does: UTF-8, LF line ends (sh reads a CR as part of the line)
+    Path.write_text = lambda self, data, *_, **__: self.write_bytes(data.encode("utf-8"))
+    Path.read_text = lambda self, *_, **__: self.read_bytes().decode("utf-8").replace("\r\n", "\n")
+
 SCRIPT = Path(__file__).resolve().with_name("receipt.py")  # 3.8 leaves __file__ relative
 DESKTEST = Path(__file__).resolve().with_name("playwright") / "desktest.py"
+
+def command_lines(text):
+    """The command lines of running processes that contain text (pgrep -f, or Windows' process table)."""
+    if os.name != "nt":
+        return subprocess.run(["pgrep", "-f", text], capture_output=True, encoding="utf-8").stdout.split()
+    ps = f"(Get-CimInstance Win32_Process | ? {{ $_.CommandLine -like '*{text}*' -and $_.Name -ne 'powershell.exe' }}).ProcessId"
+    return subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, encoding="utf-8").stdout.split()
+
 
 # Stands in for the playwright CLI: writes a screenshot (and a video at ultra) per
 # project, and fails on mobile when the site is "broken".
@@ -400,6 +414,7 @@ def main():
         assert [(e["phase"], e["passed"]) for e in ev] == \
             [("green", False), ("green", True), ("green", True), ("green", True), ("red", True)], ev
         assert all(e["remote"] and e["commit"] is None and e["patch"] is None for e in ev), ev
+        assert ev[0]["command"][1:4] == [str(DESKTEST), "--exec", "--viewports"], ev[0]["command"]
         assert "BASE_URL=https://broken.example.test" in ev[0]["command"], ev[0]["command"]
         assert "--project=mobile" in ev[0]["command"] and "KIP_LEVEL=ultra" in ev[0]["command"], ev[0]["command"]
         inputs = {i["path"]: i["inside_run"] for i in ev[0]["inputs"]}
@@ -414,8 +429,8 @@ def main():
         assert "· remote · log sha256" in md and "commit `" not in md, md
         table_row = next(line for line in md.splitlines() if line.startswith("| c1 |"))
         assert "desktest mobile https://broken.example.test (exit 1, superseded)<br>" in table_row, table_row
-        assert "BASE_URL=" not in table_row, "full commands belong in the details, not the table"
-        assert re.search(r"- desktest mobile https://broken\.example\.test: `[^`]*BASE_URL=https://broken\.example\.test", md), md
+        assert "--exec" not in table_row, "full commands belong in the details, not the table"
+        assert "- desktest mobile https://broken.example.test: `" in md and " --exec --viewports " in md, md
         # A desk test is one check per spec and viewport, whatever its URL: mobile failed on one host and
         # passed on another, and nothing pins either host's code.
         assert "🌐 passed after failing, code not pinned" in md, md
@@ -426,7 +441,7 @@ def main():
                 extra_env={"KIP_PLAYWRIGHT": str(pw)})
         assert dt.startswith("mobile ") and len(dt.splitlines()) == 1, dt
         cmd = run_json(remote)["claims"][0]["evidence"][-1]["command"]
-        assert any(c.startswith('KIP_VIEWPORTS={"mobile":{"browserName":"chromium"') for c in cmd), cmd
+        assert cmd[cmd.index("--viewports") + 1].startswith('{"mobile":{"browserName":"chromium"'), cmd
         assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
         # Editing the spec after a run leaves its evidence alone (the next run keeps its own copy); altering a
@@ -668,7 +683,7 @@ def main():
 
         # A start hook launches the server when nothing listens, once, and not at all with KIP_DASHBOARD=0.
         port = free_port()
-        auto = {"KIP_DASHBOARD": "1", "KIP_DASHBOARD_PORT": str(port), "KIP_DASHBOARD_IDLE": "2",
+        auto = {"KIP_DASHBOARD": "1", "KIP_DASHBOARD_PORT": str(port), "KIP_DASHBOARD_IDLE": "8",
                 "CLAUDE_CODE_SESSION_ID": "s0"}  # the shared server must not take the session's id
         check("--hook", "start", event=dash, extra_env={**auto, "KIP_DASHBOARD": "0"})
         assert not wait_until(lambda: listening(port), 2), "started with KIP_DASHBOARD=0"
@@ -678,10 +693,7 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        ps = (["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Process | ? { $_.ProcessId -ne $PID -and "
-               f"$_.CommandLine -like '* serve --port {port}' }}).ProcessId"] if os.name == "nt" else
-              ["pgrep", "-f", f"serve --port {port}"])
-        servers = subprocess.run(ps, capture_output=True, encoding="utf-8").stdout.split()
+        servers = command_lines(f"serve --port {port}")  # before the server goes idle
         assert len(servers) == 1, servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
@@ -697,7 +709,7 @@ def main():
         # Skills with no skill hook: a prompt's `/name` (when a skill folder has it, or it's a stage's skill) or
         # attached SKILL.md, and a tool reading a SKILL.md, count as using that skill. Editing one doesn't.
         # Cursor gets JSON answers and one session id across its events. Prompts and replies are kept, redacted.
-        home = {"HOME": str(Path(tmp, "nohome"))}
+        home = {"HOME": str(Path(tmp, "nohome")), "USERPROFILE": str(Path(tmp, "nohome"))}
         (repo / ".claude" / "skills" / "my-skill").mkdir(parents=True)
         (repo / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text("---\nname: my-skill\n---\n")
         prompt = {"session_id": "p1", "cwd": str(repo),
@@ -1630,7 +1642,7 @@ def main():
         fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", cx.as_posix()))
 
         # The dashboard's question tools, as hooks see them (codex exec's is request_user_input_async)
-        asked = re.search(r'r\.hook === "tool" && /(.+?)/\.test', SCRIPT.with_name("dashboard.html").read_text(encoding="utf-8"))[1]
+        asked = re.search(r'ASKED = re\.compile\(r"(.+?)"\)', SCRIPT.read_text(encoding="utf-8"))[1]  # the server's mood rule
         for name in ("AskUserQuestion", "AskQuestion", fixture["PreToolUse:request_user_input_async"]["tool_name"]):
             assert re.search(asked, name), f"the dashboard doesn't see {name} as asking"
 
