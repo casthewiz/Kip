@@ -71,7 +71,7 @@ import sys
 import tempfile
 import uuid
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / "kip.py").is_file())))
 import kip  # noqa: E402
@@ -2104,7 +2104,7 @@ def mood(r):
         return "failure"
     if r["active"] and r.get("hook") not in ("stop", "start") and not on_user(r):
         return "working"
-    run = Path(r["run"]).name if r["run"] else None
+    run = PureWindowsPath(r["run"]).name if r["run"] else None  # either separator, whichever OS wrote it
     m = next((x["mood"] for x in r["runs"] if x["id"] == run), None)
     if m and not (m == "asking" and r["pr"]):
         return m
