@@ -3,11 +3,12 @@ name = "kip-app"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "Native window and tray around Kip's dashboard (receipt.py serve)"
+description = "Native window and tray around Kip's dashboard (receipt.py serve), for macOS and Linux"
 license = "MIT"
 publish = false
 
-[dependencies]
+# Windows' shell is windows/kip_app.pyw: Smart App Control blocks unsigned binaries built on the machine.
+[target.'cfg(not(windows))'.dependencies]
 tao = "=0.37.2"
 tray-icon = "=0.26.1"
 wry = "=0.57.2"

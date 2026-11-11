@@ -1,7 +1,8 @@
 //! kip-app: a window and tray icon around Kip's dashboard. Attaches to the `receipt.py serve` already listening on
 //! the dashboard port, or starts one and stops it again on Quit. The page is the server's own http://127.0.0.1
-//! URL, not a custom protocol: the server refuses any other Host.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! URL, not a custom protocol: the server refuses any other Host. macOS and Linux only.
+#[cfg(windows)]
+compile_error!("kip-app's Windows shell is app/windows/kip_app.pyw: Smart App Control blocks binaries built locally");
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -45,19 +46,13 @@ fn answers(port: u16) -> bool {
         && &head[9..] == b"200"
 }
 
-fn quiet(cmd: &mut Command) -> &mut Command {
-    #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(cmd, 0x0800_0000); // CREATE_NO_WINDOW: no console flash
-    cmd
-}
-
-/// KIP_PYTHON, else the first of python3/python that runs (Windows' python3 is often a Store stub that doesn't).
+/// KIP_PYTHON, else the first of python3/python that runs.
 fn python() -> Option<String> {
     if let Ok(p) = env::var("KIP_PYTHON") {
         return Some(p);
     }
     ["python3", "python"].into_iter().map(String::from).find(|p| {
-        quiet(Command::new(p).args(["-c", "import sys"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()))
+        Command::new(p).args(["-c", "import sys"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
     })
@@ -79,7 +74,7 @@ fn connect(port: u16) -> (Option<Child>, Result<(), String>) {
     for k in OWNERS {
         cmd.env_remove(k);
     }
-    let mut child = match quiet(&mut cmd).spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (None, Err(format!("couldn't run {py} {}: {e}", script.display()))),
     };
