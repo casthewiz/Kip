@@ -35,6 +35,10 @@ CONFIG = HERE / "kip.config.mjs"
 PW_CLI = kip.KIP_HOME / "node_modules" / "@playwright" / "test" / "cli.js"
 NODE_VERSION = (HERE / ".nvmrc").read_text().strip()
 SETUP = f"run `bash {HERE / 'setup.sh'}` once"
+# `env NAME=VALUE ... CMD`, which Windows lacks (and Git's mangles a JSON value): the same in Python there.
+ENV = ["env"] if os.name != "nt" else [sys.executable, "-c", "import os, subprocess, sys; a = sys.argv[1:]; "
+                                       "n = next(i for i, x in enumerate(a) if '=' not in x); "
+                                       "os.environ.update(x.split('=', 1) for x in a[:n]); sys.exit(subprocess.call(a[n:]))"]
 
 
 def pinned_node():
@@ -83,7 +87,7 @@ def main():
 
     run_args = ["--run", a.run] if a.run else []
     rec = json.loads(subprocess.run([sys.executable, str(RECEIPT), "json", *run_args],
-                                    capture_output=True, text=True, check=True).stdout)
+                                    capture_output=True, encoding="utf-8", check=True).stdout)
     claim = next((c for c in rec["claims"] if c["id"] == a.claim), None)
     if not claim:
         sys.exit(f"unknown claim {a.claim}")
@@ -92,7 +96,7 @@ def main():
     # ran: editing it later makes a new copy instead of breaking the hash of evidence already recorded. A spec
     # elsewhere (a project's own, with relative imports) runs where it is.
     run_dir = Path(subprocess.run([sys.executable, str(RECEIPT), "path", *run_args],
-                                  capture_output=True, text=True, check=True).stdout.strip()).resolve()
+                                  capture_output=True, encoding="utf-8", check=True).stdout.strip()).resolve()
     if spec.parent == run_dir / "specs":
         body = spec.read_bytes()
         digest = hashlib.sha256(body).hexdigest()[:12]
@@ -110,13 +114,13 @@ def main():
             # and kip-kubrick's capture helpers as 'kip-kubrick/kubrick'.
             vp_json = json.dumps({vp: configured[vp]}, separators=(",", ":"))
             node_path = f"{kip.KIP_HOME / 'node_modules'}{os.pathsep}{HERE.parents[1]}"
-            cmd = ["env", f"BASE_URL={a.url}", f"KIP_VIEWPORTS={vp_json}", f"KIP_LEVEL={level}",
+            cmd = [*ENV, f"BASE_URL={a.url}", f"KIP_VIEWPORTS={vp_json}", f"KIP_LEVEL={level}",
                    f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={node_path}",
                    *pw, "test", str(spec), "--config", str(CONFIG), f"--project={vp}"]
             r = subprocess.run([sys.executable, str(RECEIPT), "run", a.claim, *run_args,
                                 *(["--red"] if a.red else []), "--collect", out,
                                 "--label", f"desktest {vp} {a.url}", "--", *cmd],
-                               capture_output=True, text=True)
+                               capture_output=True, encoding="utf-8")
             line = (r.stdout + r.stderr).strip()
             print(f"{vp:8} {line}")
             failed |= r.returncode != 0 or "-> pass" not in line

@@ -6,6 +6,7 @@ API, so `upload` leaves files to the agent's browser and `receipt.py record --fi
 (skill kip-receipts-github), on the issue's comment box instead of the PR's.
 """
 import json
+import shutil
 import subprocess
 
 FORMAT = "github"  # GitHub plays a bare video URL inline in issue comments too
@@ -21,8 +22,8 @@ def publish(conf, issue, body, comment_id):
         raise ValueError(f"issue key {issue!r} is not 123 or owner/repo#123")
     repo = repo or "{owner}/{repo}"  # gh fills these in from the current checkout
     path = f"repos/{repo}/issues/comments/{comment_id}" if comment_id else f"repos/{repo}/issues/{number}/comments"
-    r = subprocess.run(["gh", "api", "-X", "PATCH" if comment_id else "POST", path, "--input", "-"],
-                       input=json.dumps({"body": body}), capture_output=True, text=True)
+    r = subprocess.run([shutil.which("gh") or "gh", "api", "-X", "PATCH" if comment_id else "POST", path, "--input", "-"],
+                       input=json.dumps({"body": body}), capture_output=True, encoding="utf-8")
     if r.returncode:
         raise RuntimeError(f"gh api {path}: {r.stderr.strip()}")
     c = json.loads(r.stdout)

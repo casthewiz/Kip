@@ -171,7 +171,7 @@ def main():
         assert ".kip/worktrees" not in status, status
         assert "already exists" in kip_in(proj, "worktree", "new", "feat", ok=False)[1]
         receipt = lambda cwd, *args: subprocess.run([sys.executable, str(RECEIPT), *args], cwd=cwd,  # noqa: E731
-                                                    env={**env, **store}, capture_output=True, text=True).stdout.strip()
+                                                    env={**env, **store}, capture_output=True, encoding="utf-8").stdout.strip()
         plan = Path(receipt(proj, "init")).name
         receipt(proj, "claim", "unit one works", "--unit", "1")
         unit_wt = Path(kip_in(proj, "worktree", "new", "unit-1", "--parent", plan, "--unit", "1")[0])
