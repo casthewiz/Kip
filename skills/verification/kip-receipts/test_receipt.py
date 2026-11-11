@@ -18,6 +18,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+if os.name == "nt":  # write and read the test's files as POSIX does: UTF-8, LF line ends (sh reads a CR as part of the line)
+    Path.write_text = lambda self, data, *_, **__: self.write_bytes(data.encode("utf-8"))
+    Path.read_text = lambda self, *_, **__: self.read_bytes().decode("utf-8").replace("\r\n", "\n")
+
 SCRIPT = Path(__file__).resolve().with_name("receipt.py")  # 3.8 leaves __file__ relative
 DESKTEST = Path(__file__).resolve().with_name("playwright") / "desktest.py"
 
@@ -93,7 +97,7 @@ def main():
             "setup": None, "workflow": {"skills": None}, "hosts": {"cursor": {"logs": [str(Path(tmp, "cursor-logs"))]}}}))
 
         def sh(*args, ok=True, extra_env=None, cwd=repo):
-            r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
+            r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, encoding="utf-8")
             assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
             return (r.stdout + r.stderr).strip()
 
@@ -301,7 +305,7 @@ def main():
         # landed while a claim is unaddressed, and block opening a PR while one is refuted.
         def check(*args, event=None, cwd=repo, extra_env=None):
             r = subprocess.run([sys.executable, str(SCRIPT), "check", *args], cwd=cwd, env={**env, **(extra_env or {})},
-                               input=None if event is None else json.dumps(event), capture_output=True, text=True)
+                               input=None if event is None else json.dumps(event), capture_output=True, encoding="utf-8")
             return r.returncode, (r.stdout + r.stderr).strip()
 
         assert check(extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "empty"))}) == (0, "check: no receipt run for this branch")
@@ -462,7 +466,7 @@ def main():
         day(1).write_text(json.dumps({"session": "yesterday", "at": f"{today}T00:00:00+00:00", "repo": "old"}) + "\n")
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "2"],
-                                  env=env, stdout=subprocess.PIPE, text=True)
+                                  env=env, stdout=subprocess.PIPE, encoding="utf-8")
         assert server.stdout.readline().strip() == f"kip dashboard: http://127.0.0.1:{port}"
         assert "EventSource" in get(port, "/") and "/stream" in get(port, "/")
         rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
@@ -529,7 +533,7 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        servers = subprocess.run(["pgrep", "-f", f"serve --port {port}"], capture_output=True, text=True).stdout.split()
+        servers = subprocess.run(["pgrep", "-f", f"serve --port {port}"], capture_output=True, encoding="utf-8").stdout.split()
         assert len(servers) == 1, servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
@@ -571,7 +575,7 @@ def main():
         # Skills with no skill hook: a prompt's `/name` (when a skill folder has it, or it's a stage's skill) or
         # attached SKILL.md, and a tool reading a SKILL.md, count as using that skill. Editing one doesn't.
         # Cursor gets JSON answers and one session id across its events. Prompts and replies are kept, redacted.
-        home = {"HOME": str(Path(tmp, "nohome"))}
+        home = {"HOME": str(Path(tmp, "nohome")), "USERPROFILE": str(Path(tmp, "nohome"))}
         (repo / ".claude" / "skills" / "my-skill").mkdir(parents=True)
         (repo / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text("---\nname: my-skill\n---\n")
         prompt = {"session_id": "p1", "cwd": str(repo),
@@ -619,7 +623,7 @@ def main():
         renderer.write_text(wake("Released", "user-approval-requested", "k2"))  # before the server: history
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env=env,
-                                  stdout=subprocess.PIPE, text=True)
+                                  stdout=subprocess.PIPE, encoding="utf-8")
         server.stdout.readline()
         try:  # a server left running holds the test's output open
             rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
@@ -1818,7 +1822,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         conc = Path(rc("init"))
         rc("claim", "written by 20 processes at once", "--run", conc.name)
         writers = [subprocess.Popen([sys.executable, str(SCRIPT), "observe", "c1", "--passed", f"w{i}", "--run", str(conc)],
-                                    cwd=repo, env=env, stderr=subprocess.PIPE, text=True) for i in range(20)]
+                                    cwd=repo, env=env, stderr=subprocess.PIPE, encoding="utf-8") for i in range(20)]
         assert all(w.wait() == 0 for w in writers), [w.stderr.read() for w in writers if w.returncode]
         ev = run_json(conc)["claims"][0]["evidence"]
         assert sorted(e["observation"] for e in ev) == sorted(f"w{i}" for i in range(20)), "lost a concurrent write"
@@ -1856,7 +1860,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         bare = racy / "demo" / "20250101-000000-beef"
         bare.mkdir()
         (bare / "receipt.json").write_text(json.dumps({"id": bare.name, "repo": "demo", "level": "full", "claims": []}))
-        openers = [subprocess.Popen([sys.executable, str(SCRIPT), "path"], cwd=repo, stdout=subprocess.PIPE, text=True,
+        openers = [subprocess.Popen([sys.executable, str(SCRIPT), "path"], cwd=repo, stdout=subprocess.PIPE, encoding="utf-8",
                                     env={**env, "KIP_RECEIPTS_DIR": str(racy)}) for _ in range(8)]
         assert {o.communicate()[0].strip() for o in openers} == {str(racy / "demo" / conc.name)}, "an opener missed the import"
         assert rc("db", extra_env={"KIP_RECEIPTS_DIR": str(racy)}).endswith("· 3 runs")
@@ -1904,7 +1908,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         sh("git", "checkout", "-q", "-")
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env={**env, **seg},
-                                  stdout=subprocess.PIPE, text=True)
+                                  stdout=subprocess.PIPE, encoding="utf-8")
         server.stdout.readline()
         try:
             row = next(r for r in json.loads(get(port, "/api/sessions")) if r["session"] == "seg1")

@@ -360,7 +360,7 @@ def import_json():
             if con.execute("SELECT 1 FROM runs WHERE id = ?", (p.parent.name,)).fetchone():
                 continue
             try:
-                save(p.parent, json.loads(p.read_text()))
+                save(p.parent, json.loads(p.read_text(encoding="utf-8")))
             except (ValueError, KeyError) as err:
                 print(f"kip-receipts: skipped {p}: {err}", file=sys.stderr)
                 continue
@@ -368,7 +368,7 @@ def import_json():
     for p in ROOT.glob("*/sessions/*"):
         with tx() as con:
             sessions += con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)",
-                                    (p.parent.parent.name, p.name, p.read_text().strip())).rowcount
+                                    (p.parent.parent.name, p.name, p.read_text(encoding="utf-8").strip())).rowcount
     return runs, sessions
 
 
@@ -683,7 +683,7 @@ def cmd_run(a):
                 attempt(c, e, a.replace)
             if not log:
                 path = d / "files" / f"{e['id']}.log"
-                path.write_text(out)
+                path.write_text(out, encoding="utf-8")
                 log = {"path": f"files/{path.name}", "sha256": sha256(path)}
             e["log"] = dict(log)
             ids.append(e["id"])
@@ -1754,7 +1754,7 @@ def append_event(payload, **fields):
              "session": session_id(payload),
              "host": HOST or ("cursor" if "workspace_roots" in payload else "claude"), **fields}
         EVENTS.mkdir(parents=True, exist_ok=True)
-        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
+        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -1838,7 +1838,7 @@ def stop_servers(hook):
     sid = session_id(hook)
     for p in SERVERS.glob("*.json") if sid else ():
         try:
-            if json.loads(p.read_text()).get("session") != sid:
+            if json.loads(p.read_text(encoding="utf-8")).get("session") != sid:
                 continue
         except (OSError, ValueError):  # still being written, or another end hook took it
             continue
@@ -2058,7 +2058,7 @@ def cmd_serve(a):
     import queue
     import threading
     import time
-    page = Path(__file__).resolve().with_name("dashboard.html").read_text().replace("__STAGES__", json.dumps(STAGES))
+    page = Path(__file__).resolve().with_name("dashboard.html").read_text(encoding="utf-8").replace("__STAGES__", json.dumps(STAGES))
     MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
@@ -2171,7 +2171,7 @@ def cmd_serve(a):
             if path == "/":
                 self.send(page, "text/html")
             elif mascot:
-                self.send((MASCOT / mascot[1]).read_text(), "image/svg+xml")
+                self.send((MASCOT / mascot[1]).read_text(encoding="utf-8"), "image/svg+xml")
             elif path == "/api/runs":
                 with lock:
                     seen = {}
@@ -2284,8 +2284,9 @@ def cmd_serve(a):
     try:
         if writer():
             SERVERS.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"session": writer()}))
+            record.write_text(json.dumps({"session": writer()}), encoding="utf-8")
         print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
+        live["busy"] = time.time()  # idle from here: startup (sweep, poll) can outlast a short --idle
         server.serve_forever()
     finally:
         record.unlink(missing_ok=True)
@@ -2483,4 +2484,6 @@ def main():
 
 
 if __name__ == "__main__":
+    for s in (sys.stdout, sys.stderr):  # Windows pipes default to the ANSI code page, which can't print → or ·
+        s.reconfigure(encoding="utf-8")
     main()

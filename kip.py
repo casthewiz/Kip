@@ -93,7 +93,7 @@ def load():
         if not path.is_file():
             continue
         try:
-            layer = json.loads(path.read_text())
+            layer = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as err:
             sys.exit(f"{path}: {err}")
         unknown = set(layer) - set(SURFACES) - {"default_destination", "workflow", "dashboard"}
@@ -239,10 +239,18 @@ def skills():
     return found
 
 
+def ours(p):
+    """Whether p is a link into this checkout. Windows' readlink adds a \\\\?\\ prefix."""
+    if not p.is_symlink():
+        return False
+    t = os.readlink(p)
+    return (t[4:] if t.startswith("\\\\?\\") else t).startswith(str(ROOT))
+
+
 def link(dest, found):
     dest.mkdir(parents=True, exist_ok=True)
     for p in dest.iterdir():  # links to skills that moved or were deleted
-        if p.is_symlink() and not p.exists() and os.readlink(p).startswith(str(ROOT)):
+        if ours(p) and not p.exists():
             p.unlink()
     for name, src in found.items():
         t = dest / name
@@ -263,12 +271,12 @@ def install_rules(rules):
         print("  rules: " + rules["manual"].format(rules=RULES))
         return
     target = Path(rules["append"]).expanduser()
-    lines = target.read_text().splitlines() if target.exists() else []
+    lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
     if any(is_import(l) for l in lines):
         print(f"  rules: already imported in {target}")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines + [rules["line"].format(rules=RULES)]) + "\n")
+    target.write_text("\n".join(lines + [rules["line"].format(rules=RULES)]) + "\n", encoding="utf-8")
     print(f"  rules: imported in {target}")
 
 
@@ -289,7 +297,7 @@ def is_import(line):
 def read_rules(rules, store):
     """The rules value a host keeps, or None when there's none."""
     if "file" in rules:
-        return store.read_text() if store.exists() else None
+        return store.read_text(encoding="utf-8") if store.exists() else None
     with sqlite3.connect(store) as con:
         row = con.execute("SELECT value FROM ItemTable WHERE key = ?", (rules["key"],)).fetchone()
     return row[0] if row else None
@@ -302,7 +310,7 @@ def write_rules(rules, store, value):
             store.unlink()
         else:
             store.parent.mkdir(parents=True, exist_ok=True)
-            store.write_text(value if value.endswith("\n") else value + "\n")
+            store.write_text(value if value.endswith("\n") else value + "\n", encoding="utf-8")
         return
     with sqlite3.connect(store) as con:
         if value is None:
@@ -321,13 +329,13 @@ def rules_copy_status(rules):
     block, _ = user_rules(read_rules(rules, rules_store(rules)))
     if not block:
         return "not installed (run install)"
-    return "current" if block.group(1) == RULES.read_text().strip() else "stale (run install)"
+    return "current" if block.group(1) == RULES.read_text(encoding="utf-8").strip() else "stale (run install)"
 
 
 def install_rules_copy(rules, store):
     """Replace Kip's block in a rules value the host keeps; keep the user's own rules."""
     old = read_rules(rules, store)
-    block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text().strip()}\n<!-- /kip rules -->"
+    block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text(encoding="utf-8").strip()}\n<!-- /kip rules -->"
     value = "\n\n".join(filter(None, [user_rules(old)[1], block])) + "\n"
     if old == value:
         return print(f"  rules: already in {store}")
@@ -355,7 +363,7 @@ def hook_groups(hooks):
 
 def read_settings(path):
     try:
-        return json.loads(path.read_text()) if path.exists() else {}
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except ValueError as err:
         sys.exit(f"{path}: {err}; fix it before installing hooks")
 
@@ -390,7 +398,7 @@ def config_trust(path):
     differs, which is a modified hook or a hash Kip no longer computes as Codex does."""
     conf = path.parent / "config.toml"
     try:
-        text = conf.read_text() if conf.exists() else ""
+        text = conf.read_text(encoding="utf-8") if conf.exists() else ""
         try:
             import tomllib
             state = tomllib.loads(text).get("hooks", {}).get("state", {})
@@ -464,7 +472,7 @@ def install_hooks(hooks, path):
         changed |= [g for g in on.get(event, []) if is_kip(g)] != groups
         on[event] = [g for g in on.get(event, []) if not is_kip(g)] + groups
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n")
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print(f"  hooks: {', '.join(hooks['events'])} in {path}")
     return changed
 
@@ -488,7 +496,7 @@ def where(entry, key, top):
 
 def print_receipts(*args, prefix=""):
     """kip.db's status from receipt.py, which owns it: its path, schema version, and run count."""
-    r = subprocess.run([sys.executable, str(RECEIPT), "db", *args], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(RECEIPT), "db", *args], capture_output=True, encoding="utf-8")
     print("receipts")
     for line in r.stdout.strip().splitlines() if r.returncode == 0 else [f"error: {r.stderr.strip()}"]:
         print(f"  {prefix}{line}")
@@ -496,10 +504,10 @@ def print_receipts(*args, prefix=""):
 
 def save_layer(path, kind, key, value):
     """Set kind.key in one config layer, beside whatever else it holds."""
-    layer = json.loads(path.read_text()) if path.is_file() else {}
+    layer = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     layer.setdefault(kind, {})[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(layer, indent=2) + "\n")
+    path.write_text(json.dumps(layer, indent=2) + "\n", encoding="utf-8")
 
 
 def service(platform=sys.platform):
@@ -542,7 +550,7 @@ def install_service():
         run_quiet(unload)  # reload, so a changed copy, file, or python takes effect
     shutil.rmtree(APP, ignore_errors=True)
     shutil.copytree(ROOT, APP, ignore=shutil.ignore_patterns(".git", ".claude", "__pycache__", "node_modules"))
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
     err = run_quiet(load)
     print(f"dashboard\n  service: {path}" + (f" (not started: {err})" if err else ""))
 
@@ -576,10 +584,10 @@ def install_git_hooks(d):
     written = []
     for name in GIT_HOOKS:
         p = d / name
-        if p.exists() and "# kip:" not in p.read_text():
+        if p.exists() and "# kip:" not in p.read_text(encoding="utf-8"):
             print(f"  skipped {p}: not Kip's")
             continue
-        p.write_text(GIT_HOOK)
+        p.write_bytes(GIT_HOOK.encode())  # LF even on Windows: sh reads a CR as part of the line
         p.chmod(0o755)
         written.append(name)
     if written:
@@ -587,7 +595,7 @@ def install_git_hooks(d):
 
 
 def uninstall_git_hooks(d):
-    gone = [p for p in (d / n for n in GIT_HOOKS) if p.exists() and "# kip:" in p.read_text()]
+    gone = [p for p in (d / n for n in GIT_HOOKS) if p.exists() and "# kip:" in p.read_text(encoding="utf-8")]
     for p in gone:
         p.unlink()
     if gone:
@@ -657,7 +665,7 @@ def uninstall_hooks(hooks, path):
     if settings in ({}, hooks.get("init")):
         path.unlink()
     else:
-        path.write_text(json.dumps(settings, indent=2) + "\n")
+        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print(f"  hooks: removed from {path}")
 
 
@@ -671,9 +679,9 @@ def uninstall_rules(rules):
         return print(f"  rules: removed from {store}")
     target = Path(rules["append"]).expanduser() if "append" in rules else None
     if target and target.exists():
-        lines = [l for l in target.read_text().splitlines() if not is_import(l)]
+        lines = [l for l in target.read_text(encoding="utf-8").splitlines() if not is_import(l)]
         if lines:
-            target.write_text("\n".join(lines) + "\n")
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
         else:
             target.unlink()
         print(f"  rules: removed from {target}")
@@ -682,7 +690,7 @@ def uninstall_rules(rules):
 def unlink_skills(dest):
     if not dest.is_dir():
         return
-    gone = [p for p in dest.iterdir() if p.is_symlink() and os.readlink(p).startswith(str(ROOT))]
+    gone = [p for p in dest.iterdir() if ours(p)]
     for p in gone:
         p.unlink()
     print(f"  {len(gone)} skills unlinked from {dest}")
@@ -724,10 +732,10 @@ def cmd_worktree(a):
     main = main_checkout(top) or top  # a submodule's worktrees go in its own checkout
     path, branch = main / ".kip" / "worktrees" / a.name, f"kip/{a.name}"
     exclude = Path(git_in(top, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
-    lines = exclude.read_text().splitlines() if exclude.is_file() else []
+    lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.is_file() else []
     if "/.kip/worktrees/" not in lines:  # the main checkout shouldn't see its worktrees as untracked files
         exclude.parent.mkdir(parents=True, exist_ok=True)
-        exclude.write_text("\n".join(lines + ["/.kip/worktrees/"]) + "\n")
+        exclude.write_text("\n".join(lines + ["/.kip/worktrees/"]) + "\n", encoding="utf-8")
     git_in(main, "worktree", "add", "-q", "-b", branch, str(path), a.base or git_in(top, "rev-parse", "HEAD").strip())
     include = main / ".worktreeinclude"
     if include.is_file():
@@ -779,4 +787,6 @@ def main():
 
 
 if __name__ == "__main__":
+    for s in (sys.stdout, sys.stderr):  # Windows pipes default to the ANSI code page, which can't print → or ·
+        s.reconfigure(encoding="utf-8")
     main()
