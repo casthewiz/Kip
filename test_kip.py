@@ -408,6 +408,8 @@ def main():
         path, text, load, unload = kip_py.service("linux")
         assert path.name == "kip-dashboard.service" and "Restart=always" in text and "serve --idle 0" in text, text
         assert kip_py.service("win32") is None
+        win = r"python3 'C:\Users\me\Kip\skills\verification\kip-receipts\receipt.py' check --hook start"
+        assert kip_py.is_kip({"hooks": [{"type": "command", "command": win}]})  # backslashes, and shlex's quotes
         os.environ["KIP_DASHBOARD_PORT"] = "7400"
         assert "--port 7400" in kip_py.service("linux")[1]
         del os.environ["KIP_DASHBOARD_PORT"]

@@ -338,7 +338,8 @@ def install_rules_copy(rules, store):
 def is_kip(group):
     """Kip's hook groups are the ones calling receipt.py check, wherever the repo lived when installed.
     A group nests its commands under `hooks` (Claude Code) or is one command itself (Cursor)."""
-    return any("kip-receipts/receipt.py check" in h.get("command", "") for h in group.get("hooks", [group]))
+    return any("kip-receipts/receipt.py check" in h.get("command", "").replace("\\", "/").replace("'", "")
+               for h in group.get("hooks", [group]))  # Windows paths, and shlex's quotes
 
 
 def fill(group):
