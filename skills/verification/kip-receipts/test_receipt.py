@@ -77,6 +77,79 @@ PROJECT_CONFIG = {
 }
 
 
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait_until(ok, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        if ok():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def listening(port):
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def stop_servers():
+    """A session's end stops the dashboards it started, and only those; the start hook's shared one is no one's.
+    Runs before main(), which still assumes a POSIX shell, so Windows checks this much."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**{k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")},
+               "KIP_RECEIPTS_DIR": str(Path(tmp, "store")), "KIP_HOME": str(Path(tmp, "home")), "KIP_DASHBOARD": "0"}
+        Path(tmp, "home").mkdir()
+        Path(tmp, "home", "config.json").write_text(json.dumps({"setup": None, "workflow": {"skills": None}, "hosts": {}}))
+        records = Path(tmp, "store", "servers")
+
+        def end(sid):
+            r = subprocess.run([sys.executable, str(SCRIPT), "check", "--hook", "end"], cwd=tmp, env=env,
+                               input=json.dumps({"session_id": sid}), capture_output=True, text=True)
+            assert (r.returncode, r.stdout + r.stderr) == (0, ""), r
+
+        owned, procs = {}, []
+
+        def run(*args, **kw):
+            procs.append(subprocess.Popen(*args, **kw))
+            return procs[-1]
+
+        try:
+            for who in ("s1", "s2", None):
+                p = free_port()
+                owned[who] = (p, run([sys.executable, str(SCRIPT), "serve", "--port", str(p), "--idle", "0"],
+                                         env={**env, **({"CLAUDE_CODE_SESSION_ID": who} if who else {})},
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                assert wait_until(lambda: listening(p), 10), who
+            mine = {json.loads(f.read_text())["session"]: json.loads(f.read_text()) for f in records.iterdir()}
+            assert sorted(mine) == ["s1", "s2"] and all(r["started"] for r in mine.values()), mine
+            # Live processes that aren't the dashboard their record names: one whose pid took a dead server's record
+            # (its start time differs), and one from before records had start times.
+            decoys = [run([sys.executable, "-c", "import time; time.sleep(30)"]) for _ in range(2)]
+            (records / f"{decoys[0].pid}.json").write_text(json.dumps(mine["s1"]))
+            (records / f"{decoys[1].pid}.json").write_text(json.dumps({"session": "s1"}))
+            end("s1")
+            assert wait_until(lambda: owned["s1"][1].poll() is not None, 10), "the ending session's server kept running"
+            assert listening(owned["s2"][0]) and listening(owned[None][0]), "stopped another session's server"
+            assert all(d.poll() is None for d in decoys), "killed a process that isn't a dashboard"
+            assert [json.loads(f.read_text())["session"] for f in records.iterdir()] == ["s2"], "left s1's records"
+            end("s2")
+            assert wait_until(lambda: owned["s2"][1].poll() is not None, 10), "the second session's server kept running"
+            idle = run([sys.executable, str(SCRIPT), "serve", "--port", str(free_port()), "--idle", "1"],
+                       env={**env, "CLAUDE_CODE_SESSION_ID": "s3"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            assert wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 10)
+            assert idle.wait(20) == 0, "an idle server didn't exit cleanly"
+            assert not list(records.iterdir()), "a stopped server left its record"
+        finally:  # what a failure leaves running would hold the temporary store open
+            for proc in procs:
+                proc.kill()
+                proc.wait()
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp, "demo")
@@ -436,26 +509,9 @@ def main():
 
         # The dashboard server: the page, sessions with their stage, one session's events, and a stream
         # that pushes each new event to open pages; it exits once idle with no page open.
-        def free_port():
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                return s.getsockname()[1]
-
         def get(port, path):
             with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
                 return r.read().decode()
-
-        def wait_until(ok, seconds):
-            end = time.time() + seconds
-            while time.time() < end:
-                if ok():
-                    return True
-                time.sleep(0.1)
-            return False
-
-        def listening(port):
-            with socket.socket() as s:
-                return s.connect_ex(("127.0.0.1", port)) == 0
 
         day = lambda n: events / f"{today - datetime.timedelta(days=n)}.jsonl"
         day(20).write_text(json.dumps({"session": "ancient", "at": "2000-01-01T00:00:00+00:00"}) + "\n")
@@ -533,32 +589,6 @@ def main():
         assert len(servers) == 1, servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
-        # A session's end stops the dashboards it started, and only those; the start hook's shared one is no one's.
-        owned = {}
-        for who in ("s1", "s2", None):
-            p = free_port()
-            owned[who] = (p, subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(p), "--idle", "0"],
-                                              env={**{k: v for k, v in env.items() if k != "CLAUDE_CODE_SESSION_ID"},
-                                                   **({"CLAUDE_CODE_SESSION_ID": who} if who else {})},
-                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-            assert wait_until(lambda: listening(p), 10), who
-        assert sorted(json.loads(f.read_text())["session"] for f in records.iterdir()) == ["s1", "s2"]
-        decoy = subprocess.Popen(["sleep", "30"])  # a record whose pid is no longer a dashboard
-        (records / f"{decoy.pid}.json").write_text(json.dumps({"session": "s1"}))
-        assert check("--hook", "end", event={"session_id": "s1"}) == (0, "")
-        assert wait_until(lambda: owned["s1"][1].poll() is not None, 10), "the ending session's server kept running"
-        assert listening(owned["s2"][0]) and listening(owned[None][0]), "stopped another session's server"
-        assert decoy.poll() is None, "killed a process that isn't a dashboard"
-        assert [json.loads(f.read_text())["session"] for f in records.iterdir()] == ["s2"]
-        decoy.kill()
-        for _, server_ in owned.values():
-            server_.terminate()
-            server_.wait()
-        idle = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(free_port()), "--idle", "1"],
-                                env={**env, "CLAUDE_CODE_SESSION_ID": "s3"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        assert wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 10)
-        assert idle.wait(20) == 0 and not any("s3" in f.read_text() for f in records.iterdir()), "an idle exit left its record"
-        assert not list(records.iterdir()), "a stopped server left its record"
         # A log that can't be written changes nothing about what the gate says.
         gate_pr = {"tool_input": {"command": "gh pr create"}}
         before = check("--hook", "pr", event=gate_pr)
@@ -1954,4 +1984,5 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
 
 
 if __name__ == "__main__":
+    stop_servers()
     main()
