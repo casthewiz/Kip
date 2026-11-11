@@ -1957,8 +1957,11 @@ def run_summary(rec):
         v = verdict(c, rec).split(":")[0]
         counts[v] = counts.get(v, 0) + 1
         asking += bool(c["unverified"]) and not c.get("accepted")
+    failing = any(v[v.find(" ") + 1:].startswith(("refuted", "check can't fail")) for v in counts)
     return {"id": rec["id"], "branch": rec.get("branch"), "level": rec["level"], "issue": rec.get("issue"),
             "target": rec.get("target"), "finished": bool(rec.get("finished")), "claims": counts, "asking": asking,
+            # Kip as its claims stand: finished, a claim failing, or one unverified and not accepted; None otherwise.
+            "mood": "success" if rec.get("finished") else "failure" if failing else "asking" if asking else None,
             "sinks": [{"name": s, "url": rec.get("published", {}).get(s, {}).get("url")} for s in rec["sinks"]]}
 
 
@@ -2078,7 +2081,42 @@ def finish(rows):
                     "runs": [run_summary(x) for x in recs], "issues": list(issues.values()),
                     "worktrees": [{"path": p, "linked": ln, "live": Path(p).is_dir()} for p, ln in r["worktrees"].items()],
                     "sources": sorted(r["sources"].values(), key=lambda s: s["last"], reverse=True)})
+        out[-1]["mood"] = mood(out[-1])
     return sorted(out, key=lambda r: r["last"], reverse=True)
+
+
+ASKED = re.compile(r"(Ask(User)?Question|request_user_input(_async)?)\b")
+MOOD_RANK = ["failure", "asking", "working", "success", "waiting"]  # which session's mood is Kip's overall, first wins
+
+
+def on_user(r):
+    """Whether a session waits on its user: a tool call waiting on their approval, or a question to them (Claude
+    Code's AskUserQuestion, Cursor's AskQuestion, Codex's request_user_input or, in codex exec,
+    request_user_input_async). Either lasts until the session's next event."""
+    return r.get("hook") == "ask" or r.get("hook") == "tool" and bool(ASKED.match(r.get("tool") or ""))
+
+
+def mood(r):
+    """Kip as a finished row's session stands: blocked by the gate, mid-turn, else as its run's claims stand (an
+    unverified claim doesn't ask once its PR is open), else let stop by the gate, else idle."""
+    if r["blocked"]:
+        return "failure"
+    if r["active"] and r.get("hook") not in ("stop", "start") and not on_user(r):
+        return "working"
+    run = Path(r["run"]).name if r["run"] else None
+    m = next((x["mood"] for x in r["runs"] if x["id"] == run), None)
+    if m and not (m == "asking" and r["pr"]):
+        return m
+    return "success" if r.get("hook") == "stop" else "waiting"
+
+
+def status(rows):
+    """What a tray shows of finished rows: Kip's mood across active sessions (the first of MOOD_RANK any has,
+    waiting with none) and the active sessions waiting on their user or blocked at stop."""
+    active = [r for r in rows if r["active"]]
+    ids = lambda ok: [r["session"] for r in active if ok(r)]
+    return {"mood": min((r["mood"] for r in active), key=MOOD_RANK.index, default="waiting"),
+            "active": len(active), "approval": ids(on_user), "blocked": ids(lambda r: r["blocked"])}
 
 
 def cmd_serve(a):
@@ -2217,6 +2255,14 @@ def cmd_serve(a):
                     snapshot = copy.deepcopy(rows)
                 with reading:
                     body = json.dumps(finish(snapshot), ensure_ascii=False)
+                self.send(body)
+            elif path == "/api/status":  # polled by the tray apps: only active sessions are worked out
+                since = datetime.datetime.now(datetime.timezone.utc) - ACTIVE
+                with lock:
+                    snapshot = copy.deepcopy({k: r for k, r in rows.items()
+                                              if datetime.datetime.fromisoformat(r["last"]) > since})
+                with reading:
+                    body = json.dumps(status(finish(snapshot)))
                 self.send(body)
             elif one:
                 with lock:

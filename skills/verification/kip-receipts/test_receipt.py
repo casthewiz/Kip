@@ -176,6 +176,72 @@ def stop_servers():
                 proc.wait()
 
 
+def moods():
+    """Kip's mood for a session, worked out once on the server, and /api/status, which the tray apps poll.
+    Runs before main(), like stop_servers()."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    import receipt
+    row = lambda **kw: {"session": "s", "active": True, "blocked": 0, "hook": "tool", "tool": "Bash: ls", "pr": False,
+                        "run": None, "runs": [], **kw}
+    run = lambda m: {"run": "C:\\store\\Kip\\r1", "runs": [{"id": "r1", "mood": m}]}  # a Windows path names it too
+    for want, r in [("failure", row(blocked=2, hook="stop")), ("working", row()),
+                    ("waiting", row(hook="ask")), ("waiting", row(tool="AskUserQuestion")),
+                    ("waiting", row(tool="request_user_input_async")), ("working", row(tool="AskUserQuestionnaire")),
+                    ("waiting", row(active=False)), ("success", row(hook="stop")), ("waiting", row(hook="start")),
+                    ("asking", row(hook="stop", **run("asking"))), ("success", row(hook="stop", pr=True, **run("asking"))),
+                    ("failure", row(hook="ask", **run("failure"))), ("working", row(**run("failure"))),
+                    ("success", row(active=False, **run("success")))]:
+        assert receipt.mood(r) == want, (want, r)
+    rows = lambda *ms: [{**row(session=f"s{i}"), "mood": m} for i, m in enumerate(ms)]
+    assert receipt.status(rows("waiting", "success", "working", "asking"))["mood"] == "asking"
+    assert receipt.status(rows())["mood"] == "waiting" and receipt.status(rows("success"))["mood"] == "success"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "KIP_RECEIPTS_DIR": str(Path(tmp, "store")), "KIP_HOME": str(Path(tmp, "home")),
+               "KIP_DASHBOARD": "0", "PYTHONUTF8": "1"}
+        Path(tmp, "home").mkdir()
+        Path(tmp, "home", "config.json").write_text(json.dumps({"setup": None, "workflow": {"skills": None}, "hosts": {}}))
+        subprocess.run(["git", "init", "-q", tmp], check=True)
+        subprocess.run([sys.executable, str(SCRIPT), "init"], cwd=tmp, env=env, check=True, capture_output=True)
+        rid = subprocess.run([sys.executable, str(SCRIPT), "path"], cwd=tmp, env=env, capture_output=True, text=True).stdout.strip()
+        for args in (["claim", "a claim to settle"], ["unverified", "c1", "a human has to look"]):
+            subprocess.run([sys.executable, str(SCRIPT), *args], cwd=tmp, env=env, check=True, capture_output=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        at = lambda minutes=0: (now - datetime.timedelta(minutes=minutes)).isoformat(timespec="seconds")
+        events = [{"session": "working", "hook": "tool", "tool": "Bash"},
+                  {"session": "approval", "hook": "ask", "tool": "Bash"},
+                  {"session": "question", "hook": "tool", "tool": "AskUserQuestion"},
+                  {"session": "blocked", "hook": "stop", "blocked": True},
+                  {"session": "asks", "hook": "stop", "run": rid},
+                  {"session": "old", "hook": "stop", "blocked": True, "at": at(60)}]
+        Path(tmp, "store", "events").mkdir(parents=True, exist_ok=True)
+        Path(tmp, "store", "events", f"{now.date()}.jsonl").write_text(
+            "".join(json.dumps({"at": at(), **e}) + "\n" for e in events))
+        port = free_port()
+        server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "0"],
+                                  env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            assert wait_until(lambda: listening(port), 10)
+            get = lambda path: json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5).read())
+            assert wait_until(lambda: get("/api/status")["active"] == 5, 10), get("/api/status")
+            status = get("/api/status")
+            assert {**status, "approval": sorted(status["approval"])} == {
+                "mood": "failure", "active": 5, "approval": ["approval", "question"], "blocked": ["blocked"]}, status
+            sessions = {r["session"]: r["mood"] for r in get("/api/sessions")}
+            assert sessions == {"working": "working", "approval": "waiting", "question": "waiting",
+                                "blocked": "failure", "asks": "asking", "old": "failure"}, sessions
+            assert [x["mood"] for x in get("/api/runs")] == ["asking"]
+            subprocess.run([sys.executable, str(SCRIPT), "claim", "a claim that fails"], cwd=tmp, env=env, check=True,
+                           capture_output=True)
+            subprocess.run([sys.executable, str(SCRIPT), "run", "c2", "--", sys.executable, "-c", "raise SystemExit(1)"],
+                           cwd=tmp, env=env, capture_output=True)
+            assert [x["mood"] for x in get("/api/runs")] == ["failure"]
+            assert {r["session"]: r["mood"] for r in get("/api/sessions")}["asks"] == "failure"
+        finally:
+            server.kill()
+            server.wait()
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp, "demo")
@@ -2015,5 +2081,6 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
 
 
 if __name__ == "__main__":
+    moods()
     stop_servers()
     main()
