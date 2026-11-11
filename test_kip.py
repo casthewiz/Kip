@@ -45,8 +45,10 @@ def connect(db):
 def glossary_terms():
     """Every term defined in code that docs/glossary.md must name, as the text it must contain."""
     def choices(script, *args):  # argparse's "{a,b,c}" usage line, so the CLI itself is the source
-        out = subprocess.run([sys.executable, str(script), *args, "--help"], capture_output=True, encoding="utf-8").stdout
-        return re.search(r"\{([\w,-]+)\}", out).group(1).split(",")
+        r = subprocess.run([sys.executable, str(script), *args, "--help"], capture_output=True, encoding="utf-8")
+        m = re.search(r"\{([\w,-]+)\}", r.stdout)
+        assert m, f"{script.name} --help: exit {r.returncode}\n{r.stdout}{r.stderr}"
+        return m.group(1).split(",")
 
     tree = ast.parse(RECEIPT.read_text(encoding="utf-8"))
     stages = next(ast.literal_eval(n.value) for n in tree.body

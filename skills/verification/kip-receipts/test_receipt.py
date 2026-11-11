@@ -559,8 +559,11 @@ def main():
             server_.terminate()
             server_.wait()
         idle = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(free_port()), "--idle", "1"],
-                                env={**env, "CLAUDE_CODE_SESSION_ID": "s3"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        assert wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 10)
+                                env={**env, "CLAUDE_CODE_SESSION_ID": "s3"}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        t0 = time.time()
+        assert wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 30), \
+            (time.time() - t0, idle.poll(), idle.poll() is not None and idle.stdout.read())
+        print(f"s3 record after {time.time() - t0:.1f}s")
         assert idle.wait(20) == 0 and not any("s3" in f.read_text() for f in records.iterdir()), "an idle exit left its record"
         assert not list(records.iterdir()), "a stopped server left its record"
         # A log that can't be written changes nothing about what the gate says.

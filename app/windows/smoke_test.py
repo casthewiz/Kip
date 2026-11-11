@@ -6,6 +6,7 @@ Opens real Edge windows for a few seconds. Exits non-zero on the first failed ch
 """
 import atexit
 import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -23,7 +24,9 @@ HOME = Path(tempfile.mkdtemp(prefix="kip-app-smoke-"))  # its own KIP_HOME: lock
 SPAWN_LOG = HOME / "kip-app-server.log"  # written only when kip-app starts a server
 os.environ.update(KIP_DASHBOARD_PORT=str(PORT), KIP_HOME=str(HOME))
 ENV = dict(os.environ)
-kip_app = importlib.machinery.SourceFileLoader("kip_app", str(PYW)).load_module()
+_spec = importlib.util.spec_from_loader("kip_app", importlib.machinery.SourceFileLoader("kip_app", str(PYW)))
+kip_app = importlib.util.module_from_spec(_spec)  # load_module() is gone in 3.15
+_spec.loader.exec_module(kip_app)
 
 
 def procs():
