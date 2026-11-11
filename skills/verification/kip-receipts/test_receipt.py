@@ -7,6 +7,7 @@ import os
 import re
 import queue
 import shutil
+import shlex
 import signal
 import socket
 import sqlite3
@@ -25,6 +26,21 @@ if os.name == "nt":  # write and read the test's files as POSIX does: UTF-8, LF 
 
 SCRIPT = Path(__file__).resolve().with_name("receipt.py")  # 3.8 leaves __file__ relative
 DESKTEST = Path(__file__).resolve().with_name("playwright") / "desktest.py"
+
+def command_lines(text):
+    """The command lines of running processes that contain text (pgrep -f, or Windows' process table)."""
+    if os.name != "nt":
+        return subprocess.run(["pgrep", "-f", text], capture_output=True, encoding="utf-8").stdout.split()
+    ps = f"(Get-CimInstance Win32_Process | ? {{ $_.CommandLine -like '*{text}*' -and $_.Name -ne 'powershell.exe' }}).ProcessId"
+    return subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, encoding="utf-8").stdout.split()
+
+
+def shim(script):
+    """On Windows, a .cmd beside a shebang script, so tools looked up on PATH run it through sh."""
+    if os.name == "nt":
+        # MSYS=noglob: sh would otherwise brace-expand an argument like repos/{owner}/{repo}
+        script.with_suffix(".cmd").write_text(f'@set MSYS=noglob\r\n@sh "%~dp0{script.name}" %*\r\n')
+
 
 # Stands in for the playwright CLI: writes a screenshot (and a video at ultra) per
 # project, and fails on mobile when the site is "broken".
@@ -61,7 +77,7 @@ FAKE_GH = f'''#!/bin/sh
 case "$1 $2" in
   "api -X") echo "$*" >> "$FAKE_GH_LOG"; cat >> "$FAKE_GH_LOG"; echo >> "$FAKE_GH_LOG"
             echo \'{{"id": 99, "html_url": "https://github.test/issues/7#issuecomment-99"}}\';;
-  "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
+  "pr view") {shlex.quote(sys.executable)} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"], encoding="utf-8").read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
   "pr edit") cat > "$FAKE_PR_BODY";;
   "pr list") [ -n "$FAKE_MERGED_PRS" ] || exit 1; cat "$FAKE_MERGED_PRS";;
   *) echo "unexpected: gh $*" >&2; exit 1;;
@@ -220,6 +236,9 @@ def main():
         pw = Path(tmp, "playwright")
         pw.write_text(FAKE_PLAYWRIGHT)
         pw.chmod(0o755)
+        if os.name == "nt":  # Windows runs a .cmd, not a shebang script
+            shim(pw)
+            pw = pw.with_suffix(".cmd")
         remote = Path(rc("init", "--target", "https://staging.example.test", "--level", "ultra"))
         assert (remote / "specs").is_dir()
         rc("claim", "signup works on every viewport", "--provider", "frontend")
@@ -239,7 +258,8 @@ def main():
         assert [(e["phase"], e["passed"]) for e in ev] == \
             [("green", False), ("green", True), ("green", True), ("green", True), ("red", True)], ev
         assert all(e["remote"] and e["commit"] is None and e["patch"] is None for e in ev), ev
-        assert ev[0]["command"][:2] == ["env", "BASE_URL=https://broken.example.test"], ev[0]["command"]
+        assert ev[0]["command"][1:4] == [str(DESKTEST), "--exec", "--viewports"], ev[0]["command"]
+        assert "BASE_URL=https://broken.example.test" in ev[0]["command"], ev[0]["command"]
         assert "--project=mobile" in ev[0]["command"] and "KIP_LEVEL=ultra" in ev[0]["command"], ev[0]["command"]
         inputs = {i["path"]: i["inside_run"] for i in ev[0]["inputs"]}
         ran = hashlib.sha256(b"// spec\n").hexdigest()[:12]
@@ -253,8 +273,8 @@ def main():
         assert "· remote · log sha256" in md and "commit `" not in md, md
         table_row = next(line for line in md.splitlines() if line.startswith("| c1 |"))
         assert "desktest mobile https://broken.example.test (exit 1, superseded)<br>" in table_row, table_row
-        assert "`env " not in table_row, "full commands belong in the details, not the table"
-        assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
+        assert "--exec" not in table_row, "full commands belong in the details, not the table"
+        assert "- desktest mobile https://broken.example.test: `" in md and " --exec --viewports " in md, md
         # A desk test is one check per spec and viewport, whatever its URL: mobile failed on one host and
         # passed on another, and nothing pins either host's code.
         assert "🌐 passed after failing, code not pinned" in md, md
@@ -265,7 +285,7 @@ def main():
                 extra_env={"KIP_PLAYWRIGHT": str(pw)})
         assert dt.startswith("mobile ") and len(dt.splitlines()) == 1, dt
         cmd = run_json(remote)["claims"][0]["evidence"][-1]["command"]
-        assert any(c.startswith('KIP_VIEWPORTS={"mobile":{"browserName":"chromium"') for c in cmd), cmd
+        assert cmd[cmd.index("--viewports") + 1].startswith('{"mobile":{"browserName":"chromium"'), cmd
         assert "unknown viewport watch" in sh(sys.executable, str(DESKTEST), "c1", "u", str(spec), "--viewports",
                                               "watch", ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
         # Editing the spec after a run leaves its evidence alone (the next run keeps its own copy); altering a
@@ -534,7 +554,7 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        servers = subprocess.run(["pgrep", "-f", f"serve --port {port}"], capture_output=True, encoding="utf-8").stdout.split()
+        servers = command_lines(f"serve --port {port}")
         assert len(servers) == 1, servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
@@ -548,7 +568,7 @@ def main():
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             assert wait_until(lambda: listening(p), 10), who
         assert sorted(json.loads(f.read_text())["session"] for f in records.iterdir()) == ["s1", "s2"]
-        decoy = subprocess.Popen(["sleep", "30"])  # a record whose pid is no longer a dashboard
+        decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])  # a record whose pid is no longer a dashboard
         (records / f"{decoy.pid}.json").write_text(json.dumps({"session": "s1"}))
         assert check("--hook", "end", event={"session_id": "s1"}) == (0, "")
         assert wait_until(lambda: owned["s1"][1].poll() is not None, 10), "the ending session's server kept running"
@@ -565,7 +585,7 @@ def main():
         t0 = time.time()
         if not wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 30):
             if idle.poll() is None:
-                idle.send_signal(signal.SIGABRT)  # faulthandler prints every thread's stack
+                idle.send_signal(signal.SIGABRT if os.name != "nt" else signal.SIGTERM)  # faulthandler prints every thread's stack
             raise AssertionError(f"no s3 record after 30s: {idle.communicate(timeout=10)[0]}")
         print(f"s3 record after {time.time() - t0:.1f}s")
         assert idle.wait(20) == 0 and not any("s3" in f.read_text() for f in records.iterdir()), "an idle exit left its record"
@@ -672,6 +692,7 @@ def main():
         bin_.mkdir()
         (bin_ / "gh").write_text(FAKE_GH)
         (bin_ / "gh").chmod(0o755)
+        shim(bin_ / "gh")
         body = Path(tmp, "pr-body.md")
         body.write_text("My description")
         ghlog = Path(tmp, "gh.log")
@@ -819,7 +840,7 @@ def main():
         (repo / "app.py").write_text('print("fixed")\n')
         rc("run", "c1", "--", "grep", "-q", "fixed", "app.py")
         assert verdicts()["c1"] == "✅ verified", verdicts()
-        has_flag = ["sh", "-c", f"test -f {flag}"]
+        has_flag = ["sh", "-c", f"test -f {shlex.quote(str(flag))}"]
         rc("run", "c2", "--", *has_flag)
         flag.write_text("")
         rc("run", "c2", "--", *has_flag)  # flag is outside the repo: same code, different result
@@ -1441,10 +1462,11 @@ def main():
         real_git = shutil.which("git")
         (counted / "git").write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexec "{real_git}" "$@"\n')
         (counted / "git").chmod(0o755)
+        shim(counted / "git")
         for path in (pol_wt / "x.py", Path(tmp, "outside.txt")):
             calls.unlink(missing_ok=True)
             assert check("--hook", "edit", event={"session_id": "e5", "tool_name": "Write", "tool_input": {
-                "file_path": str(path)}}, cwd=pol, extra_env={"PATH": f"{counted}:{os.environ['PATH']}"})[0] == 0
+                "file_path": str(path)}}, cwd=pol, extra_env={"PATH": f"{counted}{os.pathsep}{os.environ['PATH']}"})[0] == 0
             assert len(calls.read_text().splitlines()) == 1, (path, calls.read_text())
         mover_pol = {"session_id": "pol-s", "cwd": str(pol)}
         check("--hook", "start", event=mover_pol, cwd=pol)

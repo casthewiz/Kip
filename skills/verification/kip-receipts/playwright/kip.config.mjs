@@ -1,6 +1,6 @@
 // Kip's Playwright config for desk-testing any site across viewports.
 // No imports, so it loads from anywhere; specs resolve @playwright/test from
-// ~/.kip/node_modules (see setup.sh). desktest.py sets the env vars below,
+// ~/.kip/node_modules (see setup.sh). desktest.py --exec sets the env vars below,
 // including KIP_VIEWPORTS: {name: Playwright `use` block} from Kip's config.
 const level = process.env.KIP_LEVEL || 'full';
 const viewports = JSON.parse(process.env.KIP_VIEWPORTS || '{}');

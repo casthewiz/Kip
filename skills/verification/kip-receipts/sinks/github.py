@@ -7,6 +7,7 @@ files to the agent's browser and `receipt.py record --file` (skill kip-receipts-
 """
 import json
 import re
+import shutil
 import subprocess
 
 FORMAT = "github"
@@ -14,7 +15,7 @@ BEGIN, END = "<!-- kip-receipt -->", "<!-- /kip-receipt -->"
 
 
 def _gh(*args, stdin=None):
-    r = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True)
+    r = subprocess.run([shutil.which("gh") or "gh", *args], input=stdin, capture_output=True, encoding="utf-8")
     if r.returncode:
         raise RuntimeError(f"gh {args[0]} {args[1]}: {r.stderr.strip()}")
     return r.stdout

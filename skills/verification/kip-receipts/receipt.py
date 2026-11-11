@@ -83,7 +83,7 @@ FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image
 
 
 def git(*args, cwd=None):
-    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
+    r = subprocess.run([shutil.which("git") or "git", *args], capture_output=True, text=True, cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -391,9 +391,9 @@ def staged(*commands):
         real = git("rev-parse", "--git-path", "index")
         if real and Path(real).exists():
             shutil.copy2(real, index)
-        subprocess.run(["git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
+        subprocess.run([shutil.which("git") or "git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
                        env=env, capture_output=True)
-        runs = [subprocess.run(["git", *args], env=env, capture_output=True) for args in commands]
+        runs = [subprocess.run([shutil.which("git") or "git", *args], env=env, capture_output=True) for args in commands]
     return [r.stdout if r.returncode == 0 else b"" for r in runs]  # bytes: new files needn't be UTF-8
 
 
@@ -456,7 +456,7 @@ def command_inputs(cmd, d):
         p = Path(arg)
         if p.is_file():
             inside = rel_to(p, d)
-            inputs.append({"path": str(inside) if inside else str(p.resolve()), "inside_run": bool(inside),
+            inputs.append({"path": inside.as_posix() if inside else str(p.resolve()), "inside_run": bool(inside),
                            "in_repo": not inside and bool(top and rel_to(p, Path(top))), "sha256": sha256(p)})
     return inputs
 
@@ -890,7 +890,7 @@ def gone_merged_by(rec, head, at):
 def merged_prs(branch):
     """[(head, mergedAt, number)] for this repo's merged GitHub PRs from branch, or None when gh can't say."""
     try:
-        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
+        r = subprocess.run([shutil.which("gh") or "gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
                             "headRefName,headRefOid,mergedAt,number"], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             return None
@@ -899,7 +899,7 @@ def merged_prs(branch):
         return None
 
 
-SPEC_COPY = re.compile(r"(/specs/[^/]+)-[0-9a-f]{12}(?=\.[^/]*$)")  # desktest.py's specs/<name>-<hash>.<ext>
+SPEC_COPY = re.compile(r"([/\\]specs[/\\][^/\\]+)-[0-9a-f]{12}(?=\.[^/\\]*$)")  # desktest.py's specs/<name>-<hash>.<ext>
 
 
 def check_key(e):
@@ -1696,7 +1696,7 @@ def run_status(hook):
 
 
 def check_pr(pr):
-    r = subprocess.run(["gh", "pr", "view", pr, "--json", "body,headRefOid"], capture_output=True, text=True)
+    r = subprocess.run([shutil.which("gh") or "gh", "pr", "view", pr, "--json", "body,headRefOid"], capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"gh pr view {pr}: {r.stderr.strip()}")
     view = json.loads(r.stdout)
