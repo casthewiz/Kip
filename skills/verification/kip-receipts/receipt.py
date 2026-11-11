@@ -64,6 +64,7 @@ import select
 import shutil
 import signal
 import socket
+import socketserver
 import sqlite3
 import subprocess
 import sys
@@ -2261,8 +2262,13 @@ def cmd_serve(a):
                 streams.discard(q)
                 live["busy"] = time.time()
 
+    def bind(self):  # HTTPServer's own reverse-resolves 127.0.0.1 (getfqdn), which can hang for minutes on macOS
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     try:
-        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True})(
+        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True,
+                                                         "server_bind": bind})(
             ("127.0.0.1", a.port), Handler)  # the default backlog of 5 refuses a page's burst of requests
     except OSError as err:
         sys.exit(f"kip dashboard: can't listen on 127.0.0.1:{a.port} ({err.strerror}); is it already running?")
@@ -2286,7 +2292,6 @@ def cmd_serve(a):
             SERVERS.mkdir(parents=True, exist_ok=True)
             record.write_text(json.dumps({"session": writer()}), encoding="utf-8")
         print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
-        live["busy"] = time.time()  # idle from here: startup (sweep, poll) can outlast a short --idle
         server.serve_forever()
     finally:
         record.unlink(missing_ok=True)
