@@ -1862,7 +1862,8 @@ def stop_servers(hook):
 def started(pid):
     """When a process started, which tells it from a later one given the same pid; None when there's none."""
     if os.name != "nt":
-        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+        # lstart is to the second, so the command line too: a process started in the same second isn't the server
+        r = subprocess.run(["ps", "-o", "lstart=", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
                            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
         return r.stdout.strip() or None
     import ctypes
