@@ -488,7 +488,7 @@ def where(entry, key, top):
 
 def print_receipts(*args, prefix=""):
     """kip.db's status from receipt.py, which owns it: its path, schema version, and run count."""
-    r = subprocess.run([sys.executable, str(RECEIPT), "db", *args], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(RECEIPT), "db", *args], capture_output=True, encoding="utf-8")
     print("receipts")
     for line in r.stdout.strip().splitlines() if r.returncode == 0 else [f"error: {r.stderr.strip()}"]:
         print(f"  {prefix}{line}")

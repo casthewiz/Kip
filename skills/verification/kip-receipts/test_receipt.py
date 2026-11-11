@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Self-check for receipt.py and the sink interface: python3 test_receipt.py"""
+import contextlib
 import datetime
 import hashlib
 import json
@@ -23,14 +24,18 @@ DESKTEST = Path(__file__).resolve().with_name("playwright") / "desktest.py"
 
 # Stands in for the playwright CLI: writes a screenshot (and a video at ultra) per
 # project, and fails on mobile when the site is "broken".
-FAKE_PLAYWRIGHT = '''#!/bin/sh
-for arg; do case "$arg" in --project=*) vp="${arg#--project=}";; esac; done
-mkdir -p "$KIP_OUT/signup-$vp"
-printf 'png' > "$KIP_OUT/signup-$vp/test-finished-1.png"
-[ "$KIP_LEVEL" = ultra ] && printf 'webm' > "$KIP_OUT/signup-$vp/video.webm"
-echo "1 test on $vp against $BASE_URL"
-case "$BASE_URL:$vp" in *broken*:mobile) echo "overflow on mobile"; exit 1;; esac
-exit 0
+FAKE_PLAYWRIGHT = '''
+import os, sys
+from pathlib import Path
+vp = next((a[len("--project="):] for a in sys.argv if a.startswith("--project=")), "")
+url, out = os.environ["BASE_URL"], Path(os.environ["KIP_OUT"], "signup-" + vp)
+out.mkdir(parents=True, exist_ok=True)
+(out / "test-finished-1.png").write_text("png")
+if os.environ.get("KIP_LEVEL") == "ultra":
+    (out / "video.webm").write_text("webm")
+print("1 test on", vp, "against", url)
+if "broken" in url and vp == "mobile":
+    sys.exit("overflow on mobile")
 '''
 
 # A project-level sink, loaded from <repo>/.kip/sinks/, that logs calls instead of posting.
@@ -52,16 +57,37 @@ def publish(conf, issue, body, comment_id):
 
 # Stands in for gh: one pull request whose body lives in $FAKE_PR_BODY, and issue comments logged to
 # $FAKE_GH_LOG (each call's arguments, then the JSON it was sent).
-FAKE_GH = f'''#!/bin/sh
-case "$1 $2" in
-  "api -X") echo "$*" >> "$FAKE_GH_LOG"; cat >> "$FAKE_GH_LOG"; echo >> "$FAKE_GH_LOG"
-            echo \'{{"id": 99, "html_url": "https://github.test/issues/7#issuecomment-99"}}\';;
-  "pr view") {sys.executable} -c 'import json, os, sys; print(json.dumps({{"body": open(os.environ["FAKE_PR_BODY"]).read(), "url": "https://github.test/pull/" + sys.argv[1], "headRefOid": os.environ["FAKE_PR_HEAD"]}}))' "$3";;
-  "pr edit") cat > "$FAKE_PR_BODY";;
-  "pr list") [ -n "$FAKE_MERGED_PRS" ] || exit 1; cat "$FAKE_MERGED_PRS";;
-  *) echo "unexpected: gh $*" >&2; exit 1;;
-esac
+FAKE_GH = r'''
+import json, os, sys
+args, env = sys.argv[1:], os.environ
+if args[:2] == ["api", "-X"]:
+    with open(env["FAKE_GH_LOG"], "ab") as f:
+        f.write(" ".join(args).encode() + b"\n" + sys.stdin.buffer.read() + b"\n")
+    print('{"id": 99, "html_url": "https://github.test/issues/7#issuecomment-99"}')
+elif args[:2] == ["pr", "view"]:
+    body = open(env["FAKE_PR_BODY"], encoding="utf-8").read()
+    print(json.dumps({"body": body, "url": "https://github.test/pull/" + args[2], "headRefOid": env["FAKE_PR_HEAD"]}))
+elif args[:2] == ["pr", "edit"]:
+    open(env["FAKE_PR_BODY"], "wb").write(sys.stdin.buffer.read())
+elif args[:2] == ["pr", "list"]:
+    if not env.get("FAKE_MERGED_PRS"):
+        sys.exit(1)
+    print(open(env["FAKE_MERGED_PRS"]).read())
+else:
+    sys.exit("unexpected: gh " + " ".join(args))
 '''
+
+
+def fake(path, source):
+    """A Python stand-in for the CLI at path. Windows won't run a script by its name, so there it's a .cmd beside it."""
+    if os.name != "nt":
+        path.write_text(f"#!{sys.executable}\n{source}")
+        path.chmod(0o755)
+        return path
+    path.with_suffix(".py").write_text(source)
+    path.with_suffix(".cmd").write_text(f'@"{sys.executable}" "%~dpn0.py" %*\n')
+    return path.with_suffix(".cmd")
+
 
 # Two instances of one sink module with their own settings, an agent-backed destination,
 # and a project default destination.
@@ -109,7 +135,7 @@ def stop_servers():
 
         def end(sid):
             r = subprocess.run([sys.executable, str(SCRIPT), "check", "--hook", "end"], cwd=tmp, env=env,
-                               input=json.dumps({"session_id": sid}), capture_output=True, text=True)
+                               input=json.dumps({"session_id": sid}), capture_output=True, encoding="utf-8")
             assert (r.returncode, r.stdout + r.stderr) == (0, ""), r
 
         owned, procs = {}, []
@@ -161,12 +187,15 @@ def main():
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "KIP_DASHBOARD": "0"}
         for v in ("LINEAR_API_KEY", "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "CLAUDE_CODE_SESSION_ID"):
             env.pop(v, None)
+        if os.name == "nt":  # checks run through sh and desk tests through env: Git for Windows ships both
+            git = Path(shutil.which("git"))
+            env["PATH"] += os.pathsep + next(str(d / "usr" / "bin") for d in git.parents if (d / "usr" / "bin" / "sh.exe").exists())
         Path(tmp, "home").mkdir()
         Path(tmp, "home", "config.json").write_text(json.dumps({  # this machine's setup isn't the test's; skill gates have their own test
             "setup": None, "workflow": {"skills": None}, "hosts": {"cursor": {"logs": [str(Path(tmp, "cursor-logs"))]}}}))
 
         def sh(*args, ok=True, extra_env=None, cwd=repo):
-            r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, text=True)
+            r = subprocess.run(args, cwd=cwd, env={**env, **(extra_env or {})}, capture_output=True, encoding="utf-8")
             assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
             return (r.stdout + r.stderr).strip()
 
@@ -177,7 +206,7 @@ def main():
             return json.loads(rc("json", "--run", str(run)))
 
         def kipdb(sql, *params):
-            with sqlite3.connect(Path(tmp, "store", "kip.db")) as con:
+            with contextlib.closing(sqlite3.connect(Path(tmp, "store", "kip.db"))) as con, con:  # closed: Windows can't delete an open db
                 return con.execute(sql, params).fetchall()
 
         (repo / "app.py").write_text('print("hi")\n')
@@ -285,14 +314,12 @@ def main():
 
         # Desk test a remote site someone else built: per-viewport evidence, collected media,
         # remote marking instead of pinning this checkout's commit, and the spec hash-pinned.
-        pw = Path(tmp, "playwright")
-        pw.write_text(FAKE_PLAYWRIGHT)
-        pw.chmod(0o755)
+        pw = fake(Path(tmp, "playwright"), FAKE_PLAYWRIGHT)
         remote = Path(rc("init", "--target", "https://staging.example.test", "--level", "ultra"))
         assert (remote / "specs").is_dir()
         rc("claim", "signup works on every viewport", "--provider", "frontend")
         spec = remote / "specs" / "c1.spec.ts"
-        spec.write_text("// spec\n")
+        spec.write_bytes(b"// spec\n")
         dt = sh(sys.executable, str(DESKTEST), "c1", "https://broken.example.test", str(spec),
                 ok=False, extra_env={"KIP_PLAYWRIGHT": str(pw)})
         assert "mobile   c1e1: exit 1" in dt and "desktop  c1e3: exit 0" in dt, dt
@@ -307,7 +334,7 @@ def main():
         assert [(e["phase"], e["passed"]) for e in ev] == \
             [("green", False), ("green", True), ("green", True), ("green", True), ("red", True)], ev
         assert all(e["remote"] and e["commit"] is None and e["patch"] is None for e in ev), ev
-        assert ev[0]["command"][:2] == ["env", "BASE_URL=https://broken.example.test"], ev[0]["command"]
+        assert "BASE_URL=https://broken.example.test" in ev[0]["command"], ev[0]["command"]
         assert "--project=mobile" in ev[0]["command"] and "KIP_LEVEL=ultra" in ev[0]["command"], ev[0]["command"]
         inputs = {i["path"]: i["inside_run"] for i in ev[0]["inputs"]}
         ran = hashlib.sha256(b"// spec\n").hexdigest()[:12]
@@ -321,8 +348,8 @@ def main():
         assert "· remote · log sha256" in md and "commit `" not in md, md
         table_row = next(line for line in md.splitlines() if line.startswith("| c1 |"))
         assert "desktest mobile https://broken.example.test (exit 1, superseded)<br>" in table_row, table_row
-        assert "`env " not in table_row, "full commands belong in the details, not the table"
-        assert "- desktest mobile https://broken.example.test: `env BASE_URL=https://broken.example.test" in md, md
+        assert "BASE_URL=" not in table_row, "full commands belong in the details, not the table"
+        assert re.search(r"- desktest mobile https://broken\.example\.test: `[^`]*BASE_URL=https://broken\.example\.test", md), md
         # A desk test is one check per spec and viewport, whatever its URL: mobile failed on one host and
         # passed on another, and nothing pins either host's code.
         assert "🌐 passed after failing, code not pinned" in md, md
@@ -374,7 +401,7 @@ def main():
         # landed while a claim is unaddressed, and block opening a PR while one is refuted.
         def check(*args, event=None, cwd=repo, extra_env=None):
             r = subprocess.run([sys.executable, str(SCRIPT), "check", *args], cwd=cwd, env={**env, **(extra_env or {})},
-                               input=None if event is None else json.dumps(event), capture_output=True, text=True)
+                               input=None if event is None else json.dumps(event), capture_output=True, encoding="utf-8")
             return r.returncode, (r.stdout + r.stderr).strip()
 
         assert check(extra_env={"KIP_RECEIPTS_DIR": str(Path(tmp, "empty"))}) == (0, "check: no receipt run for this branch")
@@ -469,7 +496,7 @@ def main():
         # to its tool hook; Cursor's is its only view of the call.
         events = Path(tmp, "store", "events")
         today = datetime.datetime.now(datetime.timezone.utc).date()
-        lines = lambda: [x for p in sorted(events.glob("*.jsonl")) for x in p.read_text().splitlines()]
+        lines = lambda: [x for p in sorted(events.glob("*.jsonl")) for x in p.read_text(encoding="utf-8").splitlines()]
         last = lambda: json.loads(lines()[-1])
         dash = {"session_id": "d1", "cwd": str(repo)}
         for hook, event in (("start", dash), ("stop", dash)):
@@ -518,7 +545,7 @@ def main():
         day(1).write_text(json.dumps({"session": "yesterday", "at": f"{today}T00:00:00+00:00", "repo": "old"}) + "\n")
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port), "--idle", "2"],
-                                  env=env, stdout=subprocess.PIPE, text=True)
+                                  env=env, stdout=subprocess.PIPE, encoding="utf-8")
         assert server.stdout.readline().strip() == f"kip dashboard: http://127.0.0.1:{port}"
         assert "EventSource" in get(port, "/") and "/stream" in get(port, "/")
         rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
@@ -585,7 +612,10 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        servers = subprocess.run(["pgrep", "-f", f"serve --port {port}"], capture_output=True, text=True).stdout.split()
+        ps = (["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Process | ? { $_.ProcessId -ne $PID -and "
+               f"$_.CommandLine -like '* serve --port {port}' }}).ProcessId"] if os.name == "nt" else
+              ["pgrep", "-f", f"serve --port {port}"])
+        servers = subprocess.run(ps, capture_output=True, encoding="utf-8").stdout.split()
         assert len(servers) == 1, servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
@@ -649,7 +679,7 @@ def main():
         renderer.write_text(wake("Released", "user-approval-requested", "k2"))  # before the server: history
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env=env,
-                                  stdout=subprocess.PIPE, text=True)
+                                  stdout=subprocess.PIPE, encoding="utf-8")
         server.stdout.readline()
         try:  # a server left running holds the test's output open
             rows = {r["session"]: r for r in json.loads(get(port, "/api/sessions"))}
@@ -689,8 +719,7 @@ def main():
         # with a hidden gate line that CI reads with `check --pr`.
         bin_ = Path(tmp, "bin")
         bin_.mkdir()
-        (bin_ / "gh").write_text(FAKE_GH)
-        (bin_ / "gh").chmod(0o755)
+        fake(bin_ / "gh", FAKE_GH)
         body = Path(tmp, "pr-body.md")
         body.write_text("My description")
         ghlog = Path(tmp, "gh.log")
@@ -701,7 +730,7 @@ def main():
         assert "<!-- kip-gate {" in rc("render", "--sink", "github")
         assert "github: posted https://github.test/pull/7" in rc("publish", "--sink", "github", "--issue", "7", extra_env=ghenv)
         rc("publish", extra_env=ghenv)
-        pr_body = body.read_text()
+        pr_body = body.read_text(encoding="utf-8")
         assert pr_body.startswith("My description\n\n<!-- kip-receipt -->\n### Receipts") and pr_body.count("kip-gate") == 1, pr_body
         out = rc("check", "--pr", "7", ok=False, extra_env=ghenv)
         assert "c3 ❌ refuted: Fixed: app.py crashes on empty input" in out, out
@@ -718,7 +747,7 @@ def main():
         rc("record", "--sink", "github", "--file", "c3f1-shot.png", "--url", img)
         rc("record", "--sink", "github", "--file", "files/c3f2-demo.mp4", "--url", vid)
         assert "not uploaded" not in rc("publish", extra_env=ghenv)
-        pr_body = body.read_text()
+        pr_body = body.read_text(encoding="utf-8")
         thumb = f'<img src="{img}" width="240" alt="c3: c3f1-shot.png"'
         assert thumb in pr_body and pr_body.index(thumb) < pr_body.index("<details>"), pr_body
         assert pr_body.count(img) == 1 and f"\n\n{vid}\n" in pr_body and "[video:" not in pr_body, pr_body
@@ -727,7 +756,7 @@ def main():
         assert "github-issue: posted https://github.test/issues/7#issuecomment-99" in \
             rc("publish", "--sink", "github-issue", extra_env=ghenv)
         assert "github-issue: updated" in rc("publish", extra_env=ghenv)
-        calls = ghlog.read_text().splitlines()
+        calls = ghlog.read_text(encoding="utf-8").splitlines()
         assert calls[0] == "api -X POST repos/{owner}/{repo}/issues/7/comments --input -", calls
         assert calls[2] == "api -X PATCH repos/{owner}/{repo}/issues/comments/99 --input -", calls
         assert "### Receipts" in json.loads(calls[3])["body"], calls[3]
@@ -740,7 +769,7 @@ def main():
         rc("run", "c1", "--", "true")
         assert check("--hook", "pr", event=gh_create)[0] == 0
         rc("publish", "--sink", "github", "--issue", "7", extra_env=ghenv)
-        assert rc("check", "--pr", "7", extra_env=ghenv).startswith("check: every claim in"), body.read_text()
+        assert rc("check", "--pr", "7", extra_env=ghenv).startswith("check: every claim in"), body.read_text(encoding="utf-8")
         out = rc("check", "--pr", "7", ok=False, extra_env={**ghenv, "FAKE_PR_HEAD": "f" * 40})
         assert "ledger is for" in out and "but its head is fffffff" in out, out
 
@@ -838,7 +867,7 @@ def main():
         (repo / "app.py").write_text('print("fixed")\n')
         rc("run", "c1", "--", "grep", "-q", "fixed", "app.py")
         assert verdicts()["c1"] == "✅ verified", verdicts()
-        has_flag = ["sh", "-c", f"test -f {flag}"]
+        has_flag = ["sh", "-c", f"test -f {flag.as_posix()}"]
         rc("run", "c2", "--", *has_flag)
         flag.write_text("")
         rc("run", "c2", "--", *has_flag)  # flag is outside the repo: same code, different result
@@ -1455,16 +1484,13 @@ def main():
                                                   '"skills": {"decompose": "required", "implement": "nudge"}}}')
         used("e5", "Skill", "kip-decompose")
         used("e5", "Skill", "kip-messy-bun")
-        counted, calls = Path(tmp, "counted-git"), Path(tmp, "git-calls")
-        counted.mkdir()
-        real_git = shutil.which("git")
-        (counted / "git").write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\nexec "{real_git}" "$@"\n')
-        (counted / "git").chmod(0o755)
+        trace = Path(tmp, "git-trace")
         for path in (pol_wt / "x.py", Path(tmp, "outside.txt")):
-            calls.unlink(missing_ok=True)
+            trace.unlink(missing_ok=True)
             assert check("--hook", "edit", event={"session_id": "e5", "tool_name": "Write", "tool_input": {
-                "file_path": str(path)}}, cwd=pol, extra_env={"PATH": f"{counted}:{os.environ['PATH']}"})[0] == 0
-            assert len(calls.read_text().splitlines()) == 1, (path, calls.read_text())
+                "file_path": str(path)}}, cwd=pol, extra_env={"GIT_TRACE": str(trace)})[0] == 0
+            calls = [line for line in trace.read_text().splitlines() if "trace: built-in: git " in line]
+            assert len(calls) == 1, (path, calls)
         mover_pol = {"session_id": "pol-s", "cwd": str(pol)}
         check("--hook", "start", event=mover_pol, cwd=pol)
         assert check("--hook", "stop", event=mover_pol, cwd=pol)[0] == 0
@@ -1535,10 +1561,10 @@ def main():
         (cx / "a.txt").write_text("hi\n")
         for cmd in (["init", "-q"], ["add", "."], ["commit", "-qm", "cx"]):
             sh("git", *cmd, cwd=cx)
-        fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", str(cx)))
+        fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", cx.as_posix()))
 
         # The dashboard's question tools, as hooks see them (codex exec's is request_user_input_async)
-        asked = re.search(r'r\.hook === "tool" && /(.+?)/\.test', SCRIPT.with_name("dashboard.html").read_text())[1]
+        asked = re.search(r'r\.hook === "tool" && /(.+?)/\.test', SCRIPT.with_name("dashboard.html").read_text(encoding="utf-8"))[1]
         for name in ("AskUserQuestion", "AskQuestion", fixture["PreToolUse:request_user_input_async"]["tool_name"]):
             assert re.search(asked, name), f"the dashboard doesn't see {name} as asking"
 
@@ -1581,9 +1607,11 @@ def main():
         # Hosts started from each other's shells inherit both ids; the nearest host process (a shell named codex or
         # claude here) says whose session it is
         both = {"CODEX_THREAD_ID": fixture["Stop"]["session_id"], "CLAUDE_CODE_SESSION_ID": "claude-session"}
-        for host in ("codex", "claude"):
+        for host in ("codex", "claude") if os.name != "nt" else ():
             Path(tmp, host).symlink_to("/bin/sh")
         def claim_in(host, text):
+            if os.name == "nt":  # no ps to find the nearest host, so the first id decides: give it only this host's
+                return rc("claim", text, cwd=cx, extra_env={k: v for k, v in both.items() if k.startswith(host.upper())})
             return sh(str(Path(tmp, host)), "-c", f'"{sys.executable}" "{SCRIPT}" claim "{text}"; true', cwd=cx,
                       extra_env=both)
         assert claim_in("codex", "a.txt says hello") == "c1"
@@ -1626,14 +1654,15 @@ def main():
             return run_json(srv_run)["claims"][0]["evidence"][-1]["served"], \
                 verdicts(("--run", srv_run))["c1"]
 
-        info, v = served_by(srv_wt)
-        assert info["checkout"] == str(srv_wt.resolve()) and info["here"] == str(pol.resolve()), info
-        assert v == f"🔀 served from another checkout: {srv_wt.resolve()}", v
-        code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}}, cwd=pol)
-        assert code == 2 and "c1 🔀 served from another checkout" in out, out
+        if os.name != "nt":  # served() finds a server's folder with lsof, ss or /proc
+            info, v = served_by(srv_wt)
+            assert info["checkout"] == str(srv_wt.resolve()) and info["here"] == str(pol.resolve()), info
+            assert v == f"🔀 served from another checkout: {srv_wt.resolve()}", v
+            code, out = check("--hook", "pr", event={"tool_input": {"command": "gh pr create"}}, cwd=pol)
+            assert code == 2 and "c1 🔀 served from another checkout" in out, out
         assert served_by(pol)[1] == "✅ verified"
         info, v = served_by(Path(tmp))
-        assert info["cwd"] and info["checkout"] is None and v == "✅ verified", (info, v)
+        assert (info["cwd"] or os.name == "nt") and info["checkout"] is None and v == "✅ verified", (info, v)
         served_by(srv_wt)
         # The dashboard: a session's row says which worktree its last gate fired in; /api/runs lists a plan's unit
         # runs, each unit run its plan, unit and worktree (struck once removed), and flags a removed worktree with
@@ -1655,7 +1684,7 @@ def main():
             {"path": str(u1.resolve()), "linked": True, "live": False}, unit
         assert "its worktree was removed with work not merged" in unit["flags"] and unit["attention"], unit
         assert listed[plan_run]["worktree"]["linked"] is False, listed[plan_run]
-        assert "evidence served from another checkout" in listed[srv_run]["flags"], listed[srv_run]
+        assert "evidence served from another checkout" in listed[srv_run]["flags"] or os.name == "nt", listed[srv_run]
         assert detail["claims"][1]["delegated"] == {"run": child, "claim": "c2"} and detail["claims"][0]["delegated"] is None
         assert (sessions["pol-s"]["worktree"], sessions["pol-s"]["linked"]) == (str(pol_wt.resolve()), True), sessions["pol-s"]
         assert sessions["pol-s"]["worktrees"] == [{"path": str(pol.resolve()), "linked": False, "live": True},
@@ -1748,7 +1777,7 @@ def main():
         # One command can be evidence for several claims: it runs once, and each claim gets its own evidence
         # sharing that log. An unknown claim stops it before anything runs.
         count = Path(tmp, "ran-once")
-        once = ["sh", "-c", f"echo ran >> '{count}'"]
+        once = ["sh", "-c", f"echo ran >> '{count.as_posix()}'"]
         assert "unknown claim c9" in frc("run", "c1", "c9", "--", *once, ok=False) and not count.exists()
         out = frc("run", "c1", "c3", "--", *once, extra_env=w1)
         assert count.read_text() == "ran\n" and out.splitlines() == [
@@ -1819,8 +1848,9 @@ def main():
 
         # kip.db: made at the current schema on first use, an older one upgraded in place with its rows kept,
         # and concurrent writers queue instead of overwriting each other.
-        fresh = {"KIP_RECEIPTS_DIR": str(Path(tmp, "fresh dir #1?"))}  # a path a hand-built file: URI would break on
-        assert rc("db", extra_env=fresh) == f"{Path(tmp, 'fresh dir #1?', 'kip.db')} · not created yet"
+        odd = Path(tmp, "fresh dir #1" + ("?" if os.name != "nt" else ""))  # Windows refuses a ? in a name
+        fresh = {"KIP_RECEIPTS_DIR": str(odd)}  # a path a hand-built file: URI would break on
+        assert rc("db", extra_env=fresh) == f"{odd / 'kip.db'} · not created yet"
         assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v2 of 2 · 0 runs")
         upgrade = f"""import sys
 sys.path.insert(0, {str(SCRIPT.parent)!r})
@@ -1848,7 +1878,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         conc = Path(rc("init"))
         rc("claim", "written by 20 processes at once", "--run", conc.name)
         writers = [subprocess.Popen([sys.executable, str(SCRIPT), "observe", "c1", "--passed", f"w{i}", "--run", str(conc)],
-                                    cwd=repo, env=env, stderr=subprocess.PIPE, text=True) for i in range(20)]
+                                    cwd=repo, env=env, stderr=subprocess.PIPE, encoding="utf-8") for i in range(20)]
         assert all(w.wait() == 0 for w in writers), [w.stderr.read() for w in writers if w.returncode]
         ev = run_json(conc)["claims"][0]["evidence"]
         assert sorted(e["observation"] for e in ev) == sorted(f"w{i}" for i in range(20)), "lost a concurrent write"
@@ -1873,7 +1903,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         for r in (plan, conc):
             assert rc("render", "--run", r.name, extra_env=old) == rc("render", "--run", r.name), f"{r.name} renders differently"
         # Opening an up-to-date kip.db takes no write lock, so hooks don't queue behind a writer.
-        with sqlite3.connect(Path(tmp, "store", "kip.db"), isolation_level=None) as held:
+        with contextlib.closing(sqlite3.connect(Path(tmp, "store", "kip.db"), isolation_level=None)) as held:
             held.execute("BEGIN IMMEDIATE")
             began = time.time()
             check("--hook", "stop", event={})  # reads this branch's run from kip.db
@@ -1886,7 +1916,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         bare = racy / "demo" / "20250101-000000-beef"
         bare.mkdir()
         (bare / "receipt.json").write_text(json.dumps({"id": bare.name, "repo": "demo", "level": "full", "claims": []}))
-        openers = [subprocess.Popen([sys.executable, str(SCRIPT), "path"], cwd=repo, stdout=subprocess.PIPE, text=True,
+        openers = [subprocess.Popen([sys.executable, str(SCRIPT), "path"], cwd=repo, stdout=subprocess.PIPE, encoding="utf-8",
                                     env={**env, "KIP_RECEIPTS_DIR": str(racy)}) for _ in range(8)]
         assert {o.communicate()[0].strip() for o in openers} == {str(racy / "demo" / conc.name)}, "an opener missed the import"
         assert rc("db", extra_env={"KIP_RECEIPTS_DIR": str(racy)}).endswith("· 3 runs")
@@ -1934,7 +1964,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         sh("git", "checkout", "-q", "-")
         port = free_port()
         server = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(port)], env={**env, **seg},
-                                  stdout=subprocess.PIPE, text=True)
+                                  stdout=subprocess.PIPE, encoding="utf-8")
         server.stdout.readline()
         try:
             row = next(r for r in json.loads(get(port, "/api/sessions")) if r["session"] == "seg1")
@@ -1980,6 +2010,7 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
             assert fetch(image)[0] == 404, "served a file that changed after it was recorded"
         finally:
             server.terminate()
+            server.wait()
     print("receipt.py: all checks passed")
 
 

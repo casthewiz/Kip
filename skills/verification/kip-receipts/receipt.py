@@ -133,7 +133,8 @@ def repo_name():
 @functools.lru_cache(maxsize=None)
 def here():
     """(branch, worktree folder) of this checkout, once per invocation; (None, None) outside one."""
-    return git("branch", "--show-current"), git("rev-parse", "--show-toplevel")
+    top = git("rev-parse", "--show-toplevel")
+    return git("branch", "--show-current"), top and str(Path(top))  # Windows: C:\ as Path spells it, not git's C:/
 
 
 def holds(rec):
@@ -387,7 +388,7 @@ def staged(*commands):
     (so unchanged files aren't rehashed) and never touching the real one. Linked worktrees inside it (a host's
     .claude/worktrees, say) are other checkouts, not new files of this one."""
     top = here()[1] and os.path.realpath(here()[1])
-    nested = [os.path.relpath(f, top) for f in worktrees() if top and f.startswith(top + os.sep)] if top else []
+    nested = [Path(os.path.relpath(f, top)).as_posix() for f in worktrees() if top and f.startswith(top + os.sep)] if top else []
     with tempfile.TemporaryDirectory() as t:
         index, env = Path(t, "index"), {**os.environ, "GIT_INDEX_FILE": str(Path(t, "index"))}
         real = git("rev-parse", "--git-path", "index")
@@ -458,7 +459,7 @@ def command_inputs(cmd, d):
         p = Path(arg)
         if p.is_file():
             inside = rel_to(p, d)
-            inputs.append({"path": str(inside) if inside else str(p.resolve()), "inside_run": bool(inside),
+            inputs.append({"path": inside.as_posix() if inside else str(p.resolve()), "inside_run": bool(inside),
                            "in_repo": not inside and bool(top and rel_to(p, Path(top))), "sha256": sha256(p)})
     return inputs
 
@@ -686,7 +687,7 @@ def cmd_run(a):
                 attempt(c, e, a.replace)
             if not log:
                 path = d / "files" / f"{e['id']}.log"
-                path.write_text(out)
+                path.write_text(out, encoding="utf-8")
                 log = {"path": f"files/{path.name}", "sha256": sha256(path)}
             e["log"] = dict(log)
             ids.append(e["id"])
@@ -892,8 +893,8 @@ def gone_merged_by(rec, head, at):
 def merged_prs(branch):
     """[(head, mergedAt, number)] for this repo's merged GitHub PRs from branch, or None when gh can't say."""
     try:
-        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
-                            "headRefName,headRefOid,mergedAt,number"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([shutil.which("gh") or "gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
+                            "headRefName,headRefOid,mergedAt,number"], capture_output=True, encoding="utf-8", timeout=30)
         if r.returncode != 0:
             return None
         return [(pr["headRefOid"], pr["mergedAt"], pr["number"]) for pr in json.loads(r.stdout) if pr["headRefName"] == branch]
@@ -901,7 +902,7 @@ def merged_prs(branch):
         return None
 
 
-SPEC_COPY = re.compile(r"(/specs/[^/]+)-[0-9a-f]{12}(?=\.[^/]*$)")  # desktest.py's specs/<name>-<hash>.<ext>
+SPEC_COPY = re.compile(r"([/\\]specs[/\\][^/\\]+)-[0-9a-f]{12}(?=\.[^/\\]*$)")  # desktest.py's specs/<name>-<hash>.<ext>
 
 
 def check_key(e):
@@ -1698,7 +1699,8 @@ def run_status(hook):
 
 
 def check_pr(pr):
-    r = subprocess.run(["gh", "pr", "view", pr, "--json", "body,headRefOid"], capture_output=True, text=True)
+    r = subprocess.run([shutil.which("gh") or "gh", "pr", "view", pr, "--json", "body,headRefOid"],
+                       capture_output=True, encoding="utf-8")
     if r.returncode:
         sys.exit(f"gh pr view {pr}: {r.stderr.strip()}")
     view = json.loads(r.stdout)
@@ -1757,7 +1759,7 @@ def append_event(payload, **fields):
              "session": session_id(payload),
              "host": HOST or ("cursor" if "workspace_roots" in payload else "claude"), **fields}
         EVENTS.mkdir(parents=True, exist_ok=True)
-        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
+        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -2087,7 +2089,7 @@ def cmd_serve(a):
     import queue
     import threading
     import time
-    page = Path(__file__).resolve().with_name("dashboard.html").read_text().replace("__STAGES__", json.dumps(STAGES))
+    page = Path(__file__).resolve().with_name("dashboard.html").read_text(encoding="utf-8").replace("__STAGES__", json.dumps(STAGES))
     MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
@@ -2381,6 +2383,10 @@ def cmd_check(a):
 
 
 def main():
+    # A pipe on Windows defaults to the ANSI code page, which can't encode a verdict's emoji: speak UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if stream:  # None under pythonw
+            stream.reconfigure(encoding="utf-8", errors="replace")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--run", help="run id or its folder (default: this branch's latest run)")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
