@@ -53,8 +53,18 @@ KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
 APP = KIP_HOME / "dashboard"  # the copy the service runs: macOS stalls a login agent reading ~/Documents and the like
+
+
+def python(platform=sys.platform):
+    """The interpreter hook commands call. On Windows `python3` is usually the Microsoft Store alias, which runs
+    nothing, so it's the Python running install (python.exe, not pythonw.exe: hooks answer on stdout)."""
+    if platform != "win32":
+        return "python3"
+    return shlex.quote(Path(sys.executable).with_name("python.exe").as_posix())
+
+
 GIT_HOOKS = ("post-commit", "post-merge", "post-checkout", "post-rewrite")
-GIT_HOOK = f"#!/bin/sh\n# kip: re-sync every host after this repo changes\npython3 {shlex.quote(str(ROOT / 'kip.py'))} install >/dev/null 2>&1\nexit 0\n"
+GIT_HOOK = f"#!/bin/sh\n# kip: re-sync every host after this repo changes\n{python()} {shlex.quote(str(ROOT / 'kip.py'))} install >/dev/null 2>&1\nexit 0\n"
 SURFACES = ("hosts", "connectors", "evidence", "destinations", "setup")
 CONNECTOR_KINDS = ("mcp", "tool")
 POLICIES = ("off", "nudge", "required")
@@ -345,7 +355,7 @@ def is_kip(group):
 def fill(group):
     if "hooks" in group:
         return {**group, "hooks": [fill(h) for h in group["hooks"]]}
-    return {**group, "command": group["command"].format(receipt=shlex.quote(str(RECEIPT)))}
+    return {**group, "command": group["command"].format(python=python(), receipt=shlex.quote(str(RECEIPT)))}
 
 
 def hook_groups(hooks):
