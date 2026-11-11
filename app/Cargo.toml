@@ -1,0 +1,16 @@
+[package]
+name = "kip-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Native window and tray around Kip's dashboard (receipt.py serve)"
+license = "MIT"
+publish = false
+
+[dependencies]
+tao = "=0.37.2"
+tray-icon = "=0.26.1"
+wry = "=0.57.2"
+
+[profile.release]
+strip = true
