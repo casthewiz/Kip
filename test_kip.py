@@ -4,6 +4,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -410,6 +411,12 @@ def main():
         assert kip_py.service("win32") is None
         win = r"python3 'C:\Users\me\Kip\skills\verification\kip-receipts\receipt.py' check --hook start"
         assert kip_py.is_kip({"hooks": [{"type": "command", "command": win}]})  # backslashes, and shlex's quotes
+        # Hooks call python3 off Windows; on it, the Python running install (python3 is the Store alias there).
+        cmd = kip_py.fill({"command": "{python} {receipt} check --hook stop"})["command"]
+        assert cmd == f"{kip_py.python()} {shlex.quote(str(RECEIPT))} check --hook stop", cmd
+        assert kip_py.python("linux") == kip_py.python("darwin") == "python3"
+        exe, = shlex.split(kip_py.python("win32"))  # one word, even with spaces in the path
+        assert exe == Path(sys.executable).with_name("python.exe").as_posix() and "\\" not in exe, exe
         os.environ["KIP_DASHBOARD_PORT"] = "7400"
         assert "--port 7400" in kip_py.service("linux")[1]
         del os.environ["KIP_DASHBOARD_PORT"]
