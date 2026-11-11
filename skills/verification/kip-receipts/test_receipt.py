@@ -7,6 +7,7 @@ import os
 import re
 import queue
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -559,10 +560,13 @@ def main():
             server_.terminate()
             server_.wait()
         idle = subprocess.Popen([sys.executable, str(SCRIPT), "serve", "--port", str(free_port()), "--idle", "1"],
-                                env={**env, "CLAUDE_CODE_SESSION_ID": "s3"}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                env={**env, "CLAUDE_CODE_SESSION_ID": "s3", "PYTHONFAULTHANDLER": "1"},
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         t0 = time.time()
-        assert wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 30), \
-            (time.time() - t0, idle.poll(), idle.poll() is not None and idle.stdout.read())
+        if not wait_until(lambda: any("s3" in f.read_text() for f in records.iterdir()), 30):
+            if idle.poll() is None:
+                idle.send_signal(signal.SIGABRT)  # faulthandler prints every thread's stack
+            raise AssertionError(f"no s3 record after 30s: {idle.communicate(timeout=10)[0]}")
         print(f"s3 record after {time.time() - t0:.1f}s")
         assert idle.wait(20) == 0 and not any("s3" in f.read_text() for f in records.iterdir()), "an idle exit left its record"
         assert not list(records.iterdir()), "a stopped server left its record"

@@ -335,7 +335,7 @@ def rules_copy_status(rules):
 def install_rules_copy(rules, store):
     """Replace Kip's block in a rules value the host keeps; keep the user's own rules."""
     old = read_rules(rules, store)
-    block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text(encoding="utf-8").strip()}\n<!-- /kip rules -->"
+    block = f"<!-- kip rules: {RULES} -->\n{RULES.read_text(encoding='utf-8').strip()}\n<!-- /kip rules -->"
     value = "\n\n".join(filter(None, [user_rules(old)[1], block])) + "\n"
     if old == value:
         return print(f"  rules: already in {store}")
