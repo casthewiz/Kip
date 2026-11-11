@@ -544,7 +544,7 @@ def main():
 
         # A start hook launches the server when nothing listens, once, and not at all with KIP_DASHBOARD=0.
         port = free_port()
-        auto = {"KIP_DASHBOARD": "1", "KIP_DASHBOARD_PORT": str(port), "KIP_DASHBOARD_IDLE": "2",
+        auto = {"KIP_DASHBOARD": "1", "KIP_DASHBOARD_PORT": str(port), "KIP_DASHBOARD_IDLE": "8",
                 "CLAUDE_CODE_SESSION_ID": "s0"}  # the shared server must not take the session's id
         check("--hook", "start", event=dash, extra_env={**auto, "KIP_DASHBOARD": "0"})
         assert not wait_until(lambda: listening(port), 2), "started with KIP_DASHBOARD=0"
@@ -554,7 +554,7 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        servers = command_lines(f"serve --port {port}")
+        servers = command_lines(f"serve --port {port}")  # before the server goes idle; PowerShell takes seconds to start
         assert len(servers) == 1, servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
@@ -1538,7 +1538,7 @@ def main():
         (cx / "a.txt").write_text("hi\n")
         for cmd in (["init", "-q"], ["add", "."], ["commit", "-qm", "cx"]):
             sh("git", *cmd, cwd=cx)
-        fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", str(cx)))
+        fixture = json.loads(SCRIPT.with_name("codex-hooks.json").read_text().replace("/repo", json.dumps(str(cx))[1:-1]))
 
         # The dashboard's question tools, as hooks see them (codex exec's is request_user_input_async)
         asked = re.search(r'r\.hook === "tool" && /(.+?)/\.test', SCRIPT.with_name("dashboard.html").read_text())[1]

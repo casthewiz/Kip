@@ -134,7 +134,8 @@ def repo_name():
 @functools.lru_cache(maxsize=None)
 def here():
     """(branch, worktree folder) of this checkout, once per invocation; (None, None) outside one."""
-    return git("branch", "--show-current"), git("rev-parse", "--show-toplevel")
+    top = git("rev-parse", "--show-toplevel")
+    return git("branch", "--show-current"), top and str(Path(top))  # Windows: C:\ as Path spells it, not git's C:/
 
 
 def holds(rec):
