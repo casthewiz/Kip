@@ -184,10 +184,14 @@ class App:
                 user32.SetForegroundWindow(old[0])
                 return
             # The page reads its #session= only on load, and Edge can't be told to navigate a window it has, so a
-            # session's page is a new app window and the old one closes once it's asked for.
+            # session's page is a new app window. The old one closes only once the new one is up: closed first, it
+            # can be Edge's last window, and an Edge shutting down drops the launch handed to it.
             url = URL + "#session=" + urllib.parse.quote(session, safe="") if session else URL
             subprocess.Popen([edge(), f"--app={url}", f"--user-data-dir={HOME / 'edge-app'}", "--no-first-run",
                               "--no-default-browser-check"])
+            end = time.time() + 15
+            while old and time.time() < end and not set(self.windows()) - set(old):
+                time.sleep(0.2)
             for hwnd in old:
                 user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
