@@ -2,14 +2,17 @@
 
 Smart App Control blocks unsigned binaries built on the machine, so Windows gets no compiled shell; this runs
 under pythonw.exe and Edge, both signed. Attaches to the `receipt.py serve` answering on the dashboard port, or
-starts one and stops it again on Quit. Stdlib only.
+starts one and stops it again on Quit. Polls its /api/status each second: the tray icon is Kip's mood, and a
+session newly waiting on approval or blocked at stop raises a balloon that opens its page. Stdlib only.
 """
 import ctypes
+import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import winreg
 from ctypes import wintypes as w
@@ -22,6 +25,9 @@ HERE = Path(__file__).resolve().parent
 OWNERS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")  # a server with these is that session's to stop
 CLASS, TRAY, OPEN, QUIT = "KipAppTray", 0x8001, 0x8002, 0x8003  # WM_APP+1 tray callback; +2/+3 from a later launch
 MENU_OPEN, MENU_QUIT = 1, 2
+MOODS = ("failure", "asking", "working", "success", "waiting")  # receipt.py's MOOD_RANK; kip-<mood>.ico each
+NOTICE = {"approval": ("A session is waiting on you", "needs your approval or an answer."),
+          "blocked": ("A session is blocked at stop", "was stopped by Kip's gate: its claims need evidence.")}
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -66,13 +72,46 @@ class NOTIFYICONDATAW(ctypes.Structure):
                 ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", w.HICON)]
 
 
+def get(path):
+    """GET a dashboard path, past any proxy; the response, else None."""
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(URL + path, timeout=5) as r:
+            return r.read() if r.status == 200 else None
+    except OSError:
+        return None
+
+
 def answers():
     """The dashboard answers /api/sessions with a 200 (a bare open port could be anything)."""
+    return get("api/sessions") is not None
+
+
+def status():
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(URL + "api/sessions", timeout=5) as r:
-            return r.status == 200
-    except OSError:
-        return False
+        return json.loads(get("api/status") or "null")
+    except ValueError:
+        return None
+
+
+def icon(st):
+    """The mood icon's name for a /api/status answer (waiting when there's none, or a mood this build doesn't know)."""
+    return "kip-%s.ico" % (st["mood"] if st and st.get("mood") in MOODS else "waiting")
+
+
+def news(seen, st):
+    """(seen, new): the (kind, session) pairs now waiting on approval or blocked, and those not in `seen` before,
+    in /api/status order. A session that stops waiting and waits again is new again. With `seen` None (the first
+    answer since launch) nothing is new: those sessions were waiting before the app was, and the icon shows them."""
+    now = [(k, s) for k in NOTICE for s in (st or {}).get(k, [])]
+    return set(now), [] if seen is None else [p for p in now if p not in seen]
+
+
+def notice(new):
+    """(title, text, session) of the one balloon for a poll's new pairs: the first, plus a count of the rest."""
+    kind, session = new[0]
+    title, text = NOTICE[kind]
+    more = f" (+{len(new) - 1} more)" if len(new) > 1 else ""
+    return title, f"{session[:8]} {text}{more}", session
 
 
 class App:
@@ -133,17 +172,24 @@ class App:
         user32.EnumWindows(ENUMPROC(each), 0)
         return found
 
-    def open(self):
+    def open(self, session=None):
+        """Show the app window, or with `session`, that session's page in it."""
         with self.lock:  # one spawn at a time, however many clicks
             if not answers() and (err := self.spawn_server()):  # attach to one already answering
                 user32.MessageBoxW(None, f"Kip's dashboard didn't start: {err}", "Kip", 0x10)
                 return
-            for hwnd in self.windows():
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                user32.SetForegroundWindow(hwnd)
+            old = self.windows()
+            if old and not session:
+                user32.ShowWindow(old[0], 9)  # SW_RESTORE
+                user32.SetForegroundWindow(old[0])
                 return
-            subprocess.Popen([edge(), f"--app={URL}", f"--user-data-dir={HOME / 'edge-app'}", "--no-first-run",
+            # The page reads its #session= only on load, and Edge can't be told to navigate a window it has, so a
+            # session's page is a new app window and the old one closes once it's asked for.
+            url = URL + "#session=" + urllib.parse.quote(session, safe="") if session else URL
+            subprocess.Popen([edge(), f"--app={url}", f"--user-data-dir={HOME / 'edge-app'}", "--no-first-run",
                               "--no-default-browser-check"])
+            for hwnd in old:
+                user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
     def quit(self):
         for hwnd in self.windows():
@@ -175,11 +221,40 @@ def main():
 
     app = App()
     taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+    icons = {f"kip-{m}.ico": user32.LoadImageW(None, str(HERE / f"kip-{m}.ico"), 1, 0, 0, 0x50) for m in MOODS}  # IMAGE_ICON; LOADFROMFILE|DEFAULTSIZE
     nid = NOTIFYICONDATAW(cbSize=ctypes.sizeof(NOTIFYICONDATAW), uID=1, uFlags=0x7, uCallbackMessage=TRAY, szTip="Kip",
-                          hIcon=user32.LoadImageW(None, str(HERE / "kip.ico"), 1, 0, 0, 0x50))  # IMAGE_ICON; LOADFROMFILE|DEFAULTSIZE
+                          hIcon=icons[icon(None)])
+    clicked = [None]  # the session the latest balloon is about
 
-    def in_background(fn):
-        threading.Thread(target=fn, daemon=True).start()
+    def in_background(fn, *args):
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+    def log(*what):  # the smoke test reads these from kip-app.log
+        print(time.strftime("%H:%M:%S"), *what, file=sys.stderr, flush=True)
+
+    def tray(flags, **fields):
+        """NIM_MODIFY the icon with `fields`; whether the shell took it."""
+        data = NOTIFYICONDATAW(cbSize=ctypes.sizeof(NOTIFYICONDATAW), hWnd=nid.hWnd, uID=1, uFlags=flags, **fields)
+        return bool(shell32.Shell_NotifyIconW(1, ctypes.byref(data)))
+
+    def poll():
+        """Each second: the icon follows Kip's mood, and newly waiting or blocked sessions raise one balloon."""
+        seen, shown = None, None
+        while True:
+            if (st := status()) is not None:
+                name = icon(st)
+                tip = f"Kip: {name[4:-4]}" + "".join(f" · {len(st.get(k, []))} {k}" for k in NOTICE if st.get(k))
+                if (name, tip) != shown:
+                    nid.hIcon, nid.szTip = icons[name], tip[:127]  # kept for re-adding after Explorer restarts
+                    log("icon", name, tray(0x6, hIcon=icons[name], szTip=tip[:127]))  # NIF_ICON | NIF_TIP
+                    shown = (name, tip)
+                seen, new = news(seen, st)
+                if new:
+                    title, text, clicked[0] = notice(new)
+                    kind = icons["kip-failure.ico" if new[0][0] == "blocked" else "kip-asking.ico"]
+                    ok = tray(0x10, szInfoTitle=title, szInfo=text, dwInfoFlags=0x24, hBalloonIcon=kind)  # NIF_INFO; NIIF_USER|LARGE_ICON
+                    log("notify", *(f"{k}:{s}" for k, s in new), ok)
+            time.sleep(1)
 
     def menu(hwnd):
         m = user32.CreatePopupMenu()
@@ -206,6 +281,9 @@ def main():
             in_background(app.open)
         elif msg == TRAY and lp == 0x205:  # WM_RBUTTONUP
             menu(hwnd)
+        elif msg == TRAY and lp == 0x405 and clicked[0]:  # NIN_BALLOONUSERCLICK
+            log("open", clicked[0])
+            in_background(app.open, clicked[0])
         elif msg == OPEN:
             in_background(app.open)
         elif msg == QUIT:
@@ -219,6 +297,7 @@ def main():
     nid.hWnd = user32.CreateWindowExW(0, CLASS, "Kip", 0, 0, 0, 0, 0, None, None, hinst, None)  # hidden: FindWindow sees it
     shell32.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD
     in_background(app.open)
+    in_background(poll)
     msg = w.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
         user32.TranslateMessage(ctypes.byref(msg))
