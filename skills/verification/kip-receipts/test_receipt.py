@@ -163,8 +163,17 @@ def stop_servers():
                                          env={**env, **({"CLAUDE_CODE_SESSION_ID": who} if who else {})},
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
                 assert wait_until(lambda: listening(p), 10), who
-            mine = {json.loads(f.read_text())["session"]: json.loads(f.read_text()) for f in records.iterdir()}
-            assert sorted(mine) == ["s1", "s2"] and all(r["started"] for r in mine.values()), mine
+
+            def recorded():
+                try:
+                    return {r["session"]: r for r in (json.loads(f.read_text(encoding="utf-8")) for f in records.iterdir())}
+                except (OSError, ValueError):  # not written yet, or caught mid-write
+                    return {}
+
+            # serve listens before it writes its record, so a port that answers doesn't mean the record is there yet
+            assert wait_until(lambda: sorted(recorded()) == ["s1", "s2"], 10), recorded()
+            mine = recorded()
+            assert all(r["started"] for r in mine.values()), mine
             # Live processes that aren't the dashboard their record names: one whose pid took a dead server's record
             # (its start time differs), and one from before records had start times.
             decoys = [run([sys.executable, "-c", "import time; time.sleep(30)"]) for _ in range(2)]
