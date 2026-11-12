@@ -1,9 +1,11 @@
 //! kip-app: a window and tray icon around Kip's dashboard. Attaches to the `receipt.py serve` already listening on
 //! the dashboard port, or starts one and stops it again on Quit. The page is the server's own http://127.0.0.1
-//! URL, not a custom protocol: the server refuses any other Host. macOS and Linux only.
+//! URL, not a custom protocol: the server refuses any other Host. Polls its /api/status each second: the tray icon
+//! is Kip's mood, and a session newly waiting on approval or blocked at stop raises a notification. macOS and Linux only.
 #[cfg(windows)]
 compile_error!("kip-app's Windows shell is app/windows/kip_app.pyw: Smart App Control blocks binaries built locally");
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -20,30 +22,118 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use wry::WebViewBuilder;
 
-const MASCOT: &str = include_str!("../../assets/mascot/kip-waiting.svg");
+/// receipt.py's MOOD_RANK, each with its mascot; the first frame of each is a tray icon.
+const MOODS: [(&str, &str); 5] = [
+    ("failure", include_str!("../../assets/mascot/kip-failure.svg")),
+    ("asking", include_str!("../../assets/mascot/kip-asking.svg")),
+    ("working", include_str!("../../assets/mascot/kip-working.svg")),
+    ("success", include_str!("../../assets/mascot/kip-success.svg")),
+    ("waiting", include_str!("../../assets/mascot/kip-waiting.svg")),
+];
+const NOTICE: [(&str, &str, &str); 2] = [
+    ("approval", "A session is waiting on you", "needs your approval or an answer."),
+    ("blocked", "A session is blocked at stop", "was stopped by Kip's gate: its claims need evidence."),
+];
 const OWNERS: [&str; 2] = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]; // a server with these is that session's to stop
 
 enum UserEvent {
     Show,
     Quit,
     Ready(Option<Child>, Result<(), String>),
+    Status(Status),
+    Open(String),
+}
+
+/// What the tray shows of /api/status: Kip's mood and the (kind, session) pairs waiting on approval or blocked.
+#[derive(Debug, PartialEq)]
+struct Status {
+    mood: String,
+    waiting: Vec<(String, String)>,
 }
 
 fn kip_home() -> PathBuf {
     env::var_os("KIP_HOME").map(PathBuf::from).unwrap_or_else(|| env::home_dir().unwrap_or_default().join(".kip"))
 }
 
+/// The body of a 200 from the dashboard, else None.
+fn get(port: u16, path: &str) -> Option<String> {
+    let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(500)).ok()?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    write!(s, "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n").ok()?;
+    let mut out = String::new();
+    s.read_to_string(&mut out).ok()?;
+    let (head, body) = out.split_once("\r\n\r\n")?;
+    (head.starts_with("HTTP/1.") && head.get(9..12) == Some("200")).then(|| body.to_string())
+}
+
 /// The dashboard answers /api/sessions with a 200 (a bare open port could be anything).
 fn answers(port: u16) -> bool {
-    let Ok(mut s) = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(500)) else {
-        return false;
-    };
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut head = [0u8; 12];
-    write!(s, "GET /api/sessions HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n").is_ok()
-        && s.read_exact(&mut head).is_ok()
-        && head.starts_with(b"HTTP/1.")
-        && &head[9..] == b"200"
+    get(port, "/api/sessions").is_some()
+}
+
+/// /api/status's `{"mood": "..", "active": n, "approval": [ids], "blocked": [ids]}`, as receipt.py's json.dumps
+/// writes it. messy-bun: a string scan, not a JSON parser (no serde in the lock); ids are uuids, without quotes.
+fn parse_status(body: &str) -> Option<Status> {
+    let after = |key: &str| body.split_once(&format!("\"{key}\": ")).map(|(_, rest)| rest);
+    let mood = after("mood")?.strip_prefix('"')?.split('"').next()?.to_string();
+    let mut waiting = vec![];
+    for (kind, ..) in NOTICE {
+        let list = after(kind)?.strip_prefix('[')?.split(']').next()?;
+        waiting.extend(list.split('"').skip(1).step_by(2).map(|id| (kind.to_string(), id.to_string())));
+    }
+    Some(Status { mood, waiting })
+}
+
+/// The pairs in `now` that weren't in `seen`, in order; then `seen` becomes `now`. With `seen` None (the first answer
+/// since launch) nothing is new: those sessions were waiting before the app was, and the icon shows them.
+fn news(seen: &mut Option<HashSet<(String, String)>>, now: &[(String, String)]) -> Vec<(String, String)> {
+    let new = seen.as_ref().map_or(vec![], |s| now.iter().filter(|p| !s.contains(*p)).cloned().collect());
+    *seen = Some(now.iter().cloned().collect());
+    new
+}
+
+#[test]
+fn transitions() {
+    let st = parse_status(r#"{"mood": "failure", "active": 3, "approval": ["a", "c"], "blocked": ["b"]}"#).unwrap();
+    let pair = |k: &str, s: &str| (k.to_string(), s.to_string());
+    let want = vec![pair("approval", "a"), pair("approval", "c"), pair("blocked", "b")];
+    assert_eq!(st, Status { mood: "failure".into(), waiting: want });
+    assert!(parse_status(r#"{"mood": "waiting", "active": 0, "approval": [], "blocked": []}"#).unwrap().waiting.is_empty());
+    let mut seen = None;
+    assert!(news(&mut seen, &st.waiting[..1]).is_empty()); // startup: nothing new
+    assert_eq!(news(&mut seen, &st.waiting), &st.waiting[1..]);
+    assert!(news(&mut seen, &st.waiting).is_empty());
+    news(&mut seen, &[]);
+    assert_eq!(news(&mut seen, &st.waiting[..1]), &st.waiting[..1]); // waiting again is new again
+}
+
+/// Tray icon for a mood: its mascot's first frame, or waiting's for a mood this build doesn't know.
+fn mood_icon(mood: &str) -> Vec<u8> {
+    mascot_rgba(MOODS.iter().find(|(m, _)| *m == mood).unwrap_or(&MOODS[4]).1)
+}
+
+/// One OS notification, off the event loop; a click on it sends Open(session) where the platform reports clicks.
+fn notify(proxy: tao::event_loop::EventLoopProxy<UserEvent>, title: &str, text: &str, session: String) {
+    let (title, text) = (title.to_string(), text.to_string());
+    thread::spawn(move || {
+        if cfg!(target_os = "macos") {
+            // messy-bun: osascript can't report a click, so the tray's next click opens the session (UserEvent::Show);
+            // a click-through needs a bundled app on UNUserNotificationCenter.
+            let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let script = format!("display notification \"{}\" with title \"Kip\" subtitle \"{}\"", q(&text), q(&title));
+            let _ = Command::new("osascript").args(["-e", &script]).status();
+            return;
+        }
+        // libnotify 0.7.10+ prints the action clicked; an older notify-send refuses --action, so it's sent plain.
+        match Command::new("notify-send").args(["-a", "Kip", "--action=default=Open", "--wait", &title, &text]).output() {
+            Ok(o) if o.status.success() => {
+                if String::from_utf8_lossy(&o.stdout).trim() == "default" {
+                    let _ = proxy.send_event(UserEvent::Open(session));
+                }
+            }
+            _ => drop(Command::new("notify-send").args(["-a", "Kip", &title, &text]).status()),
+        }
+    });
 }
 
 /// KIP_PYTHON, else the first of python3/python that runs.
@@ -93,9 +183,9 @@ fn connect(port: u16) -> (Option<Child>, Result<(), String>) {
 }
 
 /// The first frame of a mascot SVG (32x32 pixel-art rects, frames side by side) as RGBA.
-fn mascot_rgba() -> Vec<u8> {
+fn mascot_rgba(svg: &str) -> Vec<u8> {
     let mut px = vec![0u8; 32 * 32 * 4];
-    for rect in MASCOT.split("<rect").skip(1) {
+    for rect in svg.split("<rect").skip(1) {
         let rect = rect.split('>').next().unwrap_or(""); // starts with a space, so " x" can't match inside "width"
         let attr = |name: &str| {
             let at = rect.find(&format!("{name}=\"")).map(|i| i + name.len() + 2)?;
@@ -116,7 +206,7 @@ fn mascot_rgba() -> Vec<u8> {
 
 #[test]
 fn mascot_first_frame() {
-    let px = mascot_rgba();
+    let px = mood_icon("waiting");
     assert_eq!(&px[(3 * 32 + 3) * 4..][..4], &[0x9a, 0xa3, 0xb5, 255]); // kip-waiting.svg's first rect, x=3 y=3
     assert_eq!(px[3], 0); // (0,0) is transparent
 }
@@ -151,8 +241,20 @@ fn main() {
         let (child, ok) = connect(port);
         let _ = p.send_event(UserEvent::Ready(child, ok));
     });
+    let p = proxy.clone();
+    thread::spawn(move || {
+        loop {
+            if let Some(st) = get(port, "/api/status").as_deref().and_then(parse_status) {
+                if p.send_event(UserEvent::Status(st)).is_err() {
+                    return; // the event loop is gone
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+    let notify_proxy = proxy.clone();
 
-    let icon = mascot_rgba();
+    let icon = mood_icon("waiting");
     let window = WindowBuilder::new()
         .with_title("Kip")
         .with_inner_size(tao::dpi::LogicalSize::new(1200.0, 800.0))
@@ -183,7 +285,12 @@ fn main() {
         }
     }));
 
-    let (mut tray, mut child) = (None, None::<Child>);
+    let (mut tray, mut child) = (None::<tray_icon::TrayIcon>, None::<Child>);
+    let (mut shown, mut seen, mut pending) = (String::from("waiting"), None, None::<String>);
+    let open_session = |webview: &wry::WebView, id: &str| {
+        let id: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).collect();
+        let _ = webview.evaluate_script(&format!("location.hash = 'session={id}'; location.reload()")); // read on load
+    };
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         match event {
@@ -201,6 +308,33 @@ fn main() {
                 window.set_visible(true);
                 window.set_minimized(false);
                 window.set_focus();
+                if let Some(id) = pending.take() {
+                    open_session(&webview, &id); // the last notification's session, where a click on it can't reach us
+                }
+            }
+            Event::UserEvent(UserEvent::Open(id)) => {
+                pending = None;
+                window.set_visible(true);
+                window.set_minimized(false);
+                window.set_focus();
+                open_session(&webview, &id);
+            }
+            Event::UserEvent(UserEvent::Status(st)) => {
+                if st.mood != shown {
+                    if let Some(t) = &tray {
+                        let _ = t.set_icon(tray_icon::Icon::from_rgba(mood_icon(&st.mood), 32, 32).ok());
+                        let _ = t.set_tooltip(Some(format!("Kip: {}", st.mood)));
+                    }
+                    shown = st.mood;
+                }
+                let new = news(&mut seen, &st.waiting);
+                if let Some((kind, id)) = new.first() {
+                    let (_, title, text) = NOTICE.iter().find(|(k, ..)| k == &kind.as_str()).expect("a NOTICE kind");
+                    let more = if new.len() > 1 { format!(" (+{} more)", new.len() - 1) } else { String::new() };
+                    let short: String = id.chars().take(8).collect();
+                    pending = cfg!(target_os = "macos").then(|| id.clone());
+                    notify(notify_proxy.clone(), title, &format!("{short} {text}{more}"), id.clone());
+                }
             }
             Event::UserEvent(UserEvent::Ready(c, ok)) => {
                 child = c;
