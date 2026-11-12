@@ -1863,8 +1863,9 @@ def started(pid):
     """When a process started, which tells it from a later one given the same pid; None when there's none."""
     if os.name != "nt":
         # lstart is to the second, so the command line too: a process started in the same second isn't the server
-        r = subprocess.run(["ps", "-o", "lstart=", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
-                           env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+        # -ww and no COLUMNS: the server and a later stop hook must see the same, untruncated command line
+        r = subprocess.run(["ps", "-ww", "-o", "lstart=", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                           env={**{k: v for k, v in os.environ.items() if k != "COLUMNS"}, "LC_ALL": "C", "TZ": "UTC"})
         return r.stdout.strip() or None
     import ctypes
     from ctypes import wintypes
