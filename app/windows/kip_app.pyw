@@ -243,10 +243,10 @@ def main():
         while True:
             if (st := status()) is not None:
                 name = icon(st)
-                tip = f"Kip: {name[4:-4]}" + "".join(f" · {len(st.get(k, []))} {k}" for k in NOTICE if st.get(k))
+                tip = (f"Kip: {name[4:-4]}" + "".join(f" · {len(st.get(k, []))} {k}" for k in NOTICE if st.get(k)))[:127]
                 if (name, tip) != shown:
-                    nid.hIcon, nid.szTip = icons[name], tip[:127]  # kept for re-adding after Explorer restarts
-                    log("icon", name, tray(0x6, hIcon=icons[name], szTip=tip[:127]))  # NIF_ICON | NIF_TIP
+                    nid.hIcon, nid.szTip = icons[name], tip  # kept for re-adding after Explorer restarts
+                    log("icon", name, tray(0x6, hIcon=icons[name], szTip=tip))  # NIF_ICON | NIF_TIP
                     shown = (name, tip)
                 seen, new = news(seen, st)
                 if new:
