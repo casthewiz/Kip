@@ -12,6 +12,9 @@
                                         re-running install refreshes; KIP_DASHBOARD=0 skips it. A user
                                         install also adds git hooks to this repo that re-run it after a
                                         commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them.
+                                        A user install also sets kip-app (app/) to start at login: built
+                                        with cargo on macOS and Linux (skipped, saying why, without it),
+                                        app/windows/kip_app.pyw under pythonw on Windows; KIP_APP=0 skips it.
                                         A user install refuses to run from a linked worktree
                                         (KIP_INSTALL_FROM_WORKTREE=1 overrides)
   kip.py worktree new NAME [--base REF] [--parent RUN --unit N]
@@ -53,6 +56,9 @@ KIP_HOME = Path(os.environ.get("KIP_HOME", Path.home() / ".kip"))
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
 APP = KIP_HOME / "dashboard"  # the copy the service runs: macOS stalls a login agent reading ~/Documents and the like
+APP_TARGET = KIP_HOME / "app-target"  # kip-app's cargo target dir, beside the copy every install replaces
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = os.environ.get("KIP_APP_RUN_VALUE", "Kip")  # tests name their own, never touching the real one
 
 
 def python(platform=sys.platform):
@@ -223,6 +229,7 @@ def cmd_doctor(a):
             if kind == "hosts" and rules_store(entry.get("rules", {})):
                 s += " · rules " + rules_copy_status(entry["rules"])
             print(f"  {name:14} {s}")
+    print("kip-app\n  " + ("starts at login" if login_installed() else "not set to start at login (run install)"))
     print_receipts()
 
 
@@ -550,6 +557,12 @@ def run_quiet(cmds):
             return (r.stderr or r.stdout).strip() or f"{cmd[0]} exited {r.returncode}"
 
 
+def copy_dashboard():
+    shutil.rmtree(APP, ignore_errors=True)
+    shutil.copytree(ROOT, APP, ignore=shutil.ignore_patterns(".git", ".claude", "__pycache__", "node_modules", "target"),
+                    dirs_exist_ok=True)  # over whatever a file in use kept rmtree from removing
+
+
 def install_service():
     s = service()
     if not s or os.environ.get("KIP_DASHBOARD") == "0":
@@ -558,8 +571,7 @@ def install_service():
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         run_quiet(unload)  # reload, so a changed copy, file, or python takes effect
-    shutil.rmtree(APP, ignore_errors=True)
-    shutil.copytree(ROOT, APP, ignore=shutil.ignore_patterns(".git", ".claude", "__pycache__", "node_modules"))
+    copy_dashboard()
     path.write_text(text, encoding="utf-8")
     err = run_quiet(load)
     print(f"dashboard\n  service: {path}" + (f" (not started: {err})" if err else ""))
@@ -622,6 +634,116 @@ def uninstall_service():
     print(f"dashboard\n  service: removed {s[0]}")
 
 
+def app_command(platform=sys.platform):
+    """What kip-app's login entry runs: the copied shell under pythonw on Windows, else the binary cargo built."""
+    if platform == "win32":
+        return [str(Path(sys.executable).with_name("pythonw.exe")), str(APP / "app" / "windows" / "kip_app.pyw")]
+    return [str(APP_TARGET / "release" / "kip-app")]
+
+
+def login_file(platform=sys.platform):
+    """kip-app's login entry off Windows, (path, text): a LaunchAgent on macOS, else an XDG autostart file.
+    Neither starts it now."""
+    cmd = app_command(platform)
+    if platform == "darwin":
+        return (Path.home() / "Library" / "LaunchAgents" / "com.kip.app.plist",
+                plistlib.dumps({"Label": "com.kip.app", "ProgramArguments": cmd, "RunAtLoad": True}).decode())
+    return (Path.home() / ".config" / "autostart" / "kip-app.desktop",
+            f'[Desktop Entry]\nType=Application\nName=Kip\nExec="{cmd[0]}"\nX-GNOME-Autostart-enabled=true\n')
+
+
+def login_value(cmd=None):
+    """Windows' Run key value for kip-app: set it to cmd, or without one delete it. Whether one was deleted."""
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+        if cmd:
+            return winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, subprocess.list2cmdline(cmd))
+        try:
+            winreg.DeleteValue(k, RUN_VALUE)
+            return True
+        except FileNotFoundError:
+            return False
+
+
+def login_installed(platform=sys.platform):
+    if platform != "win32":
+        return login_file(platform)[0].exists()
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            return winreg.QueryValueEx(k, RUN_VALUE)[0] == subprocess.list2cmdline(app_command(platform))
+    except FileNotFoundError:
+        return False
+
+
+def app_stamp():
+    """A hash of what kip-app is built from (include_str! reads the mascots), so install skips cargo when it's unchanged."""
+    files = [ROOT / "app" / "Cargo.toml", ROOT / "app" / "Cargo.lock"]
+    files += sorted(f for d in ("app/src", "assets/mascot") for f in (ROOT / d).rglob("*") if f.is_file())
+    return hashlib.sha256(b"".join(f.relative_to(ROOT).as_posix().encode() + f.read_bytes() for f in files)).hexdigest()
+
+
+def build_app():
+    """Build kip-app into APP_TARGET with cargo unless it's current; what happened."""
+    binary, stamp = APP_TARGET / "release" / "kip-app", APP_TARGET / "kip-app.stamp"
+    if binary.exists() and stamp.is_file() and stamp.read_text(encoding="utf-8") == app_stamp():
+        return f"up to date: {binary}"
+    cargo = shutil.which("cargo")
+    if not cargo:
+        return "cargo not found; install Rust (https://rustup.rs) and re-run install"
+    print("  building with cargo (the first build takes a few minutes)", flush=True)
+    try:
+        r = subprocess.run([cargo, "build", "--release", "--locked", "--manifest-path", str(ROOT / "app" / "Cargo.toml"),
+                            "--target-dir", str(APP_TARGET)], capture_output=True, text=True)
+    except OSError as err:  # a cargo on PATH that won't run
+        return f"cargo build failed ({err})"
+    if r.returncode or not binary.exists():
+        why = (r.stderr or r.stdout).strip().splitlines()
+        return f"cargo build failed ({why[-1] if why else f'exit {r.returncode}'})"
+    stamp.write_text(app_stamp(), encoding="utf-8")
+    return f"built {binary}"
+
+
+def install_app(platform=sys.platform):
+    """kip-app, started at next login: built by cargo (macOS, Linux), or the pythonw shell copied with the dashboard
+    (Windows, where Smart App Control blocks unsigned local builds). A skip says why and never fails install."""
+    if os.environ.get("KIP_APP") == "0":
+        return
+    print("kip-app")
+    if platform == "win32":
+        copy_dashboard()
+        note = f"copied to {APP / 'app' / 'windows'}"
+    else:
+        note = build_app()
+    exe = Path(app_command(platform)[0])
+    if not exe.exists():
+        why = note if platform != "win32" else f"no {exe.name} beside this Python"
+        return print(f"  skipped: {why} (KIP_APP=0 stops trying)")
+    print(f"  {note}")
+    if platform == "win32":
+        login_value(app_command(platform))
+        where = f"HKCU\\{RUN_KEY}\\{RUN_VALUE}"
+    else:
+        where, text = login_file(platform)
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.write_text(text, encoding="utf-8")
+    print(f"  starts at login: {where}")
+
+
+def uninstall_app(platform=sys.platform):
+    if platform == "win32":
+        gone = login_value() and f"HKCU\\{RUN_KEY}\\{RUN_VALUE}"
+        shutil.rmtree(APP, ignore_errors=True)  # its copy of the shell; Windows has no dashboard service using it
+    else:
+        path = login_file(platform)[0]
+        gone = path.exists() and str(path)
+        if gone:
+            path.unlink()
+        shutil.rmtree(APP_TARGET, ignore_errors=True)
+    if gone:
+        print(f"kip-app\n  removed {gone}")
+
+
 def cmd_install(a):
     main = None if a.project else main_of_worktree()
     if main and os.environ.get("KIP_INSTALL_FROM_WORKTREE") != "1":
@@ -655,6 +777,7 @@ def cmd_install(a):
                 print("  hooks: new or changed; " + h["hooks"]["trust"]["project_manual" if top else "manual"])
     if not a.project:
         install_service()
+        install_app()
         if git_hooks_dir():
             install_git_hooks(git_hooks_dir())
     print_receipts("--migrate")
@@ -721,6 +844,7 @@ def cmd_uninstall(a):
         (KIP_HOME / "kip").unlink()
     if not a.project:
         uninstall_service()
+        uninstall_app()
         if git_hooks_dir():
             uninstall_git_hooks(git_hooks_dir())
     print_receipts(prefix="kept: ")

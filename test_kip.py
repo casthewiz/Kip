@@ -92,9 +92,123 @@ def check_submodule_worktree():
         assert Path(r.stdout.strip()) == (sup / "lib").resolve() / ".kip" / "worktrees" / "probe", r
 
 
+FAKE_CARGO = """
+import sys
+from pathlib import Path
+with open(Path(__file__).with_name("calls"), "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+if Path(__file__).with_name("fail").exists():
+    sys.exit("error: linking with `cc` failed")
+target = Path(sys.argv[sys.argv.index("--target-dir") + 1]) / "release"
+target.mkdir(parents=True, exist_ok=True)
+(target / "kip-app").write_text("binary")
+"""
+
+
+def check_app():
+    """kip-app: install builds it with cargo into a target dir outside the dashboard copy, skips cargo when app/ is
+    unchanged, and points a login entry at the built binary; without cargo, or when the build fails, install still
+    succeeds and says why. Windows copies the pythonw shell instead and sets the HKCU Run key. Uninstall removes it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_, empty, home = Path(tmp, "bin"), Path(tmp, "empty"), Path(tmp, "home")
+        bin_.mkdir()
+        empty.mkdir()
+        (bin_ / "fake_cargo.py").write_text(FAKE_CARGO, encoding="utf-8")
+        if os.name == "nt":
+            (bin_ / "cargo.cmd").write_text(f'@"{sys.executable}" "{bin_ / "fake_cargo.py"}" %*\n', encoding="utf-8")
+        else:
+            (bin_ / "cargo").write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+                                        f"{shlex.quote(str(bin_ / 'fake_cargo.py'))} \"$@\"\n")
+            (bin_ / "cargo").chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if k not in ("KIP_HOME", "KIP_APP", "KIP_RECEIPTS_DIR")}
+        env.update(HOME=str(home), USERPROFILE=str(home), PATH=f"{bin_}{os.pathsep}{os.environ['PATH']}",
+                   KIP_DASHBOARD="0", KIP_GIT_HOOKS="0", KIP_INSTALL_FROM_WORKTREE="1",
+                   KIP_APP_RUN_VALUE=f"KipTest{os.getpid()}")  # never the real Run value
+        calls = lambda: len((bin_ / "calls").read_text().splitlines()) if (bin_ / "calls").exists() else 0
+        binary = home / ".kip" / "app-target" / "release" / "kip-app"
+
+        def py(*code, **extra):  # kip.py's functions for a given platform, in a child with this HOME
+            r = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(ROOT)!r}); import kip; "
+                                + "; ".join(code)], env={**env, **extra}, capture_output=True, encoding="utf-8")
+            assert r.returncode == 0, f"{code}: exit {r.returncode}\n{r.stdout}{r.stderr}"
+            return r.stdout
+
+        # A copy over files rmtree couldn't remove (Windows keeps files in use) still succeeds.
+        py("kip.shutil.rmtree = lambda *a, **k: None", "kip.copy_dashboard()", "kip.copy_dashboard()")
+        shutil.rmtree(home / ".kip")
+        for plat, entry in (("linux", home / ".config" / "autostart" / "kip-app.desktop"),
+                            ("darwin", home / "Library" / "LaunchAgents" / "com.kip.app.plist")):
+            out = py(f"kip.install_app({plat!r})")
+            assert f"built {binary}" in out and calls() == 1 and "--target-dir" in (bin_ / "calls").read_text(), out
+            text = entry.read_text(encoding="utf-8")
+            assert str(binary) in text and str(ROOT) not in text, text
+            assert ("RunAtLoad" if plat == "darwin" else "Type=Application") in text, text
+            out = py("kip.copy_dashboard()", f"kip.install_app({plat!r})")  # the copy every install makes
+            assert f"up to date: {binary}" in out and calls() == 1 and binary.exists(), out
+            assert f"removed {entry}" in py(f"kip.uninstall_app({plat!r})")
+            assert not entry.exists() and not binary.parent.parent.exists()
+            (bin_ / "fail").touch()
+            out = py(f"kip.install_app({plat!r})")
+            assert "skipped: cargo build failed (error: linking with `cc` failed) (KIP_APP=0 stops trying)" in out, out
+            assert not entry.exists() and calls() == 2, out
+            (bin_ / "fail").unlink()
+            out = py(f"kip.install_app({plat!r})", PATH=str(empty))
+            assert "skipped: cargo not found; install Rust" in out and not entry.exists(), out
+            broken = empty / ("cargo.exe" if os.name == "nt" else "cargo")  # on PATH, but won't run
+            broken.write_text("#!/nonexistent/sh\n")
+            broken.chmod(0o755)
+            out = py(f"kip.install_app({plat!r})", PATH=str(empty))
+            assert "skipped: cargo build failed (" in out and not entry.exists(), out
+            broken.unlink()
+            assert py(f"kip.install_app({plat!r})", KIP_APP="0") == "" and calls() == 2
+            (bin_ / "calls").unlink()
+            shutil.rmtree(home / ".kip", ignore_errors=True)
+
+        # The whole install on this OS: the login entry points into ~/.kip, and uninstall takes it out.
+        def kip(*args):
+            r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=tmp, env=env, capture_output=True,
+                               encoding="utf-8")
+            assert r.returncode == 0, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
+            return r.stdout
+
+        doctor = lambda: kip("doctor").split("kip-app\n")[1].splitlines()[0]
+        if os.name == "nt":
+            import winreg
+            run = env["KIP_APP_RUN_VALUE"]
+
+            def value():
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+                        return winreg.QueryValueEx(k, run)[0]
+                except FileNotFoundError:
+                    return None
+
+            shell = home / ".kip" / "dashboard" / "app" / "windows"
+            out = kip("install", "--host", "claude-code")
+            assert f"starts at login: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{run}" in out, out
+            pythonw = Path(sys.executable).with_name("pythonw.exe")
+            assert value() == subprocess.list2cmdline([str(pythonw), str(shell / "kip_app.pyw")]), value()
+            assert str(ROOT) not in value() and pythonw.exists() and calls() == 0
+            assert sorted(p.name for p in shell.glob("kip*")) == sorted(p.name for p in (ROOT / "app" / "windows").glob("kip*"))
+            assert doctor() == "  starts at login", doctor()
+            assert "removed HKCU" in kip("uninstall", "--host", "claude-code") and value() is None and not shell.exists()
+        else:
+            entry = home / ("Library/LaunchAgents/com.kip.app.plist" if sys.platform == "darwin"
+                            else ".config/autostart/kip-app.desktop")
+            out = kip("install", "--host", "claude-code")
+            assert f"starts at login: {entry}" in out and str(binary) in entry.read_text(encoding="utf-8"), out
+            assert doctor() == "  starts at login", doctor()
+            assert f"removed {entry}" in kip("uninstall", "--host", "claude-code") and not binary.exists()
+            assert not entry.exists()
+            (bin_ / "fail").touch()
+            assert "skipped: cargo build failed" in kip("install", "--host", "claude-code") and not entry.exists()
+        assert doctor() == "  not set to start at login (run install)", doctor()
+
+
 def main():
     check_glossary()
     check_submodule_worktree()
+    check_app()
     with tempfile.TemporaryDirectory() as tmp:
         home, repo = Path(tmp, "home"), Path(tmp, "repo")
         (home / ".claude").mkdir(parents=True)
@@ -103,6 +217,7 @@ def main():
         env["HOME"] = env["USERPROFILE"] = str(home)  # USERPROFILE: Path.home() on Windows
         env["KIP_DASHBOARD"] = "0"  # never load a real login service from a test
         env["KIP_GIT_HOOKS"] = "0"  # nor touch this checkout's git hooks
+        env["KIP_APP"], env["KIP_APP_RUN_VALUE"] = "0", f"KipTest{os.getpid()}"  # nor build kip-app or set the real Run key
         env["KIP_INSTALL_FROM_WORKTREE"] = "1"  # this checkout may itself be a linked worktree
 
         def kip(*args, ok=True, **extra):
