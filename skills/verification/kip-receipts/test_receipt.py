@@ -8,8 +8,6 @@ import os
 import re
 import queue
 import shutil
-import shlex
-import signal
 import socket
 import sqlite3
 import subprocess
