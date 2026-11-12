@@ -215,29 +215,10 @@ function title(r, link) {
 const MOODS = { waiting: "idle", working: "working", asking: "needs you: an unverified claim, no PR or accept yet",
   success: "the gate let its turn end, or its run finished", failure: "blocked by the gate, or a claim is failing" };
 
-// Kip as a run's claims stand: finished, a claim failing, or one unverified and not accepted; null otherwise.
-function claimMood(x) {
-  if (x.finished) return "success";
-  if (Object.keys(x.claims).some(v => tone(v) === "bad")) return "failure";
-  return x.asking ? "asking" : null;
-}
-
-// Kip as the session stands: blocked or failing a claim, mid-turn, asking the user to settle an unverified claim,
-// let stop by the gate or done with its run, or idle. A question to the user (Claude Code's AskUserQuestion, Cursor's
-// AskQuestion, Codex's request_user_input or, in codex exec, request_user_input_async) or a tool call waiting on their
-// approval isn't working: it waits on them until the next event.
-function mood(r) {
-  if (r.blocked) return "failure";
-  const asked = r.hook === "tool" && /^(Ask(User)?Question|request_user_input(_async)?)\b/.test(r.tool || "");
-  if (r.active && !["stop", "start", "ask"].includes(r.hook) && !asked) return "working";
-  const run = r.run && (r.runs || []).find(x => x.id === r.run.split("/").pop()), m = run && claimMood(run);
-  if (m && !(m === "asking" && r.pr)) return m;
-  return r.hook === "stop" ? "success" : "waiting";
-}
-
-// A run's Kip: idle once orphaned, else as its claims stand, else working while a session that wrote to it is mid-turn.
+// Each session's Kip and each run's claim mood come from the server (receipt.py's mood and run_summary). A run's Kip:
+// idle once orphaned, else as its claims stand, else working while a session that wrote to it is mid-turn.
 const runMood = x => x.state === "orphaned" ? "waiting"
-  : claimMood(x) || (rows.some(r => x.writers[r.session] && mood(r) === "working") ? "working" : "waiting");
+  : x.mood || (rows.some(r => x.writers[r.session] && r.mood === "working") ? "working" : "waiting");
 
 function mascot(m, size) {
   return h("img", { class: "mascot", src: `/kip-${m}.svg`, width: size, height: size, alt: "Kip: " + MOODS[m], title: MOODS[m] });
@@ -254,7 +235,7 @@ function renderList() {
       class: "card" + (r.active ? "" : " idle"), "aria-current": r.session === selected ? "true" : "false",
       onclick: () => select(r.session),
     },
-    mascot(mood(r), 40),
+    mascot(r.mood, 40),
     h("div", { class: "grow" },
       h("div", { class: "row" },
         h("div", { class: "grow title" }, title(r)),
@@ -396,9 +377,9 @@ function renderDetail(full) {
   const r = rows.find(x => x.session === selected);
   if (!r) { $("detail").replaceChildren(h("p", { class: "empty" }, selected ? "That session isn't in the log." : "Pick a session.")); return; }
   const head = [
-    h("div", { class: "headline" }, mascot(mood(r), 64), h("div", { class: "grow" },
+    h("div", { class: "headline" }, mascot(r.mood, 64), h("div", { class: "grow" },
       h("h2", {}, title(r, true)),
-      h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)} · ${MOODS[mood(r)]}`))),
+      h("p", { class: "meta" }, `${r.host} · ${r.session} · last seen ${ago(r.last)} · ${MOODS[r.mood]}`))),
     h("div", { class: "pipeline", role: "list", "aria-label": "Stages" }, STAGES.map(s => h("div", {
       role: "listitem",
       class: "step" + ((r.reached || []).includes(s) ? " reached" : "") + (r.stage === s ? " current" + (r.blocked ? " stuck" : "") : ""),
@@ -479,7 +460,7 @@ function familyTree(runId, current) {
   const session = (sid, note, ghost) => {
     const r = rows.find(x => x.session === sid);
     return h("li", { class: ghost ? "ghost" : null }, node(current.session === sid, r && (() => select(sid)),
-      r ? mascot(mood(r), 18) : null, h("span", { class: "grow label", title: sid }, sid.slice(0, 8), r ? h("span", { class: "sub" }, " · " + (r.host || "?")) : null),
+      r ? mascot(r.mood, 18) : null, h("span", { class: "grow label", title: sid }, sid.slice(0, 8), r ? h("span", { class: "sub" }, " · " + (r.host || "?")) : null),
       h("span", { class: "n" }, note)));
   };
   const run = x => h("li", {},

@@ -4,16 +4,21 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RULES = ROOT / "rules" / "user-rules.md"
 RECEIPT = ROOT / "skills" / "verification" / "kip-receipts" / "receipt.py"
+RECEIPT_Q = shlex.quote(str(RECEIPT))  # as kip.py writes it into hook commands (quoted on Windows)
+# the interpreter install writes into hooks: python3, or on Windows the python.exe running this (see kip.python)
+PY = Path(sys.executable).with_name("python.exe").as_posix() if os.name == "nt" else "python3"
 GLOSSARY = ROOT / "docs" / "glossary.md"
 FAKE_CODEX = """
 import json, os, sys
@@ -23,18 +28,31 @@ for line in sys.stdin:  # Codex's app server, as far as doctor asks it: hooks/li
     m = json.loads(line)
     if m.get("method") == "hooks/list":
         hooks = [{"command": h["command"], "sourcePath": str(path), "trustStatus": os.environ.get("FAKE_TRUST", "untrusted")}
-                 for groups in json.loads(path.read_text())["hooks"].values() for g in groups for h in g["hooks"]]
+                 for groups in json.loads(path.read_text(encoding="utf-8"))["hooks"].values() for g in groups for h in g["hooks"]]
         print(json.dumps({"id": m["id"], "result": {"data": [{"hooks": hooks}]}}), flush=True)
 """
+
+
+@contextmanager
+def connect(db):
+    """sqlite3's own with commits but leaves the file open, which Windows won't let the temp dir's cleanup delete."""
+    con = sqlite3.connect(db)
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
 
 
 def glossary_terms():
     """Every term defined in code that docs/glossary.md must name, as the text it must contain."""
     def choices(script, *args):  # argparse's "{a,b,c}" usage line, so the CLI itself is the source
-        out = subprocess.run([sys.executable, str(script), *args, "--help"], capture_output=True, text=True).stdout
-        return re.search(r"\{([\w,-]+)\}", out).group(1).split(",")
+        r = subprocess.run([sys.executable, str(script), *args, "--help"], capture_output=True, encoding="utf-8")
+        m = re.search(r"\{([\w,-]+)\}", r.stdout)
+        assert m, f"{script.name} --help: exit {r.returncode}\n{r.stdout}{r.stderr}"
+        return m.group(1).split(",")
 
-    tree = ast.parse(RECEIPT.read_text())
+    tree = ast.parse(RECEIPT.read_text(encoding="utf-8"))
     stages = next(ast.literal_eval(n.value) for n in tree.body
                   if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) == "STAGES")
     verdicts = set()
@@ -43,7 +61,7 @@ def glossary_terms():
             head = r.value.values[0] if isinstance(r.value, ast.JoinedStr) else r.value
             if isinstance(head, ast.Constant) and isinstance(head.value, str):
                 verdicts.add(re.split(r"[:;]", head.value.split(" ", 1)[-1])[0].strip())
-    defaults = json.loads((ROOT / "defaults.json").read_text())
+    defaults = json.loads((ROOT / "defaults.json").read_text(encoding="utf-8"))
     return ([f"`receipt.py {c}" for c in choices(RECEIPT)] + [f"`kip.py {c}" for c in choices(ROOT / "kip.py")] +
             [f"`{m}`" for m in choices(RECEIPT, "check")] + [f"**{s}**" for s in stages] +
             [f"**{v}**" for v in verdicts if v] + [f"`{k}`" for k in defaults] +
@@ -51,7 +69,7 @@ def glossary_terms():
 
 
 def check_glossary():
-    text = GLOSSARY.read_text()
+    text = GLOSSARY.read_text(encoding="utf-8")
     missing = [t for t in glossary_terms() if t not in text]
     assert not missing, f"docs/glossary.md is missing: {missing}"
     broken = [l for l in re.findall(r"\]\(([^)#:]+)[)#]", text) if not (GLOSSARY.parent / l).exists()]
@@ -62,7 +80,7 @@ def check_submodule_worktree():
     """worktree new in a submodule lands under the submodule's checkout, not its git dir in .git/modules."""
     with tempfile.TemporaryDirectory() as tmp:
         lib, sup = Path(tmp, "lib"), Path(tmp, "super")
-        env = {**os.environ, "HOME": tmp, "KIP_HOME": str(Path(tmp, ".kip")), "GIT_AUTHOR_NAME": "t",
+        env = {**os.environ, "HOME": tmp, "USERPROFILE": tmp, "KIP_HOME": str(Path(tmp, ".kip")), "GIT_AUTHOR_NAME": "t",
                "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         for cwd, cmd in ((lib, ["init", "-q"]), (lib, ["commit", "-q", "--allow-empty", "-m", "lib"]),
                          (sup, ["init", "-q"]),
@@ -70,7 +88,7 @@ def check_submodule_worktree():
             cwd.mkdir(exist_ok=True)
             subprocess.run(["git", *cmd], cwd=cwd, env=env, check=True, capture_output=True)
         r = subprocess.run([sys.executable, str(ROOT / "kip.py"), "worktree", "new", "probe"], cwd=sup / "lib", env=env,
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8")
         assert Path(r.stdout.strip()) == (sup / "lib").resolve() / ".kip" / "worktrees" / "probe", r
 
 
@@ -82,20 +100,20 @@ def main():
         (home / ".claude").mkdir(parents=True)
         (repo / ".kip").mkdir(parents=True)
         env = {k: v for k, v in os.environ.items() if k not in ("KIP_HOME", "LINEAR_API_KEY", "KIP_RECEIPTS_DIR")}
-        env["HOME"] = str(home)
+        env["HOME"] = env["USERPROFILE"] = str(home)  # USERPROFILE: Path.home() on Windows
         env["KIP_DASHBOARD"] = "0"  # never load a real login service from a test
         env["KIP_GIT_HOOKS"] = "0"  # nor touch this checkout's git hooks
         env["KIP_INSTALL_FROM_WORKTREE"] = "1"  # this checkout may itself be a linked worktree
 
         def kip(*args, ok=True, **extra):
             r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=repo, env={**env, **extra},
-                               capture_output=True, text=True)
+                               capture_output=True, encoding="utf-8")
             assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
             return (r.stdout + r.stderr).strip()
 
         def write(path, cfg):
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(cfg))
+            path.write_text(json.dumps(cfg), encoding="utf-8")
 
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
 
@@ -143,35 +161,35 @@ def main():
         # and with --parent its unit's receipts run started there.
         proj, store = Path(tmp, "proj"), {"KIP_RECEIPTS_DIR": str(Path(tmp, "store"))}
         proj.mkdir()
-        (proj / ".gitignore").write_text(".env\nsecret.txt\n.kip/config.json\n")
-        (proj / ".worktreeinclude").write_text(".env\n.kip/config.json\nnot-ignored.txt\n")
-        (proj / "app.txt").write_text("app\n")
+        (proj / ".gitignore").write_text(".env\nsecret.txt\n.kip/config.json\n", encoding="utf-8")
+        (proj / ".worktreeinclude").write_text(".env\n.kip/config.json\nnot-ignored.txt\n", encoding="utf-8")
+        (proj / "app.txt").write_text("app\n", encoding="utf-8")
         g = ["-c", "user.name=t", "-c", "user.email=t@t"]
         for cmd in (["init", "-q"], ["add", "."], [*g, "commit", "-qm", "proj"]):
             subprocess.run(["git", *cmd], cwd=proj, check=True, capture_output=True)
-        (proj / ".env").write_text("TOKEN=dev\n")
-        (proj / "secret.txt").write_text("not named\n")
-        (proj / "not-ignored.txt").write_text("untracked but not ignored\n")
+        (proj / ".env").write_text("TOKEN=dev\n", encoding="utf-8")
+        (proj / "secret.txt").write_text("not named\n", encoding="utf-8")
+        (proj / "not-ignored.txt").write_text("untracked but not ignored\n", encoding="utf-8")
         write(proj / ".kip" / "config.json", {"workflow": {"stages": [], "worktree": {"setup": "touch setup-ran"}}})
 
         def kip_in(cwd, *args, ok=True, **extra):
             r = subprocess.run([sys.executable, str(ROOT / "kip.py"), *args], cwd=cwd, env={**env, **store, **extra},
-                               capture_output=True, text=True)
+                               capture_output=True, encoding="utf-8")
             assert (r.returncode == 0) == ok, f"{args}: exit {r.returncode}\n{r.stdout}{r.stderr}"
             return r.stdout.strip(), r.stderr.strip()
 
         wt = Path(kip_in(proj, "worktree", "new", "feat")[0])
         assert wt == proj.resolve() / ".kip" / "worktrees" / "feat", wt
-        branch = subprocess.run(["git", "branch", "--show-current"], cwd=wt, capture_output=True, text=True).stdout
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=wt, capture_output=True, encoding="utf-8").stdout
         assert branch.strip() == "kip/feat", branch
-        assert (wt / ".env").read_text() == "TOKEN=dev\n" and (wt / ".kip" / "config.json").is_file()
+        assert (wt / ".env").read_text(encoding="utf-8") == "TOKEN=dev\n" and (wt / ".kip" / "config.json").is_file()
         assert not (wt / "secret.txt").exists() and not (wt / "not-ignored.txt").exists()
         assert (wt / "setup-ran").exists() and not (proj / "setup-ran").exists()
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, capture_output=True, text=True).stdout
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, capture_output=True, encoding="utf-8").stdout
         assert ".kip/worktrees" not in status, status
         assert "already exists" in kip_in(proj, "worktree", "new", "feat", ok=False)[1]
         receipt = lambda cwd, *args: subprocess.run([sys.executable, str(RECEIPT), *args], cwd=cwd,  # noqa: E731
-                                                    env={**env, **store}, capture_output=True, text=True).stdout.strip()
+                                                    env={**env, **store}, capture_output=True, encoding="utf-8").stdout.strip()
         plan = Path(receipt(proj, "init")).name
         receipt(proj, "claim", "unit one works", "--unit", "1")
         unit_wt = Path(kip_in(proj, "worktree", "new", "unit-1", "--parent", plan, "--unit", "1")[0])
@@ -193,7 +211,7 @@ def main():
             subprocess.run(["git", *cmd], cwd=clone, check=True, capture_output=True)
         unset = {k: v for k, v in env.items() if k != "KIP_INSTALL_FROM_WORKTREE"}
         r = subprocess.run([sys.executable, str(linked / "kip.py"), "install"], cwd=repo, env=unset,
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8")
         assert r.returncode == 1 and "is a linked worktree" in r.stderr and str(clone.resolve() / "kip.py") in r.stderr, r
         assert not (home / ".kip" / "kip").exists(), "a refused install linked something"
 
@@ -214,20 +232,20 @@ def main():
         assert f"receipts\n  imported 1 runs and 0 session starts from the JSON store\n  {kipdb} · schema v2 of 2 · 1 runs" \
             in out, out
         assert f"receipts\n  {kipdb} · schema v2 of 2 · 1 runs" in kip("doctor")
-        first = settings.read_text()
+        first = settings.read_text(encoding="utf-8")
         assert "cursor: skipped, missing ~/.cursor" in out, out
         for d in (home / ".kip" / "skills", home / ".claude" / "skills"):
             assert sorted(p.name for p in d.iterdir()) == skills, d
             assert all(p.is_symlink() and ROOT in p.resolve().parents for p in d.iterdir())
         assert (home / ".kip" / "kip").resolve() == ROOT
         claude_md = home / ".claude" / "CLAUDE.md"
-        assert claude_md.read_text() == f"@{RULES}\n", claude_md.read_text()
-        assert "rules: already imported" in kip("install") and claude_md.read_text() == f"@{RULES}\n"
+        assert claude_md.read_text(encoding="utf-8") == f"@{RULES}\n", claude_md.read_text(encoding="utf-8")
+        assert "rules: already imported" in kip("install") and claude_md.read_text(encoding="utf-8") == f"@{RULES}\n"
 
         # Hooks: Kip's groups are added once, a stale Kip path is replaced, the user's own hooks and keys stay.
-        on = json.loads(settings.read_text())
+        on = json.loads(settings.read_text(encoding="utf-8"))
         assert on["model"] == "x" and on["hooks"]["Stop"][0] == mine and len(on["hooks"]["Stop"]) == 2, on
-        assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook stop", on
+        assert on["hooks"]["Stop"][1]["hooks"][0]["command"] == f"{PY} {RECEIPT_Q} check --hook stop", on
         pre = on["hooks"]["PreToolUse"]
         assert [g["matcher"] for g in pre] == \
             ["Bash", "mcp__.*(create_pull_request|create_pr)", "Edit|MultiEdit|Write|NotebookEdit", "*"], pre
@@ -235,24 +253,24 @@ def main():
         assert on["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("check --hook start"), on
         assert on["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].endswith("check --hook prompt"), on
         assert on["hooks"]["SessionEnd"][0]["hooks"][0]["command"].endswith("check --hook end"), on
-        assert on["hooks"]["SubagentStop"][0]["hooks"][0]["command"] == f"python3 {RECEIPT} check --hook subagent", on
-        assert settings.read_text() == first, "second install changed hooks"
+        assert on["hooks"]["SubagentStop"][0]["hooks"][0]["command"] == f"{PY} {RECEIPT_Q} check --hook subagent", on
+        assert settings.read_text(encoding="utf-8") == first, "second install changed hooks"
         assert "claude-code    ready · hooks installed" in kip("doctor")
         write(settings, {**on, "hooks": {**on["hooks"], "PreToolUse": pre[:2]}})  # installed before the tool hook
         assert "claude-code    ready · hooks not installed" in kip("doctor")
         kip("install", "--host", "claude-code")
-        assert settings.read_text() == first, "install didn't add the missing hook"
+        assert settings.read_text(encoding="utf-8") == first, "install didn't add the missing hook"
         assert "cursor         missing ~/.cursor · hooks not installed (run install)" in kip("doctor")
-        settings.write_text("{not json")
+        settings.write_text("{not json", encoding="utf-8")
         assert "fix it before installing hooks" in kip("install", "--host", "claude-code", ok=False)
-        assert settings.read_text() == "{not json"
+        assert settings.read_text(encoding="utf-8") == "{not json"
         write(settings, on)
         # An existing ~-relative import counts as already imported.
         (home / "Kip").symlink_to(ROOT)
-        claude_md.write_text("# mine\n@~/Kip/rules/user-rules.md\n")
-        before = claude_md.read_text()
+        claude_md.write_text("# mine\n@~/Kip/rules/user-rules.md\n", encoding="utf-8")
+        before = claude_md.read_text(encoding="utf-8")
         kip("install", "--host", "claude-code")
-        assert claude_md.read_text() == before, claude_md.read_text()
+        assert claude_md.read_text(encoding="utf-8") == before, claude_md.read_text(encoding="utf-8")
 
         # A link to a skill that moved is pruned; a real dir in the way is left alone.
         stale = home / ".claude" / "skills" / "kip-old"
@@ -267,79 +285,84 @@ def main():
         # With Cursor's state DB present, rules go into its User Rules value, once, beside the user's own.
         db = home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
         db.parent.mkdir(parents=True)
-        with sqlite3.connect(db) as con:
+        with connect(db) as con:
             con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
             con.execute("INSERT INTO ItemTable VALUES ('aicontext.personalContext', 'my own rule')")
         assert "rules: written to" in kip("install", "--host", "cursor")
         assert "rules: already in" in kip("install", "--host", "cursor")
-        with sqlite3.connect(db) as con:
+        with connect(db) as con:
             value = con.execute("SELECT value FROM ItemTable WHERE key = 'aicontext.personalContext'").fetchone()[0]
         assert value.startswith("my own rule\n\n<!-- kip rules: ") and value.count("<!-- /kip rules -->") == 1, value
-        assert RULES.read_text().strip() in value
+        assert RULES.read_text(encoding="utf-8").strip() in value
         # Cursor hooks: flat entries in hooks.json with the version Cursor expects, beside the user's own.
         cursor_hooks = home / ".cursor" / "hooks.json"
-        on = json.loads(cursor_hooks.read_text())
-        assert on["version"] == 1 and on["hooks"]["stop"] == [{"command": f"python3 {RECEIPT} check --hook stop"}], on
+        on = json.loads(cursor_hooks.read_text(encoding="utf-8"))
+        assert on["version"] == 1 and on["hooks"]["stop"] == [{"command": f"{PY} {RECEIPT_Q} check --hook stop"}], on
         assert on["hooks"]["beforeShellExecution"][0]["command"].endswith("check --hook pr"), on
         assert on["hooks"]["beforeMCPExecution"][0]["command"].endswith("check --hook pr"), on
         assert on["hooks"]["afterFileEdit"][0]["command"].endswith("check --hook tool"), on
-        assert on["hooks"]["preToolUse"] == [{"command": f"python3 {RECEIPT} check --hook tool"}], on
+        assert on["hooks"]["preToolUse"] == [{"command": f"{PY} {RECEIPT_Q} check --hook tool"}], on
         assert on["hooks"]["beforeSubmitPrompt"][0]["command"].endswith("check --hook prompt"), on
         assert on["hooks"]["afterAgentResponse"][0]["command"].endswith("check --hook response"), on
         on["hooks"]["stop"].insert(0, {"command": "say hi"})
         write(cursor_hooks, on)
         kip("install", "--host", "cursor")
-        assert json.loads(cursor_hooks.read_text())["hooks"]["stop"] == on["hooks"]["stop"], cursor_hooks.read_text()
+        assert json.loads(cursor_hooks.read_text(encoding="utf-8"))["hooks"]["stop"] == on["hooks"]["stop"], cursor_hooks.read_text(encoding="utf-8")
         assert "cursor         ready · hooks installed · rules current" in kip("doctor")
         assert on["hooks"]["sessionStart"][0]["command"].endswith("check --hook start"), on
         # Cursor holds a copy of the rules, so doctor says when it's behind rules/user-rules.md.
-        with sqlite3.connect(db) as con:
+        with connect(db) as con:
             con.execute("UPDATE ItemTable SET value = replace(value, 'Lazy senior developer', 'Old rule')")
         assert "rules stale (run install)" in kip("doctor")
         kip("install", "--host", "cursor")
         assert "rules current" in kip("doctor")
         # A block whose line endings an editor changed is still Kip's: replaced, never doubled.
-        with sqlite3.connect(db) as con:
+        with connect(db) as con:
             con.execute("UPDATE ItemTable SET value = replace(value, char(10), char(13) || char(10))")
         kip("install", "--host", "cursor")
-        with sqlite3.connect(db) as con:
+        with connect(db) as con:
             value = con.execute("SELECT value FROM ItemTable WHERE key = 'aicontext.personalContext'").fetchone()[0]
         assert value.count("<!-- /kip rules -->") == 1 and "rules current" in kip("doctor"), value
         # Codex: Claude Code's hook layout, each command naming its host, beside the user's own hooks; rules as a
         # marked block in AGENTS.md beside the user's text. Kip never trusts its own hooks; doctor asks Codex.
-        fake = Path(tmp, "fake-codex")
-        fake.write_text(f"#!{sys.executable}\n{FAKE_CODEX}")
-        fake.chmod(0o755)
+        if os.name == "nt":  # no shebangs there: a .cmd, as Codex's own npm shim is
+            Path(tmp, "fake-codex.py").write_text(FAKE_CODEX, encoding="utf-8")
+            fake = Path(tmp, "fake-codex.cmd")
+            fake.write_text(f'@"{sys.executable}" "{Path(tmp, "fake-codex.py")}" %*\n', encoding="utf-8")
+        else:
+            fake = Path(tmp, "fake-codex")
+            fake.write_text(f"#!{sys.executable}\n{FAKE_CODEX}", encoding="utf-8")
+            fake.chmod(0o755)
         write(repo / ".kip" / "config.json", {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(fake)]}}}}})
         assert "codex          missing ~/.codex" in kip("doctor")
         codex = home / ".codex"
         codex.mkdir()
         codex_hooks, agents = codex / "hooks.json", codex / "AGENTS.md"
         write(codex_hooks, {"hooks": {"Stop": [mine]}})
-        agents.write_text("# my own\n")
+        agents.write_text("# my own\n", encoding="utf-8")
         assert "codex          ready · hooks not installed (run install) · rules not installed" in kip("doctor")
         out = kip("install")
         assert "codex\n" in out and "trust Kip's hooks with /hooks" in out, out
         assert sorted(p.name for p in (codex / "skills").iterdir()) == skills
-        on = json.loads(codex_hooks.read_text())
+        on = json.loads(codex_hooks.read_text(encoding="utf-8"))
         assert on["hooks"]["Stop"] == [mine, {"hooks": [{"type": "command",
-                                                         "command": f"python3 {RECEIPT} check --hook stop --host codex"}]}], on
+                                                         "command": f"{PY} {RECEIPT_Q} check --hook stop --host codex"}]}], on
         assert sorted(on["hooks"]) == sorted(["SessionStart", "Stop", "SubagentStop", "PreToolUse", "PermissionRequest",
                                               "UserPromptSubmit", "SessionEnd"]), on
         pre = on["hooks"]["PreToolUse"]
         assert [g["matcher"] for g in pre] == ["Bash", "mcp__.*(create_pull_request|create_pr)", "apply_patch|Edit|Write|Bash", "*"]
         assert [g["hooks"][0]["command"].split()[-3] for g in pre] == ["pr", "pr", "edit", "tool"], pre
-        mcp = json.loads(RECEIPT.with_name("codex-hooks.json").read_text())["PreToolUse:mcp__github__create_pull_request"]
+        mcp = json.loads(RECEIPT.with_name("codex-hooks.json").read_text(encoding="utf-8"))["PreToolUse:mcp__github__create_pull_request"]
         assert re.fullmatch(pre[1]["matcher"], mcp["tool_name"]), "the PR gate misses Codex's real MCP tool name"
         kips = [h["command"] for gs in on["hooks"].values() for g in gs for h in g["hooks"] if g != mine]
         assert len(kips) == 10 and all(c.endswith(" --host codex") for c in kips), kips
-        text = agents.read_text()
+        text = agents.read_text(encoding="utf-8")
         assert text.startswith("# my own\n\n<!-- kip rules: ") and text.count("<!-- /kip rules -->") == 1, text
-        assert RULES.read_text().strip() in text
-        first = codex_hooks.read_text(), agents.read_text()
+        assert RULES.read_text(encoding="utf-8").strip() in text
+        first = codex_hooks.read_text(encoding="utf-8"), agents.read_text(encoding="utf-8")
         again = kip("install", "--host", "codex")
         assert "rules: already in" in again and "trust Kip's hooks" not in again, again  # unchanged hooks keep their trust
-        assert (codex_hooks.read_text(), agents.read_text()) == first, "second install changed Codex's files"
+        assert (codex_hooks.read_text(encoding="utf-8"), agents.read_text(encoding="utf-8")) == first, "second install changed Codex's files"
         changed = json.loads(first[0])
         changed["hooks"]["Stop"][-1]["hooks"][0]["command"] += " --old"
         write(codex_hooks, changed)
@@ -352,20 +375,20 @@ def main():
         assert "codex          ready · hooks installed · 10 of 10 hooks untrusted (open Codex" in kip("doctor")
         sys.path.insert(0, str(ROOT))
         import kip as kip_py
-        on = json.loads(codex_hooks.read_text())["hooks"]
+        on = json.loads(codex_hooks.read_text(encoding="utf-8"))["hooks"]
         state = {f"{codex_hooks}:{kip_py.snake(e)}:{i}:{j}": kip_py.codex_hash(kip_py.snake(e), g, h)
                  for e, gs in on.items() for i, g in enumerate(gs) for j, h in enumerate(g["hooks"]) if g != mine}
         conf = codex / "config.toml"
-        conf.write_text("".join(f'[hooks.state."{k}"]\ntrusted_hash = "{v}"\n' for k, v in state.items()))
+        conf.write_text("".join(f'[hooks.state.{json.dumps(k)}]\ntrusted_hash = "{v}"\n' for k, v in state.items()), encoding="utf-8")
         assert "hooks installed · hooks trusted · rules current" in kip("doctor")
-        conf.write_text(conf.read_text().replace(next(iter(state.values())), "sha256:old", 1))
+        conf.write_text(conf.read_text(encoding="utf-8").replace(next(iter(state.values())), "sha256:old", 1))
         assert "hooks installed · hook trust unknown (Codex not found)" in kip("doctor")
         write(repo / ".kip" / "config.json", {"hosts": {"codex": {"hooks": {"trust": {"app_server": [str(fake)]}}}}})
         assert "hooks installed · hooks trusted · rules current" in kip("doctor", FAKE_TRUST="trusted")
-        agents.write_text(text.replace("Lazy senior developer", "Old rule"))
+        agents.write_text(text.replace("Lazy senior developer", "Old rule"), encoding="utf-8")
         assert "rules stale (run install)" in kip("doctor", FAKE_TRUST="trusted")
         kip("install", "--host", "codex")
-        assert (codex_hooks.read_text(), agents.read_text()) == first
+        assert (codex_hooks.read_text(encoding="utf-8"), agents.read_text(encoding="utf-8")) == first
         conf.unlink()
         # Codex's own hashes for two of Kip's hooks (codex-cli 0.155.0, hooks/list currentHash).
         cmd = "python3 /Users/cassidyschaufele/Documents/GitHub/Kip/skills/verification/kip-receipts/receipt.py check --hook {} --host codex"
@@ -374,13 +397,13 @@ def main():
         assert kip_py.codex_hash("pre_tool_use", {"matcher": "Bash"}, {"type": "command", "command": cmd.format("pr")}) == \
             "sha256:be40177aafb274aabdd694bc752d2ad2de00ee19a355f17cb3487839cb6313ec"
         out = kip("install", "--host", "codex", "--project")
-        assert "trust this project" in out and "Stop" in json.loads((repo / ".codex" / "hooks.json").read_text())["hooks"]
+        assert "trust this project" in out and "Stop" in json.loads((repo / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
         assert sorted(p.name for p in (repo / ".codex" / "skills").iterdir()) == skills
-        assert not (repo / ".codex" / "AGENTS.md").exists() and agents.read_text() == first[1]
+        assert not (repo / ".codex" / "AGENTS.md").exists() and agents.read_text(encoding="utf-8") == first[1]
         kip("uninstall", "--host", "codex", "--project")
         assert not (repo / ".codex" / "hooks.json").exists() and not list((repo / ".codex" / "skills").iterdir())
         kip("uninstall", "--host", "codex")
-        assert agents.read_text() == "# my own\n" and json.loads(codex_hooks.read_text()) == {"hooks": {"Stop": [mine]}}
+        assert agents.read_text(encoding="utf-8") == "# my own\n" and json.loads(codex_hooks.read_text(encoding="utf-8")) == {"hooks": {"Stop": [mine]}}
         assert not list((codex / "skills").iterdir())
         agents.unlink()
         kip("install", "--host", "codex")
@@ -391,7 +414,7 @@ def main():
         # The conversation switch: install saves it into the user's layer (the repo's with --project),
         # beside what's already there; no flag leaves it as it was.
         kip("install", "--host", "cursor", "--no-conversation")
-        user = json.loads((home / ".kip" / "config.json").read_text())
+        user = json.loads((home / ".kip" / "config.json").read_text(encoding="utf-8"))
         assert user["dashboard"] == {"conversation": False} and user["default_destination"] == "linear", user
         kip("install", "--host", "cursor")
         assert json.loads(kip("config"))["dashboard"]["conversation"] is False
@@ -399,7 +422,7 @@ def main():
         assert json.loads(kip("config"))["dashboard"]["conversation"] is True
         assert "not allowed with" in kip("install", "--conversation", "--no-conversation", ok=False)
         kip("install", "--project")
-        assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]
+        assert "Stop" in json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
         assert sorted(p.name for p in (repo / ".claude" / "skills").iterdir()) == skills
         kip("uninstall", "--project")
         assert not (repo / ".claude" / "settings.json").exists() and not list((repo / ".claude" / "skills").iterdir())
@@ -410,6 +433,12 @@ def main():
         assert kip_py.service("win32") is None
         win = r"python3 'C:\Users\me\Kip\skills\verification\kip-receipts\receipt.py' check --hook start"
         assert kip_py.is_kip({"hooks": [{"type": "command", "command": win}]})  # backslashes, and shlex's quotes
+        # Hooks call python3 off Windows; on it, the Python running install (python3 is the Store alias there).
+        cmd = kip_py.fill({"command": "{python} {receipt} check --hook stop"})["command"]
+        assert cmd == f"{kip_py.python()} {shlex.quote(str(RECEIPT))} check --hook stop", cmd
+        assert kip_py.python("linux") == kip_py.python("darwin") == "python3"
+        exe, = shlex.split(kip_py.python("win32"))  # one word, even with spaces in the path
+        assert exe == Path(sys.executable).with_name("python.exe").as_posix() and "\\" not in exe, exe
         os.environ["KIP_DASHBOARD_PORT"] = "7400"
         assert "--port 7400" in kip_py.service("linux")[1]
         del os.environ["KIP_DASHBOARD_PORT"]
@@ -423,12 +452,12 @@ def main():
         # Git hooks re-run install; someone else's hook is left alone, and uninstall takes only Kip's.
         hooks = Path(tmp, "hooks")
         hooks.mkdir()
-        (hooks / "post-merge").write_text("#!/bin/sh\nmine\n")
+        (hooks / "post-merge").write_text("#!/bin/sh\nmine\n", encoding="utf-8")
         kip_py.install_git_hooks(hooks)
         kip_py.install_git_hooks(hooks)  # idempotent
-        commit = (hooks / "post-commit").read_text()
-        assert f"{ROOT / 'kip.py'} install" in commit and os.access(hooks / "post-commit", os.X_OK), commit
-        assert (hooks / "post-merge").read_text() == "#!/bin/sh\nmine\n"
+        commit = (hooks / "post-commit").read_text(encoding="utf-8")
+        assert f"{shlex.quote(str(ROOT / 'kip.py'))} install" in commit and os.access(hooks / "post-commit", os.X_OK), commit
+        assert (hooks / "post-merge").read_text(encoding="utf-8") == "#!/bin/sh\nmine\n"
         kip_py.uninstall_git_hooks(hooks)
         assert [p.name for p in hooks.iterdir()] == ["post-merge"]
 
@@ -437,31 +466,31 @@ def main():
         home = Path(tmp, "home2")
         db = home / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
         db.parent.mkdir(parents=True)
-        with sqlite3.connect(db) as con:
+        with connect(db) as con:
             con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
             con.execute("INSERT INTO ItemTable VALUES ('aicontext.personalContext', 'my own rule')")
         write(home / ".claude" / "settings.json", {"model": "x", "hooks": {"Stop": [mine]}})
-        (home / ".claude" / "CLAUDE.md").write_text("# mine\n")
+        (home / ".claude" / "CLAUDE.md").write_text("# mine\n", encoding="utf-8")
 
         def snapshot():
-            with sqlite3.connect(db) as con:
+            with connect(db) as con:
                 rules = con.execute("SELECT value FROM ItemTable").fetchall()
             files = [home / ".claude" / "settings.json", home / ".claude" / "CLAUDE.md", home / ".cursor" / "hooks.json"]
-            return rules, [f.read_text() if f.exists() else None for f in files]
+            return rules, [f.read_text(encoding="utf-8") if f.exists() else None for f in files]
 
         before = snapshot()
-        kip("install", "--host", "claude-code", "--host", "cursor", HOME=str(home))
+        kip("install", "--host", "claude-code", "--host", "cursor", HOME=str(home), USERPROFILE=str(home))
         assert snapshot() != before and (home / ".cursor" / "hooks.json").exists()
-        out = kip("uninstall", HOME=str(home))
+        out = kip("uninstall", HOME=str(home), USERPROFILE=str(home))
         kept = home / ".kip" / "receipts" / "kip.db"
         assert f"receipts\n  kept: {kept} · schema v2 of 2 · 0 runs" in out and kept.exists(), out
         assert json.loads(snapshot()[1][0]) == json.loads(before[1][0]) and snapshot()[1][1:] == before[1][1:], snapshot()
         assert snapshot()[0] == before[0], snapshot()
         assert not [p for p in home.rglob("*") if p.is_symlink() and os.readlink(p).startswith(str(ROOT))], out
-        kip("uninstall", HOME=str(home))  # idempotent
-        with sqlite3.connect(db) as con:  # a rules value Kip never wrote to is left byte for byte
+        kip("uninstall", HOME=str(home), USERPROFILE=str(home))  # idempotent
+        with connect(db) as con:  # a rules value Kip never wrote to is left byte for byte
             con.execute("UPDATE ItemTable SET value = '  spaced rule  '")
-        kip("uninstall", HOME=str(home))
+        kip("uninstall", HOME=str(home), USERPROFILE=str(home))
         assert snapshot()[0] == [("  spaced rule  ",)], snapshot()[0]
         assert json.loads(snapshot()[1][0]) == json.loads(before[1][0])
     print("kip.py: all checks passed")

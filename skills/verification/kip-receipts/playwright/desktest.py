@@ -5,6 +5,12 @@ at ultra).
 
   desktest.py CLAIM URL SPEC [--red] [--viewports NAME,...] [--run ID]
 
+Each viewport's evidence records the command it ran as
+  desktest.py --exec --viewports JSON [KEY=VALUE...] -- PLAYWRIGHT...
+which runs PLAYWRIGHT with KIP_VIEWPORTS=JSON and the KEY=VALUE pairs set. It
+replaces `env`, which Git for Windows mangles JSON for. Evidence recorded with
+`env KIP_VIEWPORTS=...` still reruns where `env` works.
+
 Viewports come from Kip's config (evidence.frontend.viewports, see kip.py
 config): mobile, tablet and desktop unless a user or project config changes
 them. Each one is a Playwright `use` block.
@@ -61,7 +67,18 @@ def playwright():
     return [pinned_node(), str(PW_CLI)]
 
 
+def exec_(args):
+    """--exec --viewports JSON [KEY=VALUE...] -- CMD...: run CMD with those set, exit with its code."""
+    if args[:1] != ["--viewports"] or "--" not in args:
+        sys.exit("usage: desktest.py --exec --viewports JSON [KEY=VALUE...] -- CMD...")
+    end = args.index("--")
+    env = dict(os.environ, KIP_VIEWPORTS=args[1], **dict(kv.split("=", 1) for kv in args[2:end]))
+    sys.exit(subprocess.run(args[end + 1:], env=env).returncode)
+
+
 def main():
+    if sys.argv[1:2] == ["--exec"]:
+        exec_(sys.argv[2:])
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("claim")
     p.add_argument("url")
@@ -83,7 +100,7 @@ def main():
 
     run_args = ["--run", a.run] if a.run else []
     rec = json.loads(subprocess.run([sys.executable, str(RECEIPT), "json", *run_args],
-                                    capture_output=True, text=True, check=True).stdout)
+                                    capture_output=True, encoding="utf-8", check=True).stdout)
     claim = next((c for c in rec["claims"] if c["id"] == a.claim), None)
     if not claim:
         sys.exit(f"unknown claim {a.claim}")
@@ -92,7 +109,7 @@ def main():
     # ran: editing it later makes a new copy instead of breaking the hash of evidence already recorded. A spec
     # elsewhere (a project's own, with relative imports) runs where it is.
     run_dir = Path(subprocess.run([sys.executable, str(RECEIPT), "path", *run_args],
-                                  capture_output=True, text=True, check=True).stdout.strip()).resolve()
+                                  capture_output=True, encoding="utf-8", check=True).stdout.strip()).resolve()
     if spec.parent == run_dir / "specs":
         body = spec.read_bytes()
         digest = hashlib.sha256(body).hexdigest()[:12]
@@ -110,13 +127,13 @@ def main():
             # and kip-kubrick's capture helpers as 'kip-kubrick/kubrick'.
             vp_json = json.dumps({vp: configured[vp]}, separators=(",", ":"))
             node_path = f"{kip.KIP_HOME / 'node_modules'}{os.pathsep}{HERE.parents[1]}"
-            cmd = ["env", f"BASE_URL={a.url}", f"KIP_VIEWPORTS={vp_json}", f"KIP_LEVEL={level}",
-                   f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}", f"NODE_PATH={node_path}",
-                   *pw, "test", str(spec), "--config", str(CONFIG), f"--project={vp}"]
+            cmd = [sys.executable, str(Path(__file__).resolve()), "--exec", "--viewports", vp_json,
+                   f"BASE_URL={a.url}", f"KIP_LEVEL={level}", f"KIP_SPECS={spec.parent}", f"KIP_OUT={out}",
+                   f"NODE_PATH={node_path}", "--", *pw, "test", str(spec), "--config", str(CONFIG), f"--project={vp}"]
             r = subprocess.run([sys.executable, str(RECEIPT), "run", a.claim, *run_args,
                                 *(["--red"] if a.red else []), "--collect", out,
                                 "--label", f"desktest {vp} {a.url}", "--", *cmd],
-                               capture_output=True, text=True)
+                               capture_output=True, encoding="utf-8")
             line = (r.stdout + r.stderr).strip()
             print(f"{vp:8} {line}")
             failed |= r.returncode != 0 or "-> pass" not in line

@@ -64,13 +64,14 @@ import select
 import shutil
 import signal
 import socket
+import socketserver
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import uuid
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / "kip.py").is_file())))
 import kip  # noqa: E402
@@ -82,7 +83,7 @@ FILE_TYPES = {".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image
 
 
 def git(*args, cwd=None):
-    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
+    r = subprocess.run([shutil.which("git") or "git", *args], capture_output=True, text=True, cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -133,7 +134,8 @@ def repo_name():
 @functools.lru_cache(maxsize=None)
 def here():
     """(branch, worktree folder) of this checkout, once per invocation; (None, None) outside one."""
-    return git("branch", "--show-current"), git("rev-parse", "--show-toplevel")
+    top = git("rev-parse", "--show-toplevel")
+    return git("branch", "--show-current"), top and str(Path(top))  # Windows: C:\ as Path spells it, not git's C:/
 
 
 def holds(rec):
@@ -159,7 +161,10 @@ def writer():
     if len(found) > 1:
         pid = os.getpid()
         for _ in range(30):
-            r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+            try:
+                r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+            except OSError:  # no ps (Windows): the first variable found decides
+                break
             ppid, _, comm = r.stdout.strip().partition(" ")
             if r.returncode or not ppid.isdigit():
                 break
@@ -360,7 +365,7 @@ def import_json():
             if con.execute("SELECT 1 FROM runs WHERE id = ?", (p.parent.name,)).fetchone():
                 continue
             try:
-                save(p.parent, json.loads(p.read_text()))
+                save(p.parent, json.loads(p.read_text(encoding="utf-8")))
             except (ValueError, KeyError) as err:
                 print(f"kip-receipts: skipped {p}: {err}", file=sys.stderr)
                 continue
@@ -368,7 +373,7 @@ def import_json():
     for p in ROOT.glob("*/sessions/*"):
         with tx() as con:
             sessions += con.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?, ?)",
-                                    (p.parent.parent.name, p.name, p.read_text().strip())).rowcount
+                                    (p.parent.parent.name, p.name, p.read_text(encoding="utf-8").strip())).rowcount
     return runs, sessions
 
 
@@ -384,15 +389,15 @@ def staged(*commands):
     (so unchanged files aren't rehashed) and never touching the real one. Linked worktrees inside it (a host's
     .claude/worktrees, say) are other checkouts, not new files of this one."""
     top = here()[1] and os.path.realpath(here()[1])
-    nested = [os.path.relpath(f, top) for f in worktrees() if top and f.startswith(top + os.sep)] if top else []
+    nested = [Path(os.path.relpath(f, top)).as_posix() for f in worktrees() if top and f.startswith(top + os.sep)] if top else []
     with tempfile.TemporaryDirectory() as t:
         index, env = Path(t, "index"), {**os.environ, "GIT_INDEX_FILE": str(Path(t, "index"))}
         real = git("rev-parse", "--git-path", "index")
         if real and Path(real).exists():
             shutil.copy2(real, index)
-        subprocess.run(["git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
+        subprocess.run([shutil.which("git") or "git", "add", "-A", *(["--", ":/", *(f":(top,exclude){n}" for n in nested)] if nested else [])],
                        env=env, capture_output=True)
-        runs = [subprocess.run(["git", *args], env=env, capture_output=True) for args in commands]
+        runs = [subprocess.run([shutil.which("git") or "git", *args], env=env, capture_output=True) for args in commands]
     return [r.stdout if r.returncode == 0 else b"" for r in runs]  # bytes: new files needn't be UTF-8
 
 
@@ -455,7 +460,7 @@ def command_inputs(cmd, d):
         p = Path(arg)
         if p.is_file():
             inside = rel_to(p, d)
-            inputs.append({"path": str(inside) if inside else str(p.resolve()), "inside_run": bool(inside),
+            inputs.append({"path": inside.as_posix() if inside else str(p.resolve()), "inside_run": bool(inside),
                            "in_repo": not inside and bool(top and rel_to(p, Path(top))), "sha256": sha256(p)})
     return inputs
 
@@ -683,7 +688,7 @@ def cmd_run(a):
                 attempt(c, e, a.replace)
             if not log:
                 path = d / "files" / f"{e['id']}.log"
-                path.write_text(out)
+                path.write_text(out, encoding="utf-8")
                 log = {"path": f"files/{path.name}", "sha256": sha256(path)}
             e["log"] = dict(log)
             ids.append(e["id"])
@@ -889,8 +894,8 @@ def gone_merged_by(rec, head, at):
 def merged_prs(branch):
     """[(head, mergedAt, number)] for this repo's merged GitHub PRs from branch, or None when gh can't say."""
     try:
-        r = subprocess.run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
-                            "headRefName,headRefOid,mergedAt,number"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([shutil.which("gh") or "gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
+                            "headRefName,headRefOid,mergedAt,number"], capture_output=True, encoding="utf-8", timeout=30)
         if r.returncode != 0:
             return None
         return [(pr["headRefOid"], pr["mergedAt"], pr["number"]) for pr in json.loads(r.stdout) if pr["headRefName"] == branch]
@@ -898,7 +903,7 @@ def merged_prs(branch):
         return None
 
 
-SPEC_COPY = re.compile(r"(/specs/[^/]+)-[0-9a-f]{12}(?=\.[^/]*$)")  # desktest.py's specs/<name>-<hash>.<ext>
+SPEC_COPY = re.compile(r"([/\\]specs[/\\][^/\\]+)-[0-9a-f]{12}(?=\.[^/\\]*$)")  # desktest.py's specs/<name>-<hash>.<ext>
 
 
 def check_key(e):
@@ -1695,7 +1700,8 @@ def run_status(hook):
 
 
 def check_pr(pr):
-    r = subprocess.run(["gh", "pr", "view", pr, "--json", "body,headRefOid"], capture_output=True, text=True)
+    r = subprocess.run([shutil.which("gh") or "gh", "pr", "view", pr, "--json", "body,headRefOid"],
+                       capture_output=True, encoding="utf-8")
     if r.returncode:
         sys.exit(f"gh pr view {pr}: {r.stderr.strip()}")
     view = json.loads(r.stdout)
@@ -1754,7 +1760,7 @@ def append_event(payload, **fields):
              "session": session_id(payload),
              "host": HOST or ("cursor" if "workspace_roots" in payload else "claude"), **fields}
         EVENTS.mkdir(parents=True, exist_ok=True)
-        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a") as f:
+        with open(EVENTS / f"{e['at'][:10]}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -1823,7 +1829,9 @@ def ensure_server():
             return
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "serve", "--port", str(PORT)], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, env={k: v for k, v in os.environ.items() if k not in OWNERS.values()})  # shared: no session's to stop
+                     start_new_session=True,  # Windows: no console window, out of the host's Ctrl+C group
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                     env={k: v for k, v in os.environ.items() if k not in OWNERS.values()})  # shared: no session's to stop
 
 
 def session_end(hook):
@@ -1838,15 +1846,41 @@ def stop_servers(hook):
     sid = session_id(hook)
     for p in SERVERS.glob("*.json") if sid else ():
         try:
-            if json.loads(p.read_text()).get("session") != sid:
-                continue
+            rec = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):  # still being written, or another end hook took it
             continue
-        cmd = subprocess.run(["ps", "-o", "command=", "-p", p.stem], capture_output=True, text=True).stdout
-        # messy-bun: a crashed server's pid reused by another dashboard would be stopped; record start times if that bites
-        if "receipt.py" in cmd and " serve" in cmd:  # a dead server's pid may belong to something else by now
-            os.kill(int(p.stem), signal.SIGTERM)
+        if rec.get("session") != sid:
+            continue
+        if rec.get("started") and started(int(p.stem)) == rec["started"]:  # a dead server's pid may be another's now
+            try:
+                os.kill(int(p.stem), signal.SIGTERM)  # TerminateProcess on Windows: no handler runs, so drop the record here
+            except OSError:
+                pass
         p.unlink(missing_ok=True)
+
+
+def started(pid):
+    """When a process started, which tells it from a later one given the same pid; None when there's none."""
+    if os.name != "nt":
+        # lstart is to the second, so the command line too: a process started in the same second isn't the server
+        # -ww and no COLUMNS: the server and a later stop hook must see the same, untruncated command line
+        r = subprocess.run(["ps", "-ww", "-o", "lstart=", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                           env={**{k: v for k, v in os.environ.items() if k != "COLUMNS"}, "LC_ALL": "C", "TZ": "UTC"})
+        return r.stdout.strip() or None
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32")
+    k32.OpenProcess.restype = wintypes.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    times = [wintypes.FILETIME() for _ in range(4)]  # creation, exit, kernel, user
+    try:
+        if not k32.GetProcessTimes(wintypes.HANDLE(h), *map(ctypes.byref, times)):
+            return None
+    finally:
+        k32.CloseHandle(wintypes.HANDLE(h))
+    return times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
 
 
 def reason_kind(line):
@@ -1926,8 +1960,11 @@ def run_summary(rec):
         v = verdict(c, rec).split(":")[0]
         counts[v] = counts.get(v, 0) + 1
         asking += bool(c["unverified"]) and not c.get("accepted")
+    failing = any(v[v.find(" ") + 1:].startswith(("refuted", "check can't fail")) for v in counts)
     return {"id": rec["id"], "branch": rec.get("branch"), "level": rec["level"], "issue": rec.get("issue"),
             "target": rec.get("target"), "finished": bool(rec.get("finished")), "claims": counts, "asking": asking,
+            # Kip as its claims stand: finished, a claim failing, or one unverified and not accepted; None otherwise.
+            "mood": "success" if rec.get("finished") else "failure" if failing else "asking" if asking else None,
             "sinks": [{"name": s, "url": rec.get("published", {}).get(s, {}).get("url")} for s in rec["sinks"]]}
 
 
@@ -2047,7 +2084,42 @@ def finish(rows):
                     "runs": [run_summary(x) for x in recs], "issues": list(issues.values()),
                     "worktrees": [{"path": p, "linked": ln, "live": Path(p).is_dir()} for p, ln in r["worktrees"].items()],
                     "sources": sorted(r["sources"].values(), key=lambda s: s["last"], reverse=True)})
+        out[-1]["mood"] = mood(out[-1])
     return sorted(out, key=lambda r: r["last"], reverse=True)
+
+
+ASKED = re.compile(r"(Ask(User)?Question|request_user_input(_async)?)\b")
+MOOD_RANK = ["failure", "asking", "working", "success", "waiting"]  # which session's mood is Kip's overall, first wins
+
+
+def on_user(r):
+    """Whether a session waits on its user: a tool call waiting on their approval, or a question to them (Claude
+    Code's AskUserQuestion, Cursor's AskQuestion, Codex's request_user_input or, in codex exec,
+    request_user_input_async). Either lasts until the session's next event."""
+    return r.get("hook") == "ask" or r.get("hook") == "tool" and bool(ASKED.match(r.get("tool") or ""))
+
+
+def mood(r):
+    """Kip as a finished row's session stands: blocked by the gate, mid-turn, else as its run's claims stand (an
+    unverified claim doesn't ask once its PR is open), else let stop by the gate, else idle."""
+    if r["blocked"]:
+        return "failure"
+    if r["active"] and r.get("hook") not in ("stop", "start") and not on_user(r):
+        return "working"
+    run = PureWindowsPath(r["run"]).name if r["run"] else None  # either separator, whichever OS wrote it
+    m = next((x["mood"] for x in r["runs"] if x["id"] == run), None)
+    if m and not (m == "asking" and r["pr"]):
+        return m
+    return "success" if r.get("hook") == "stop" else "waiting"
+
+
+def status(rows):
+    """What a tray shows of finished rows: Kip's mood across active sessions (the first of MOOD_RANK any has,
+    waiting with none) and the active sessions waiting on their user or blocked at stop."""
+    active = [r for r in rows if r["active"]]
+    ids = lambda ok: [r["session"] for r in active if ok(r)]
+    return {"mood": min((r["mood"] for r in active), key=MOOD_RANK.index, default="waiting"),
+            "active": len(active), "approval": ids(on_user), "blocked": ids(lambda r: r["blocked"])}
 
 
 def cmd_serve(a):
@@ -2058,7 +2130,7 @@ def cmd_serve(a):
     import queue
     import threading
     import time
-    page = Path(__file__).resolve().with_name("dashboard.html").read_text().replace("__STAGES__", json.dumps(STAGES))
+    page = Path(__file__).resolve().with_name("dashboard.html").read_text(encoding="utf-8").replace("__STAGES__", json.dumps(STAGES))
     MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
@@ -2171,7 +2243,7 @@ def cmd_serve(a):
             if path == "/":
                 self.send(page, "text/html")
             elif mascot:
-                self.send((MASCOT / mascot[1]).read_text(), "image/svg+xml")
+                self.send((MASCOT / mascot[1]).read_text(encoding="utf-8"), "image/svg+xml")
             elif path == "/api/runs":
                 with lock:
                     seen = {}
@@ -2186,6 +2258,14 @@ def cmd_serve(a):
                     snapshot = copy.deepcopy(rows)
                 with reading:
                     body = json.dumps(finish(snapshot), ensure_ascii=False)
+                self.send(body)
+            elif path == "/api/status":  # polled by the tray apps: only active sessions are worked out
+                since = datetime.datetime.now(datetime.timezone.utc) - ACTIVE
+                with lock:
+                    snapshot = copy.deepcopy({k: r for k, r in rows.items()
+                                              if datetime.datetime.fromisoformat(r["last"]) > since})
+                with reading:
+                    body = json.dumps(status(finish(snapshot)))
                 self.send(body)
             elif one:
                 with lock:
@@ -2261,8 +2341,13 @@ def cmd_serve(a):
                 streams.discard(q)
                 live["busy"] = time.time()
 
+    def bind(self):  # HTTPServer's own reverse-resolves 127.0.0.1 (getfqdn), which can hang for minutes on macOS
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     try:
-        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True})(
+        server = type("Server", (ThreadingHTTPServer,), {"request_queue_size": 64, "daemon_threads": True,
+                                                         "server_bind": bind})(
             ("127.0.0.1", a.port), Handler)  # the default backlog of 5 refuses a page's burst of requests
     except OSError as err:
         sys.exit(f"kip dashboard: can't listen on 127.0.0.1:{a.port} ({err.strerror}); is it already running?")
@@ -2284,7 +2369,7 @@ def cmd_serve(a):
     try:
         if writer():
             SERVERS.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"session": writer()}))
+            record.write_text(json.dumps({"session": writer(), "started": started(os.getpid())}), encoding="utf-8")
         print(f"kip dashboard: http://127.0.0.1:{a.port}", flush=True)
         server.serve_forever()
     finally:
@@ -2352,6 +2437,10 @@ def cmd_check(a):
 
 
 def main():
+    # A pipe on Windows defaults to the ANSI code page, which can't encode a verdict's emoji: speak UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if stream:  # None under pythonw
+            stream.reconfigure(encoding="utf-8", errors="replace")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--run", help="run id or its folder (default: this branch's latest run)")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2483,4 +2572,6 @@ def main():
 
 
 if __name__ == "__main__":
+    for s in (sys.stdout, sys.stderr):  # Windows pipes default to the ANSI code page, which can't print → or ·
+        s.reconfigure(encoding="utf-8")
     main()
