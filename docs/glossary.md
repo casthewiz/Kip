@@ -115,7 +115,7 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
   - `workflow.stages`: stages a PR needs a claim for (default `tidy`, `review`).
   - `workflow.checks`: required check commands.
   - `workflow.worktrees`: how hard edits are steered off a main checkout (`nudge`, `required`, `off`).
-  - `workflow.skills`: which workflow skills the gate holds a session to (`decompose`, `implement`, `tidy`).
+  - `workflow.skills`: which workflow skills the gate holds a session to (`decompose`, `implement`, `tidy`); a stage's `alternatives`, set only in `~/.kip/config.json`, are other skills this machine allows to settle it, each with an `instruction` and `context` the agent picks by, and optional `repos` it's limited to.
   - `workflow.loop`: a fix loop's bound, `attempts` and wall-clock `minutes` from the first failure (default 3 and 10).
   - `workflow.worktree.setup`: a command run in each new `kip.py worktree new` worktree.
 - `dashboard`: `dashboard.conversation`, whether the session log keeps prompts and replies.

@@ -53,6 +53,16 @@ the root-cause fix: one guard in the shared function is a smaller diff than a
 guard in every caller — and patching only the path the ticket names leaves
 every sibling caller still broken. Fix it once, where all callers route through.
 
+**Allowed alternatives.** The user's machine can allow other skills for this
+stage, such as a repo's own harness (`workflow.skills.implement.alternatives`
+in `~/.kip/config.json`). Session start lists the ones allowed in this repo,
+each with an instruction and context. Whether to use one is a judgment call per
+task, made by its instruction: use it when the change is what it covers,
+skip it when the change is outside that or it would drag in scaffolding the
+task doesn't need. Using it, read its context, let it build, and the ladder
+judges only what goes beyond its conventions. Only skills on that list stand
+in for this one. Say which you chose, and why, in one line.
+
 ## Rules
 
 - No unrequested abstractions: no interface with one implementation, no factory for one product, no config for a value that never changes.
@@ -61,6 +71,7 @@ every sibling caller still broken. Fix it once, where all callers route through.
 - Fewest files possible. Shortest working diff wins — but only once you understand the problem. The smallest change in the wrong place isn't lazy, it's a second bug.
 - Complex request? Ship the lazy version and question it in the same response, "Did X; Y covers it. Need full X? Say so." Never stall on an answer you can default.
 - Two stdlib options, same size? Take the one that's correct on edge cases. Lazy means writing less code, not picking the flimsier algorithm.
+- The repo's own conventions outrank these rules: they decide what a change must include, and the ladder judges only what goes beyond them.
 - Mark deliberate simplifications that cut a real corner with a known ceiling (global lock, O(n²) scan, naive heuristic) with a `messy-bun:` comment naming the ceiling and upgrade path (`# messy-bun: global lock, per-account locks if throughput matters`).
 
 ## Output

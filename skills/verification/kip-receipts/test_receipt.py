@@ -1634,6 +1634,45 @@ def main():
         assert edit_default("sk5") == (0, "")
         (pol / ".kip" / "config.json").write_text('{"workflow": {"skills": {"tidy": "sometimes"}}}')
         assert "workflow.skills must map" in edit(pol / "a.py", "sk4")[1]
+        # workflow.skills alternatives, an allowlist only this machine's config sets: an edit waits for Kip's skill or
+        # one allowed in this repo, naming them, and any of those settles it; a skill off the list, or one whose repos
+        # leave this repo out, doesn't. Session start lists the allowed ones with their instruction and context.
+        # A repo's config can't add any.
+        alt_home = Path(tmp, "home-alt")
+        alt_home.mkdir()
+        (alt_home / "config.json").write_text(json.dumps({"setup": None, "workflow": {"skills": {
+            "decompose": "off", "implement": {"alternatives": {
+                "acme-implement": {"instruction": "Use for acme service changes.", "context": "Read CONVENTIONS.md.",
+                                   "repos": ["pol"]},
+                "elsewhere-skill": {"instruction": "Only in another repo.", "repos": ["other-repo"]}}}}}}))
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
+        def alt(hook, sid):
+            return check("--hook", hook, event={"session_id": sid, "cwd": str(pol), "tool_name": "Write",
+                                                "tool_input": {"file_path": str(pol / "a.py")}},
+                         cwd=pol, extra_env={"KIP_HOME": str(alt_home)})
+        code, out = alt("edit", "sk6")
+        assert code == 2 and "/kip-messy-bun" in out and "/acme-implement" in out and "elsewhere" not in out, out
+        used("sk6", "Skill", "other-skill")
+        assert alt("edit", "sk6")[0] == 2, "a skill off the allowlist settled the stage"
+        used("sk6", "Skill", "elsewhere-skill")
+        assert alt("edit", "sk6")[0] == 2, "an alternative whose repos leave this one out settled the stage"
+        used("sk6", "Read", "/repo/.claude/skills/acme-implement/SKILL.md")
+        assert alt("edit", "sk6") == (0, ""), "an allowed alternative didn't settle the stage"
+        used("sk8", "Skill", "kip-messy-bun")
+        assert alt("edit", "sk8") == (0, ""), "kip-messy-bun didn't settle a stage with alternatives"
+        out = alt("start", "sk9")[1]
+        assert "`/acme-implement`: Use for acme service changes. Context: Read CONVENTIONS.md." in out, out
+        assert "elsewhere-skill" not in out, "listed an alternative whose repos leave this one out: " + out
+        (pol / ".kip" / "config.json").write_text(json.dumps({"workflow": {"skills": {"implement": {
+            "alternatives": {"repo-skill": {"instruction": "x"}}}}}}))
+        assert "allowlist for this machine" in alt("edit", "sk7")[1]
+        (pol / ".kip" / "config.json").write_text('{"workflow": {"stages": [], "worktrees": "off"}}')
+        (alt_home / "config.json").write_text(json.dumps({"workflow": {"skills": {"implement": {
+            "alternatives": {"acme-implement": {"context": "no instruction"}}}}}}))
+        assert "workflow.skills must map" in alt("edit", "sk7")[1]
+        (alt_home / "config.json").write_text(json.dumps({"workflow": {"skills": {"implement": {
+            "alternatives": {"acme-implement": {"instruction": "x", "repos": "pol"}}}}}}))
+        assert "workflow.skills must map" in alt("edit", "sk7")[1], "repos as a string wasn't refused"
         (pol / "tidy-me.txt").unlink()
         # Codex: its real hook payloads (codex-hooks.json, /repo standing for this repo) through the gate, logged as
         # host codex. Edits come as apply_patch; skills as `$name` in a prompt or a SKILL.md read in any shell command.
