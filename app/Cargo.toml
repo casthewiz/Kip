@@ -12,5 +12,8 @@ tao = "=0.37.2"
 tray-icon = "=0.26.1"
 wry = "=0.57.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] } # already in the lock, via tray-icon
+
 [profile.release]
 strip = true
