@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -102,13 +102,29 @@ if Path(__file__).with_name("fail").exists():
 target = Path(sys.argv[sys.argv.index("--target-dir") + 1]) / "release"
 target.mkdir(parents=True, exist_ok=True)
 (target / "kip-app").write_text("binary")
+(target / "kip-app.exe").write_text("binary")
+for arch in ("x64", "arm64", "x86"):  # what webview2-com-sys leaves in a GNU build
+    dll = target / "build" / "webview2-com-sys-0" / "out" / arch / "WebView2Loader.dll"
+    dll.parent.mkdir(parents=True, exist_ok=True)
+    dll.write_text(arch)
+"""
+FAKE_SHELL = r"""
+import os, sys, winreg
+from pathlib import Path
+try:  # the old pythonw shell's --quit, recording whether install had switched the Run key yet
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+        run = winreg.QueryValueEx(k, os.environ["KIP_APP_RUN_VALUE"])[0]
+except FileNotFoundError:
+    run = None
+Path(os.environ["USERPROFILE"], "quit").write_text(repr((sys.argv[1:], run)))
 """
 
 
 def check_app():
     """kip-app: install builds it with cargo into a target dir outside the dashboard copy, skips cargo when app/ is
     unchanged, and points a login entry at the built binary; without cargo, or when the build fails, install still
-    succeeds and says why. Windows copies the pythonw shell instead and sets the HKCU Run key. Uninstall removes it."""
+    succeeds and says why. On Windows the login entry is the HKCU Run key, set after quitting the old pythonw shell,
+    with WebView2Loader.dll beside the exe. Uninstall removes it."""
     with tempfile.TemporaryDirectory() as tmp:
         bin_, empty, home = Path(tmp, "bin"), Path(tmp, "empty"), Path(tmp, "home")
         bin_.mkdir()
@@ -183,15 +199,31 @@ def check_app():
                 except FileNotFoundError:
                     return None
 
-            shell = home / ".kip" / "dashboard" / "app" / "windows"
-            out = kip("install", "--host", "claude-code")
-            assert f"starts at login: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{run}" in out, out
-            pythonw = Path(sys.executable).with_name("pythonw.exe")
-            assert value() == subprocess.list2cmdline([str(pythonw), str(shell / "kip_app.pyw")]), value()
-            assert str(ROOT) not in value() and pythonw.exists() and calls() == 0
-            assert sorted(p.name for p in shell.glob("kip*")) == sorted(p.name for p in (ROOT / "app" / "windows").glob("kip*"))
-            assert doctor() == "  starts at login", doctor()
-            assert "removed HKCU" in kip("uninstall", "--host", "claude-code") and value() is None and not shell.exists()
+            try:
+                exe, shell = binary.with_name("kip-app.exe"), home / ".kip" / "dashboard" / "app" / "windows"
+                shell.mkdir(parents=True)
+                (shell / "kip_app.pyw").write_text(FAKE_SHELL, encoding="utf-8")
+                out = kip("install", "--host", "claude-code")
+                assert f"built {exe}" in out and calls() == 1, out
+                assert f"starts at login: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{run}" in out, out
+                assert value() == subprocess.list2cmdline([str(exe)]) and str(ROOT) not in value(), value()
+                arch = {"AMD64": "x64", "ARM64": "arm64"}.get(os.environ.get("PROCESSOR_ARCHITECTURE"), "x86")
+                assert (exe.parent / "WebView2Loader.dll").read_text() == arch
+                assert (home / "quit").read_text() == repr((["--quit"], None)), (home / "quit").read_text()
+                assert not shell.exists() and "quit the pythonw shell" in out, out
+                assert f"up to date: {exe}" in kip("install", "--host", "claude-code") and calls() == 1
+                assert doctor() == "  starts at login", doctor()
+                assert "removed HKCU" in kip("uninstall", "--host", "claude-code") and value() is None
+                assert not binary.parent.parent.exists()
+                out = py("kip.install_app('win32')", PATH=str(empty))
+                assert "skipped: cargo not found; install Rust" in out and value() is None, out
+                (bin_ / "fail").touch()
+                out = kip("install", "--host", "claude-code")
+                assert "skipped: cargo build failed (error: linking with `cc` failed)" in out and value() is None, out
+            finally:  # an interrupted run still leaves no KipTest value behind
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k, \
+                        suppress(FileNotFoundError):
+                    winreg.DeleteValue(k, run)
         else:
             entry = home / ("Library/LaunchAgents/com.kip.app.plist" if sys.platform == "darwin"
                             else ".config/autostart/kip-app.desktop")
