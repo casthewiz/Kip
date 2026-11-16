@@ -173,6 +173,7 @@ dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoo
 </main>
 <script>
 const STAGES = __STAGES__;  // receipt.py serve fills in its STAGES
+const VERSION = __VERSION__;  // and a hash of this file as it loaded it
 const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "prompt", response: "reply", ask: "approval", resume: "resumed" };
 const fromHash = key => decodeURIComponent((location.hash.match(new RegExp(key + "=([^&]+)")) || [])[1] || "");
 let rows = [], selected = fromHash("session"), events = [];
@@ -526,7 +527,13 @@ function soon() { clearTimeout(pending); pending = setTimeout(refresh, 300); }
 
 function connect() {
   const es = new EventSource("/stream");
-  es.onopen = () => { $("conn").classList.add("live"); $("connText").textContent = "live"; refresh(); };
+  es.onopen = async () => {
+    $("conn").classList.add("live"); $("connText").textContent = "live";
+    // a server restarted with a changed page (kip.py install) serves it on reload; this tab still runs the old one
+    const now = await fetch("/api/status").then(r => r.json()).catch(() => ({}));
+    if (now.version && now.version !== VERSION) return location.reload();
+    refresh();
+  };
   es.onerror = () => { $("conn").classList.remove("live"); $("connText").textContent = "reconnecting"; };
   es.onmessage = m => {
     let e; try { e = JSON.parse(m.data); } catch (_) { return; }

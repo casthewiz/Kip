@@ -2146,7 +2146,9 @@ def cmd_serve(a):
     import queue
     import threading
     import time
-    page = Path(__file__).resolve().with_name("dashboard.html").read_text(encoding="utf-8").replace("__STAGES__", json.dumps(STAGES))
+    raw = Path(__file__).resolve().with_name("dashboard.html").read_bytes()
+    version = hashlib.sha256(raw).hexdigest()[:12]  # an open page reloads when a restarted server's differs
+    page = raw.decode("utf-8").replace("__STAGES__", json.dumps(STAGES)).replace("__VERSION__", json.dumps(version))
     MASCOT = Path(__file__).resolve().parents[3] / "assets" / "mascot"
     EVENTS.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)  # outside any repo: verdicts in a long-lived server mustn't judge runs against one checkout's tree
@@ -2244,6 +2246,7 @@ def cmd_serve(a):
             self.send_response(code)
             self.send_header("Content-Type", f"{ctype}; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")  # a reload after a version change must get the new page
             self.end_headers()
             self.wfile.write(data)
 
@@ -2281,7 +2284,7 @@ def cmd_serve(a):
                     snapshot = copy.deepcopy({k: r for k, r in rows.items()
                                               if datetime.datetime.fromisoformat(r["last"]) > since})
                 with reading:
-                    body = json.dumps(status(finish(snapshot)))
+                    body = json.dumps({**status(finish(snapshot)), "version": version})
                 self.send(body)
             elif one:
                 with lock:
