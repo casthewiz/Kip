@@ -65,6 +65,28 @@ RULES_BLOCK = re.compile(r"<!-- kip rules: .*? -->\s*(.*?)\s*<!-- /kip rules -->
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
 
 
+def stage_skill(value, repo):
+    """A workflow.skills value as (policy, alternatives): a bare policy, or an object with a policy (required if
+    left out) and the alternatives this machine allows for the stage in this repo, {skill: {instruction, context,
+    repos}}; one without repos is allowed in every repo. Any of them settles the stage as Kip's skill does."""
+    if not isinstance(value, dict):
+        return value, {}
+    return value.get("policy", "required"), {n: a for n, a in value.get("alternatives", {}).items()
+                                             if repo in a.get("repos", [repo])}
+
+
+def valid_stage(value):
+    if not isinstance(value, dict):
+        return value in POLICIES
+    alts = value.get("alternatives", {})
+    return set(value) <= {"policy", "alternatives"} and value.get("policy", "required") in POLICIES \
+        and isinstance(alts, dict) and all(
+            isinstance(a, dict) and set(a) <= {"instruction", "context", "repos"}
+            and isinstance(a.get("instruction"), str) and a["instruction"].strip()
+            and isinstance(a.get("context", ""), str) and isinstance(a.get("repos", []), list)
+            and all(isinstance(r, str) and r for r in a.get("repos", [])) for a in alts.values())
+
+
 def toplevel():
     r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     return Path(r.stdout.strip()) if r.returncode == 0 else None
@@ -99,6 +121,11 @@ def load():
         unknown = set(layer) - set(SURFACES) - {"default_destination", "workflow", "dashboard"}
         if unknown:
             sys.exit(f"{path}: unknown surface kind {', '.join(sorted(unknown))}; valid: {', '.join(SURFACES)}")
+        stages = (layer.get("workflow") or {}).get("skills") or {}
+        if path != KIP_HOME / "config.json" and isinstance(stages, dict) and \
+                any(isinstance(v, dict) and "alternatives" in v for v in stages.values()):
+            sys.exit(f"{path}: workflow.skills alternatives are an allowlist for this machine; "
+                     f"set them in {KIP_HOME / 'config.json'}, not here")
         for entry in (layer.get("evidence") or {}).values():
             if entry and entry.get("doc"):
                 entry["doc"] = str((path.parent / entry["doc"]).resolve())
@@ -133,8 +160,10 @@ def validate(cfg):
     if cfg.get("workflow", {}).get("worktrees", "nudge") not in POLICIES:
         sys.exit("workflow.worktrees must be off, nudge or required")
     skills = cfg.get("workflow", {}).get("skills", {})
-    if not (isinstance(skills, dict) and set(skills) <= set(ASK) and all(v in POLICIES for v in skills.values())):
-        sys.exit(f"workflow.skills must map {', '.join(ASK)} to off, nudge or required")
+    if not (isinstance(skills, dict) and set(skills) <= set(ASK) and all(map(valid_stage, skills.values()))):
+        sys.exit(f"workflow.skills must map {', '.join(ASK)} to off, nudge or required, or to {{\"policy\": …, "
+                 "\"alternatives\": {\"<skill>\": {\"instruction\": \"when to pick it\", \"context\": \"…\", "
+                 "\"repos\": [\"<repo folder name>\"]}}}")
     worktree = cfg.get("workflow", {}).get("worktree", {})
     if not isinstance(worktree, dict):
         sys.exit("workflow.worktree must be an object, like {\"setup\": \"npm ci\"}")

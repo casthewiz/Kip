@@ -1445,8 +1445,8 @@ def session_skills(sid):
 
 def skills_due(hook, stages):
     """What this session still owes of workflow.skills' stages: a required skill until it's used, a nudged one once.
-    A stage settled (used, or nudged) gets a nudge file, so later edits skip the log; config is read only once
-    a skill is missing."""
+    Kip's skill or an alternative this machine allows in this repo settles it. A stage settled (used, or nudged)
+    gets a nudge file, so later edits skip the log; config is read only once Kip's skill is missing."""
     sid = session_id(hook)
     todo = [s for s in stages if sid and not (NUDGES / f"{sid}.{s}").exists()]
     if not todo:
@@ -1458,12 +1458,18 @@ def skills_due(hook, stages):
     todo = [s for s in todo if SKILL_OF[s] not in used]
     if not todo:
         return ""
-    policy = kip.load().get("workflow", {}).get("skills", {})
-    due = [s for s in todo if policy.get(s) in ("nudge", "required")]
-    for s in due:
-        if policy[s] == "nudge":
+    cfg = kip.load().get("workflow", {}).get("skills", {})
+    asks = []
+    for s in todo:
+        policy, alts = kip.stage_skill(cfg.get(s), repo_name())
+        if used & set(alts):
             nudge_once(f"{sid}.{s}")
-    return f"kip: run {' and '.join(kip.ASK[s] for s in due)} first (workflow.skills)." if due else ""
+        elif policy in ("nudge", "required"):
+            if policy == "nudge":
+                nudge_once(f"{sid}.{s}")
+            asks.append(kip.ASK[s] + "".join(f" or `/{a}`" for a in alts)
+                        + (" (workflow.skills alternatives: pick by their instruction)" if alts else ""))
+    return f"kip: run {' and '.join(asks)} first (workflow.skills)." if asks else ""
 
 
 def with_due(due, blocked, msg):
@@ -1669,9 +1675,19 @@ def setup_reminder():
 
 
 def session_start(hook):
-    """Remember the code as the session found it (once per session), say where this branch's run stands,
-    and what setup is left."""
-    return "\n".join(filter(None, [run_status(hook), setup_reminder()]))
+    """Remember the code as the session found it (once per session), say where this branch's run stands, which
+    other skills this machine allows for its stages, and what setup is left."""
+    return "\n".join(filter(None, [run_status(hook), alternatives_note(), setup_reminder()]))
+
+
+def alternatives_note():
+    """The workflow.skills alternatives this machine allows in this repo, with their instruction and context, for
+    the agent to pick from per task."""
+    lines = [f"  {stage}: `/{name}`: {alt['instruction']}" + (f" Context: {alt['context']}" if alt.get("context") else "")
+             for stage, value in kip.load().get("workflow", {}).get("skills", {}).items()
+             for name, alt in kip.stage_skill(value, repo_name())[1].items()]
+    return ("kip: this machine allows other skills for some stages; each settles the stage as Kip's does. "
+            "Pick per task by its instruction, and say which you chose and why:\n" + "\n".join(lines)) if lines else ""
 
 
 def run_status(hook):

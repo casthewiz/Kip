@@ -32,7 +32,27 @@ the gate holds a session to, each `required`, `nudge` (once a session) or
 `off`: `decompose` (`kip-decompose`) and `implement` (`kip-messy-bun`) before
 its first edit in a repo, `decompose` and `tidy` (`kip-marie-kondo`) before a
 stop once it changed code (default `required` for all three). A skill
-counts once the session calls it or reads its `SKILL.md`. `workflow.loop`: how long a claim's [fix loop](../skills/verification/kip-receipts/SKILL.md#fix-loops)
+counts once the session calls it or reads its `SKILL.md`. A stage can also
+allow alternatives, an allowlist for this machine that only
+`~/.kip/config.json` may set (a repo's config that tries is refused), for
+codebases whose own harness knows their conventions better:
+
+```json
+{"workflow": {"skills": {"implement": {"policy": "required", "alternatives": {
+  "acme-implement": {"instruction": "Use for acme service changes that follow its module conventions; skip for tooling and docs.",
+                     "context": "Read docs/CONVENTIONS.md first; generate scaffolding with tools/gen, don't hand-write it.",
+                     "repos": ["acme-api", "acme-web"]}}}}}}
+```
+
+`repos` (optional) limits an alternative to repositories by their main
+checkout's folder name, worktrees included; without it, it's allowed in
+every repo. An alternative allowed in this repo settles the stage as Kip's
+skill does. Session start lists them with their `instruction` (when to pick
+it, required) and `context` (what to know using it), and the agent picks per
+task. Kip's tidy, review and receipts still
+judge the result. A repo can still change the stage's policy with
+`{"policy": "nudge"}`, which merges; a bare `"nudge"` replaces the object,
+alternatives and all. `workflow.loop`: how long a claim's [fix loop](../skills/verification/kip-receipts/SKILL.md#fix-loops)
 runs before it goes to a person: `attempts` after the first failure and
 `minutes` of wall-clock time since it (default `{"attempts": 3, "minutes": 10}`).
 `workflow.worktree.setup`: a command
