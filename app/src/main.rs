@@ -1,9 +1,8 @@
 //! kip-app: a window and tray icon around Kip's dashboard. Attaches to the `receipt.py serve` already listening on
 //! the dashboard port, or starts one and stops it again on Quit. The page is the server's own http://127.0.0.1
 //! URL, not a custom protocol: the server refuses any other Host. Polls its /api/status each second: the tray icon
-//! is Kip's mood, and a session newly waiting on approval or blocked at stop raises a notification. macOS and Linux only.
-#[cfg(windows)]
-compile_error!("kip-app's Windows shell is app/windows/kip_app.pyw: Smart App Control blocks binaries built locally");
+//! is Kip's mood, and a session newly waiting on approval or blocked at stop raises a notification.
+#![cfg_attr(windows, windows_subsystem = "windows")] // no console window of its own
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -41,6 +40,7 @@ enum UserEvent {
     Quit,
     Ready(Option<Child>, Result<(), String>),
     Status(Status),
+    #[cfg_attr(windows, allow(dead_code))] // see on_balloon_click
     Open(String),
 }
 
@@ -112,7 +112,43 @@ fn mood_icon(mood: &str) -> Vec<u8> {
     mascot_rgba(MOODS.iter().find(|(m, _)| *m == mood).unwrap_or(&MOODS[4]).1)
 }
 
+/// Windows: a balloon from the tray icon (Windows 10+ shows it as a toast). Shell_NotifyIcon wants the icon's uID,
+/// which tray-icon keeps private; each tray icon has a window of its own, so the uID that window accepts is ours.
+#[cfg(windows)]
+fn balloon(tray: &tray_icon::TrayIcon, title: &str, text: &str) {
+    use windows_sys::Win32::UI::Shell::{NIF_INFO, NIIF_LARGE_ICON, NIIF_USER, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW};
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = tray.window_handle();
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON; // the tray's own icon
+    let put = |dst: &mut [u16], s: &str| dst.iter_mut().rev().skip(1).rev().zip(s.encode_utf16()).for_each(|(d, c)| *d = c); // last stays NUL
+    put(&mut nid.szInfoTitle, title);
+    put(&mut nid.szInfo, text);
+    let _ = (1..=8).any(|uid| {
+        nid.uID = uid;
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 }
+    });
+}
+
+/// Windows: a click on the balloon reaches the tray's window as tray-icon's WM_USER_TRAYICON (6002 in 0.26.1) with
+/// NIN_BALLOONUSERCLICK, which tray-icon drops; this subclass catches it and sends Show, which opens `pending`.
+#[cfg(windows)]
+fn on_balloon_click(tray: &tray_icon::TrayIcon, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, NIN_BALLOONUSERCLICK, SetWindowSubclass};
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _: usize, data: usize) -> LRESULT {
+        if msg == 6002 && lp as u32 == NIN_BALLOONUSERCLICK {
+            let _ = unsafe { &*(data as *const tao::event_loop::EventLoopProxy<UserEvent>) }.send_event(UserEvent::Show);
+        }
+        unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
+    }
+    // the proxy is leaked: one per run, alive as long as the tray
+    unsafe { SetWindowSubclass(tray.window_handle(), Some(proc), 0x4b4950, Box::into_raw(Box::new(proxy)) as usize) };
+}
+
 /// One OS notification, off the event loop; a click on it sends Open(session) where the platform reports clicks.
+#[cfg(not(windows))]
 fn notify(proxy: tao::event_loop::EventLoopProxy<UserEvent>, title: &str, text: &str, session: String) {
     let (title, text) = (title.to_string(), text.to_string());
     thread::spawn(move || {
@@ -136,13 +172,21 @@ fn notify(proxy: tao::event_loop::EventLoopProxy<UserEvent>, title: &str, text: 
     });
 }
 
+/// A Command that opens no console window on Windows (this app has none for a console child to share).
+fn quiet(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
 /// KIP_PYTHON, else the first of python3/python that runs.
 fn python() -> Option<String> {
     if let Ok(p) = env::var("KIP_PYTHON") {
         return Some(p);
     }
     ["python3", "python"].into_iter().map(String::from).find(|p| {
-        Command::new(p).args(["-c", "import sys"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        quiet(p).args(["-c", "import sys"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
     })
@@ -158,7 +202,7 @@ fn connect(port: u16) -> (Option<Child>, Result<(), String>) {
     let script = root.join("skills/verification/kip-receipts/receipt.py");
     let Some(py) = python() else { return (None, Err("no Python found: set KIP_PYTHON".into())) };
     let log = kip_home().join("kip-app-server.log");
-    let mut cmd = Command::new(&py);
+    let mut cmd = quiet(&py);
     cmd.arg(&script).args(["serve", "--idle", "0", "--port", &port.to_string()]).stdin(Stdio::null()).stdout(Stdio::null());
     cmd.stderr(File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null()));
     for k in OWNERS {
@@ -302,6 +346,10 @@ fn main() {
                     .with_icon(tray_icon::Icon::from_rgba(icon.clone(), 32, 32).expect("tray icon"))
                     .build()
                     .ok();
+                #[cfg(windows)]
+                if let Some(t) = &tray {
+                    on_balloon_click(t, notify_proxy.clone());
+                }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => window.set_visible(false),
             Event::UserEvent(UserEvent::Show) => {
@@ -332,8 +380,15 @@ fn main() {
                     let (_, title, text) = NOTICE.iter().find(|(k, ..)| k == &kind.as_str()).expect("a NOTICE kind");
                     let more = if new.len() > 1 { format!(" (+{} more)", new.len() - 1) } else { String::new() };
                     let short: String = id.chars().take(8).collect();
-                    pending = cfg!(target_os = "macos").then(|| id.clone());
-                    notify(notify_proxy.clone(), title, &format!("{short} {text}{more}"), id.clone());
+                    let body = format!("{short} {text}{more}");
+                    // the tray's next click opens it, where a click on the notification can't reach us
+                    pending = cfg!(any(target_os = "macos", windows)).then(|| id.clone());
+                    #[cfg(windows)]
+                    if let Some(t) = &tray {
+                        balloon(t, title, &body);
+                    }
+                    #[cfg(not(windows))]
+                    notify(notify_proxy.clone(), title, &body, id.clone());
                 }
             }
             Event::UserEvent(UserEvent::Ready(c, ok)) => {

@@ -43,11 +43,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        if: runner.os == 'Windows'
-        with:
-          python-version: "3.x"
-      # kip-app: the Rust shell on macOS and Linux, the pythonw shell on Windows (no Rust there, by design).
       # System packages the pinned wry/tao/tray-icon need to build on Linux (docs/kip-app needs the same list):
       # webkit2gtk-4.1 and libsoup-3.0 (wry), GTK 3 (tao, muda), and an appindicator library, which
       # libappindicator-sys loads at run time (Ayatana's or the original).
@@ -57,7 +52,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev
       - uses: actions/cache@v4
-        if: runner.os != 'Windows'
         with:
           path: |
             ~/.cargo/registry
@@ -66,9 +60,8 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('app/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       - name: cargo build
-        if: runner.os != 'Windows'
         working-directory: app
         run: cargo build --locked
-      - name: Windows smoke test
-        if: runner.os == 'Windows'
-        run: python app/windows/smoke_test.py
+      - name: cargo test
+        working-directory: app
+        run: cargo test --locked
