@@ -1,9 +1,8 @@
 //! kip-app: a window and tray icon around Kip's dashboard. Attaches to the `receipt.py serve` already listening on
 //! the dashboard port, or starts one and stops it again on Quit. The page is the server's own http://127.0.0.1
 //! URL, not a custom protocol: the server refuses any other Host. Polls its /api/status each second: the tray icon
-//! is Kip's mood, and a session newly waiting on approval or blocked at stop raises a notification. macOS and Linux only.
-#[cfg(windows)]
-compile_error!("kip-app's Windows shell is app/windows/kip_app.pyw: Smart App Control blocks binaries built locally");
+//! is Kip's mood, and a session newly waiting on approval or blocked at stop raises a notification.
+#![cfg_attr(windows, windows_subsystem = "windows")] // no console window of its own
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -124,6 +123,9 @@ fn notify(proxy: tao::event_loop::EventLoopProxy<UserEvent>, title: &str, text: 
             let _ = Command::new("osascript").args(["-e", &script]).status();
             return;
         }
+        if cfg!(windows) {
+            return; // messy-bun: no Windows notification yet; the tray icon shows the mood
+        }
         // libnotify 0.7.10+ prints the action clicked; an older notify-send refuses --action, so it's sent plain.
         match Command::new("notify-send").args(["-a", "Kip", "--action=default=Open", "--wait", &title, &text]).output() {
             Ok(o) if o.status.success() => {
@@ -136,13 +138,21 @@ fn notify(proxy: tao::event_loop::EventLoopProxy<UserEvent>, title: &str, text: 
     });
 }
 
+/// A Command that opens no console window on Windows (this app has none for a console child to share).
+fn quiet(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
 /// KIP_PYTHON, else the first of python3/python that runs.
 fn python() -> Option<String> {
     if let Ok(p) = env::var("KIP_PYTHON") {
         return Some(p);
     }
     ["python3", "python"].into_iter().map(String::from).find(|p| {
-        Command::new(p).args(["-c", "import sys"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        quiet(p).args(["-c", "import sys"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
     })
@@ -158,7 +168,7 @@ fn connect(port: u16) -> (Option<Child>, Result<(), String>) {
     let script = root.join("skills/verification/kip-receipts/receipt.py");
     let Some(py) = python() else { return (None, Err("no Python found: set KIP_PYTHON".into())) };
     let log = kip_home().join("kip-app-server.log");
-    let mut cmd = Command::new(&py);
+    let mut cmd = quiet(&py);
     cmd.arg(&script).args(["serve", "--idle", "0", "--port", &port.to_string()]).stdin(Stdio::null()).stdout(Stdio::null());
     cmd.stderr(File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null()));
     for k in OWNERS {
