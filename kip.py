@@ -12,9 +12,8 @@
                                         re-running install refreshes; KIP_DASHBOARD=0 skips it. A user
                                         install also adds git hooks to this repo that re-run it after a
                                         commit, merge, checkout, or rebase; KIP_GIT_HOOKS=0 skips them.
-                                        A user install also sets kip-app (app/) to start at login: built
-                                        with cargo on macOS and Linux (skipped, saying why, without it),
-                                        app/windows/kip_app.pyw under pythonw on Windows; KIP_APP=0 skips it.
+                                        A user install also builds kip-app (app/) with cargo and sets it to
+                                        start at login (skipped, saying why, without cargo); KIP_APP=0 skips it.
                                         A user install refuses to run from a linked worktree
                                         (KIP_INSTALL_FROM_WORKTREE=1 overrides)
   kip.py worktree new NAME [--base REF] [--parent RUN --unit N]
@@ -635,10 +634,9 @@ def uninstall_service():
 
 
 def app_command(platform=sys.platform):
-    """What kip-app's login entry runs: the copied shell under pythonw on Windows, else the binary cargo built."""
-    if platform == "win32":
-        return [str(Path(sys.executable).with_name("pythonw.exe")), str(APP / "app" / "windows" / "kip_app.pyw")]
-    return [str(APP_TARGET / "release" / "kip-app")]
+    """What kip-app's login entry runs: the binary cargo built. It finds Python itself (KIP_PYTHON, else python3 or
+    python on PATH, which skips the Store's python3 alias since that fails to run)."""
+    return [str(APP_TARGET / "release" / ("kip-app.exe" if platform == "win32" else "kip-app"))]
 
 
 def login_file(platform=sys.platform):
@@ -683,9 +681,9 @@ def app_stamp():
     return hashlib.sha256(b"".join(f.relative_to(ROOT).as_posix().encode() + f.read_bytes() for f in files)).hexdigest()
 
 
-def build_app():
+def build_app(platform=sys.platform):
     """Build kip-app into APP_TARGET with cargo unless it's current; what happened."""
-    binary, stamp = APP_TARGET / "release" / "kip-app", APP_TARGET / "kip-app.stamp"
+    binary, stamp = Path(app_command(platform)[0]), APP_TARGET / "kip-app.stamp"
     if binary.exists() and stamp.is_file() and stamp.read_text(encoding="utf-8") == app_stamp():
         return f"up to date: {binary}"
     cargo = shutil.which("cargo")
@@ -700,27 +698,36 @@ def build_app():
     if r.returncode or not binary.exists():
         why = (r.stderr or r.stdout).strip().splitlines()
         return f"cargo build failed ({why[-1] if why else f'exit {r.returncode}'})"
+    # Windows GNU builds load WebView2Loader.dll from beside the exe (MSVC links it in and leaves none here)
+    arch = {"AMD64": "x64", "ARM64": "arm64"}.get(os.environ.get("PROCESSOR_ARCHITECTURE"), "x86")
+    dll = max((APP_TARGET / "release" / "build").glob(f"webview2-com-sys-*/out/{arch}/WebView2Loader.dll"),
+              key=lambda p: p.stat().st_mtime, default=None)
+    if dll:
+        shutil.copy2(dll, binary.parent)
     stamp.write_text(app_stamp(), encoding="utf-8")
     return f"built {binary}"
 
 
+def quit_shell():
+    """Quit the pythonw shell kip-app replaces on Windows, and remove its copy (from before kip-app built there)."""
+    shell, pythonw = APP / "app" / "windows" / "kip_app.pyw", Path(sys.executable).with_name("pythonw.exe")
+    if shell.exists() and pythonw.exists():
+        subprocess.run([str(pythonw), str(shell), "--quit"])
+        shutil.rmtree(APP, ignore_errors=True)  # else kip-app would serve this stale copy, which install no longer refreshes
+        print(f"  quit the pythonw shell it replaces and removed {APP}")
+
+
 def install_app(platform=sys.platform):
-    """kip-app, started at next login: built by cargo (macOS, Linux), or the pythonw shell copied with the dashboard
-    (Windows, where Smart App Control blocks unsigned local builds). A skip says why and never fails install."""
+    """kip-app, built by cargo and started at next login. A skip says why and never fails install."""
     if os.environ.get("KIP_APP") == "0":
         return
     print("kip-app")
-    if platform == "win32":
-        copy_dashboard()
-        note = f"copied to {APP / 'app' / 'windows'}"
-    else:
-        note = build_app()
-    exe = Path(app_command(platform)[0])
-    if not exe.exists():
-        why = note if platform != "win32" else f"no {exe.name} beside this Python"
-        return print(f"  skipped: {why} (KIP_APP=0 stops trying)")
+    note = build_app(platform)
+    if not Path(app_command(platform)[0]).exists():
+        return print(f"  skipped: {note} (KIP_APP=0 stops trying)")
     print(f"  {note}")
     if platform == "win32":
+        quit_shell()
         login_value(app_command(platform))
         where = f"HKCU\\{RUN_KEY}\\{RUN_VALUE}"
     else:
@@ -733,13 +740,12 @@ def install_app(platform=sys.platform):
 def uninstall_app(platform=sys.platform):
     if platform == "win32":
         gone = login_value() and f"HKCU\\{RUN_KEY}\\{RUN_VALUE}"
-        shutil.rmtree(APP, ignore_errors=True)  # its copy of the shell; Windows has no dashboard service using it
     else:
         path = login_file(platform)[0]
         gone = path.exists() and str(path)
         if gone:
             path.unlink()
-        shutil.rmtree(APP_TARGET, ignore_errors=True)
+    shutil.rmtree(APP_TARGET, ignore_errors=True)
     if gone:
         print(f"kip-app\n  removed {gone}")
 
