@@ -6,6 +6,7 @@ rust-version = "1.90"
 description = "Native window and tray around Kip's dashboard (receipt.py serve)"
 license = "MIT"
 publish = false
+build = "src/build.rs" # in src/, which kip.py install's app_stamp hashes
 
 [dependencies]
 tao = "=0.37.2"
