@@ -2120,6 +2120,17 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         assert refs() == kept, "sweeping the event log lost refs"
         shutil.rmtree(events)
         swept.rename(events)
+        # A declared plan or design doc is a ref of the repo, tied to the branch's run; declaring it again adds no row.
+        for _ in range(2):
+            assert rc("ref", "https://www.notion.so/plan1", "--kind", "plan", extra_env=seg) == \
+                f"plan: https://www.notion.so/plan1 · run {second.name}"
+        rc("ref", "https://www.figma.com/design/k1", "--kind", "design", "--run", first.name, extra_env=seg)
+        rc("ref", "notion.so/plan1", "--kind", "plan", ok=False, extra_env=seg)
+        rc("ref", "https://www.notion.so/plan1", "--kind", "spec", ok=False, extra_env=seg)
+        with contextlib.closing(sqlite3.connect(Path(seg["KIP_RECEIPTS_DIR"], "kip.db"))) as con:
+            assert sorted(con.execute("SELECT repo, session, run, kind, name, count FROM refs WHERE kind IN ('plan', 'design')")) == [
+                (repo.name, "", first.name, "design", "https://www.figma.com/design/k1", 1),
+                (repo.name, "", second.name, "plan", "https://www.notion.so/plan1", 1)]
         sh("git", "checkout", "-q", "-")
         sh("git", "checkout", "-q", "-")
         port = free_port()

@@ -119,6 +119,14 @@ where kip-receipts requires it. The run records the code as it is now; once
 work lands, the host's hooks won't let the session end while any of these
 claims is unaddressed. If the user changes the plan, start a new run.
 
+Then one `ref` per doc the plan stands on (a Notion spec, a Figma file), so
+the repo keeps where its plans and designs live:
+
+```bash
+python3 $R ref https://www.notion.so/<page> --kind plan
+python3 $R ref https://www.figma.com/design/<file> --kind design
+```
+
 **Parallel units go in worktrees.** Each unit marked parallel runs in its own
 linked worktree, on its own branch, so units don't step on each other's
 files, dev servers, or uncommitted work. Start one with the host's own

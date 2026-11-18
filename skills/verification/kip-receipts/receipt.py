@@ -14,6 +14,7 @@
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
   receipt.py accept CLAIM [--reason TEXT]                   the user takes an unverified claim as it stands
+  receipt.py ref URL --kind plan|design                     record a doc the work is planned or designed against
   receipt.py reopen CLAIM [--reason TEXT]                   a person gives a claim whose fix loop closed a new one
   receipt.py retire CLAIM --check EVIDENCE --reason TEXT    a person sets aside a check that no longer speaks for
                                                             the claim; its runs stop deciding the verdict
@@ -749,6 +750,20 @@ def cmd_accept(a):
         if not c["unverified"]:
             sys.exit(f"{c['id']} isn't marked unverified; only an unverified claim can be accepted")
         c["accepted"], c["accepted_by"] = a.reason or True, writer()
+
+
+def cmd_ref(a):
+    """A doc the work is planned or designed against (a Notion page, a Figma file): a ref of the repo, tied to this
+    branch's run when it has one. Declaring it again only moves its last-seen time."""
+    if not re.fullmatch(r"https?://\S+", a.url):
+        sys.exit(f"not a URL: {a.url}")
+    d = run_path(a.run) if a.run else branch_run()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    with tx() as con:
+        con.execute("INSERT INTO refs VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?) ON CONFLICT (repo, session, kind, name) "
+                    "DO UPDATE SET run = coalesce(excluded.run, run), last = excluded.last",
+                    (repo_name(), writer() or "", d and d.name, a.kind, a.url, now, now))
+    print(f"{a.kind}: {a.url}" + (f" · run {d.name}" if d else ""))
 
 
 def cmd_reopen(a):
@@ -2560,6 +2575,11 @@ def main():
     s.add_argument("claim")
     s.add_argument("--reason", help="why it's fine as it stands")
     s.set_defaults(fn=cmd_accept)
+
+    s = sub.add_parser("ref", parents=[common])
+    s.add_argument("url")
+    s.add_argument("--kind", choices=["plan", "design"], required=True)
+    s.set_defaults(fn=cmd_ref)
 
     s = sub.add_parser("reopen", parents=[common])
     s.add_argument("claim")
