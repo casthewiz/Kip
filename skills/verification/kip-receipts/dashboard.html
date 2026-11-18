@@ -26,6 +26,7 @@ h1 { font-size: 16px; margin: 0; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .live .dot { background: var(--ok); }
 label.toggle { color: var(--dim); font-size: 12px; display: inline-flex; gap: 6px; align-items: center; }
+label.toggle[hidden] { display: none; }
 main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; min-height: calc(100vh - 53px); }
 #list { border-right: 1px solid var(--line); overflow-y: auto; }
 .card { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none;
@@ -162,7 +163,7 @@ dialog#zoom img { max-width: 96vw; max-height: 96vh; display: block; cursor: zoo
 <body>
 <header>
   <h1>Kip</h1>
-  <nav class="tabs" aria-label="View"><button id="tabSessions">Sessions</button><button id="tabRuns">Runs</button></nav>
+  <nav class="tabs" aria-label="View"><button id="tabSessions">Sessions</button><button id="tabRuns">Runs</button><button id="tabRefs">References</button></nav>
   <label class="toggle"><input type="checkbox" id="activeOnly"> <span id="filterText">Active only</span></label>
   <span class="conn" id="conn"><span class="dot"></span><span id="connText">connecting</span></span>
 </header>
@@ -177,6 +178,8 @@ const KIND = { tool: "tool", start: "start", stop: "stop", pr: "PR", prompt: "pr
 const fromHash = key => decodeURIComponent((location.hash.match(new RegExp(key + "=([^&]+)")) || [])[1] || "");
 let rows = [], selected = fromHash("session"), events = [];
 let runs = [], runSelected = fromHash("run"), view = runSelected || location.hash === "#runs" ? "runs" : "sessions";
+let refs = [], repoSelected = fromHash("repo");
+if (repoSelected || location.hash === "#refs") view = "refs";
 const $ = id => document.getElementById(id);
 
 function h(tag, attrs, ...kids) {
@@ -227,8 +230,11 @@ function mascot(m, size) {
 function renderList() {
   $("tabSessions").setAttribute("aria-pressed", view === "sessions");
   $("tabRuns").setAttribute("aria-pressed", view === "runs");
+  $("tabRefs").setAttribute("aria-pressed", view === "refs");
+  $("activeOnly").parentElement.hidden = view === "refs";
   $("filterText").textContent = view === "runs" ? "Needs attention" : "Active only";
   if (view === "runs") return renderRuns();
+  if (view === "refs") return renderRefs();
   const activeOnly = $("activeOnly").checked;
   const shown = rows.filter(r => !activeOnly || r.active || r.session === selected);
   $("list").replaceChildren(...(shown.length ? shown.map(r => h("button", {
@@ -284,6 +290,16 @@ let review = null;  // the run open in the review panel: { id, body, data }
 function tally(counts) {
   return h("span", { class: "tally" }, Object.entries(counts || {}).map(([v, n]) => h("span", { class: "v " + tone(v), title: v }, `${v.split(" ")[0]} ${n}`)));
 }
+
+// A ref: its kind, the page or file it names (a link when it's a web address), and how it was found.
+function refItem(x) {
+  return h("li", { title: x.name }, h("span", { class: "kindtag" }, x.kind),
+    h("span", { class: "grow" }, /^https?:\/\//.test(x.name) ? link(x.name, x.name) : x.name),
+    h("span", { class: "n" }, (x.via ? "via " + x.via + " · " : "") + "×" + x.count));
+}
+
+const refsSegment = d => (d.refs || []).length ? h("div", { class: "segments" }, h("div", { class: "segment wide" },
+  h("h3", {}, "References"), h("ul", {}, d.refs.map(refItem)))) : null;
 
 function segment(name, items, none) {
   return h("div", { class: "segment" }, h("h3", {}, name), items.length ? h("ul", {}, items) : h("p", { class: "none" }, none));
@@ -353,7 +369,7 @@ function renderReview() {
   const d = review.data, expanded = new Set(el.dataset.run === d.id ? [...el.querySelectorAll("details[open]")].map(x => x.dataset.claim) : []);
   el.dataset.run = d.id;
   el.replaceChildren(h("div", {}, h("p", { class: "meta" }, `run ${d.id} · ${d.level} · ${d.target || "commit " + (d.commit || "?").slice(0, 7)}`),
-    d.claims.length ? d.claims.map(c => claimItem(c, expanded.has(c.id))) : h("p", { class: "none" }, "No claims yet.")));
+    refsSegment(d), d.claims.length ? d.claims.map(c => claimItem(c, expanded.has(c.id))) : h("p", { class: "none" }, "No claims yet.")));
 }
 
 // Fetch a run for review; redraw only when it changed, so a playing video or an open claim survives live updates.
@@ -394,11 +410,12 @@ function renderDetail(full) {
 
 async function refresh() {
   const get = u => fetch(u).then(r => r.ok ? r.json() : null, () => null);  // one failing list never stalls the other
-  const [s, x] = await Promise.all([get("/api/sessions"), view === "runs" || selected ? get("/api/runs") : null]);
-  rows = s || rows; runs = x || runs;
+  const [s, x, f] = await Promise.all([get("/api/sessions"), view === "runs" || selected ? get("/api/runs") : null,
+    view === "refs" ? get("/api/refs") : null]);
+  rows = s || rows; runs = x || runs; refs = f || refs;
   try {
     renderList();
-    if (view === "runs") renderRunDetail(); else if (selected) renderDetail();
+    if (view === "runs") renderRunDetail(); else if (view === "refs") renderRepoRefs(); else if (selected) renderDetail();
   } catch (_) {}
 }
 
@@ -504,7 +521,7 @@ function renderUnits() {
   const expanded = new Set([...el.querySelectorAll("details[open]")].map(d => d.dataset.claim)), groups = new Map();
   for (const c of review.data.claims) groups.set(c.unit || "", [...(groups.get(c.unit || "") || []), c]);
   const order = [...groups.keys()].sort((a, b) => !a - !b || a.localeCompare(b, undefined, { numeric: true }));
-  el.replaceChildren(...(order.length ? order.map(u => [h("h3", {}, u ? "Unit " + u : "No unit"), groups.get(u).map(c => claimItem(c, expanded.has(c.id)))]).flat(2)
+  el.replaceChildren(...[refsSegment(review.data)].filter(Boolean), ...(order.length ? order.map(u => [h("h3", {}, u ? "Unit " + u : "No unit"), groups.get(u).map(c => claimItem(c, expanded.has(c.id)))]).flat(2)
     : [h("p", { class: "none" }, "No claims yet.")]));
 }
 
@@ -517,6 +534,38 @@ async function selectRun(id) {
   renderRunDetail();
   await openRun(id);
   if (matchMedia("(max-width: 760px)").matches) $("detail").scrollIntoView({ behavior: "smooth" });
+}
+
+const refGroup = r => r.kind === "plan" || r.kind === "design" ? "plans" : r.kind === "issue" ? "issues" : "sources";
+
+// Repos with what their sessions and plans pointed at, kept in kip.db past the session log's 14 days.
+function renderRefs() {
+  $("list").replaceChildren(...(refs.length ? refs.map(x => {
+    const n = { plans: 0, issues: 0, sources: 0 };
+    x.refs.forEach(r => n[refGroup(r)]++);
+    return h("button", { class: "card", "aria-current": x.repo === repoSelected ? "true" : "false", onclick: () => selectRepo(x.repo) },
+      h("div", { class: "grow" }, h("div", { class: "row" }, h("div", { class: "grow title" }, title(x))),
+        h("div", { class: "row" }, h("span", { class: "sub grow" }, `${n.plans} plans and designs · ${n.issues} issues · ${n.sources} sources`))));
+  }) : [h("p", { class: "empty" }, "No references yet. Each session's stop keeps its issues and sources here.")]));
+}
+
+function renderRepoRefs() {
+  const x = refs.find(r => r.repo === repoSelected);
+  if (!x) { $("detail").replaceChildren(h("p", { class: "empty" }, repoSelected ? "No references for that repo." : "Pick a repo.")); return; }
+  const of = g => x.refs.filter(r => refGroup(r) === g);
+  const item = r => { const li = refItem(r); li.append(h("span", { class: "when", "data-at": r.last }, ago(r.last))); return li; };
+  $("detail").replaceChildren(h("h2", {}, title(x)), h("div", { class: "segments" },
+    segment("Plans and designs", of("plans").map(item), "None declared. kip-decompose records them with `receipt.py ref`."),
+    segment("Issues", of("issues").map(item), "No tracker issue named yet."),
+    Object.assign(segment("Sources", of("sources").map(item), "No sources yet."), { className: "segment wide" })));
+}
+
+function selectRepo(repo) {
+  view = "refs";
+  repoSelected = repo;
+  history.replaceState(null, "", "#repo=" + encodeURIComponent(repo));
+  renderList();
+  renderRepoRefs();
 }
 
 $("zoom").addEventListener("click", () => $("zoom").close());
@@ -546,10 +595,12 @@ function show(next) {
   view = next;
   $("activeOnly").checked = recall(filterKey()) === "1";
   if (next === "runs") { history.replaceState(null, "", runSelected ? "#run=" + encodeURIComponent(runSelected) : "#runs"); refresh(); }
+  else if (next === "refs") { history.replaceState(null, "", repoSelected ? "#repo=" + encodeURIComponent(repoSelected) : "#refs"); refresh(); }
   else if (selected) select(selected); else { history.replaceState(null, "", "#"); renderList(); renderDetail(true); }
 }
 $("tabSessions").addEventListener("click", () => show("sessions"));
 $("tabRuns").addEventListener("click", () => show("runs"));
+$("tabRefs").addEventListener("click", () => show("refs"));
 $("activeOnly").checked = recall(filterKey()) === "1";
 $("activeOnly").addEventListener("change", () => { remember(filterKey(), $("activeOnly").checked ? "1" : "0"); renderList(); });
 setInterval(() => document.querySelectorAll("[data-at]").forEach(el => el.textContent = ago(el.dataset.at)), 15000);

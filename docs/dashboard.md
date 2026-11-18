@@ -59,6 +59,11 @@ splits what it touched into segments:
   every claim's verdict, its evidence (command, exit, excerpt, commit, log and
   patch), and its screenshots and videos inline.
 
+The **References** tab lists each repo's refs from `kip.db`, each page or link
+once however many sessions used it: declared plans and designs, then issues,
+then sources, newest first. A run's review panel lists the refs tied to it the
+same way.
+
 ## Runs
 
 The **Runs** tab lists every receipts run, newest first, for triage: whether

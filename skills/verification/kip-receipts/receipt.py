@@ -2043,7 +2043,10 @@ def run_detail(rec):
     def url(f):
         return f and f"/runs/{rec['id']}/{f['path']}"
 
-    return {**run_summary(rec), "commit": rec.get("commit"), "claims": [
+    refs = db().execute(f"SELECT kind, name, max(via), sum(count), max(last) FROM refs WHERE run = ? GROUP BY kind, name "
+                        f"ORDER BY {REF_ORDER}", (rec["id"],))
+    return {**run_summary(rec), "commit": rec.get("commit"), "refs": [
+        {"kind": k, "name": n, "via": v, "count": c, "last": t} for k, n, v, c, t in refs], "claims": [
         {"id": c["id"], "text": c["text"], "unit": c.get("unit"), "stage": c.get("stage"),
          "delegated": delegate(c) and c["delegated"], "delegated_from": c.get("delegated_from"),
          "provider": c.get("provider") or "generic", "verdict": verdict(c, rec), "unverified": c.get("unverified"),
@@ -2054,6 +2057,21 @@ def run_detail(rec):
                       for e in c["evidence"]],
          "files": [{"type": f["type"], "name": Path(f["path"]).name, "url": url(f)} for f in c["files"]]}
         for c in rec["claims"]]}
+
+
+REF_ORDER = "kind NOT IN ('plan', 'design'), kind != 'issue', max(last) DESC"  # declared, issues, sources; newest first
+
+
+def refs_by_repo():
+    """Every repo's refs, each name once across its sessions: declared plans and designs, then issues, then
+    sources, newest first within each."""
+    out = {}
+    for repo, kind, name, via, count, last, runs, sessions in db().execute(
+            "SELECT repo, kind, name, max(via), sum(count), max(last), group_concat(DISTINCT run), count(DISTINCT session) "
+            f"FROM refs GROUP BY repo, kind, name ORDER BY repo, {REF_ORDER}"):
+        out.setdefault(repo, []).append({"kind": kind, "name": name, "via": via, "count": count, "last": last,
+                                         "runs": sorted(runs.split(",")) if runs else [], "sessions": sessions})
+    return [{"repo": repo, "refs": refs} for repo, refs in out.items()]
 
 
 def writes(rec):
@@ -2322,6 +2340,10 @@ def cmd_serve(a):
                             seen.setdefault(Path(p).name, set()).add(sid)
                 with reading:
                     body = json.dumps(triage(seen), ensure_ascii=False)
+                self.send(body)
+            elif path == "/api/refs":
+                with reading:
+                    body = json.dumps(refs_by_repo(), ensure_ascii=False)
                 self.send(body)
             elif path == "/api/sessions":
                 with lock:

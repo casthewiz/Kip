@@ -2154,6 +2154,17 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
                 ("web", "https://www.notion.so/11112222333344445555666677778888", 1),
                 ("web", "https://www.notion.so/40ee6112fa5081e09726e9f6c7e1bf63", 1),
                 ("web", "https://www.notion.so/aaaabbbbccccddddeeeeffff00001111", 1)], row["sources"]
+            # References: each repo's refs past the session log, declared plans and designs first, then issues, then
+            # sources; and a run's own refs in its review panel, declared first.
+            mine = next(x["refs"] for x in json.loads(get(port, "/api/refs")) if x["repo"] == repo.name)
+            kinds = [x["kind"] for x in mine]
+            assert kinds[:2] == ["plan", "design"] or kinds[:2] == ["design", "plan"], kinds
+            assert kinds.index("issue") < min(kinds.index(k) for k in ("mcp", "web", "search", "link")), kinds
+            plan = next(x for x in mine if x["kind"] == "plan")
+            assert (plan["name"], plan["runs"], plan["sessions"]) == ("https://www.notion.so/plan1", [second.name], 1), plan
+            assert ("web", "https://www.notion.so/40ee6112fa5081e09726e9f6c7e1bf63") in [(x["kind"], x["name"]) for x in mine]
+            assert [(x["kind"], x["name"]) for x in json.loads(get(port, f"/api/runs/{first.name}"))["refs"]] == \
+                [("design", "https://www.figma.com/design/k1"), ("web", "https://docs.test/early")]
             detail = json.loads(get(port, f"/api/runs/{first.name}"))
             c1 = detail["claims"][0]
             assert c1["verdict"] == "✅ verified" and c1["provider"] == "frontend", c1
