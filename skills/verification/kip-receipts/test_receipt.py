@@ -2128,9 +2128,9 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         rc("ref", "notion.so/plan1", "--kind", "plan", ok=False, extra_env=seg)
         rc("ref", "https://www.notion.so/plan1", "--kind", "spec", ok=False, extra_env=seg)
         with contextlib.closing(sqlite3.connect(Path(seg["KIP_RECEIPTS_DIR"], "kip.db"))) as con:
-            declared = sorted(con.execute("SELECT repo, session, run, kind, name, count FROM refs WHERE kind IN ('plan', 'design')"))
-            assert declared == [(repo.name, "", first.name, "design", "https://www.figma.com/design/k1", 1),
-                                (repo.name, "", second.name, "plan", "https://www.notion.so/plan1", 1)], declared
+            declared = con.execute("SELECT repo, session, run, kind, name, count FROM refs WHERE kind IN ('plan', 'design')").fetchall()
+            assert sorted(declared) == sorted([(repo.name, "", first.name, "design", "https://www.figma.com/design/k1", 1),
+                                               (repo.name, "", second.name, "plan", "https://www.notion.so/plan1", 1)]), declared
         sh("git", "checkout", "-q", "-")
         sh("git", "checkout", "-q", "-")
         port = free_port()
