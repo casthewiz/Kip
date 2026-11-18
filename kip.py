@@ -48,6 +48,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -710,10 +711,46 @@ def app_stamp():
     return hashlib.sha256(b"".join(f.relative_to(ROOT).as_posix().encode() + f.read_bytes() for f in files)).hexdigest()
 
 
+def app_current(platform=sys.platform):
+    stamp = APP_TARGET / "kip-app.stamp"
+    return Path(app_command(platform)[0]).exists() and stamp.is_file() and stamp.read_text(encoding="utf-8") == app_stamp()
+
+
+def dashboard_stale():
+    """Whether the dashboard answering on its port serves another dashboard.html than this checkout's (it reads the
+    file once, at start); False when none answers."""
+    import urllib.request
+    port = os.environ.get("KIP_DASHBOARD_PORT", "7377")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/api/status", timeout=2) as r:
+            served = json.loads(r.read()).get("version")
+    except (OSError, ValueError):
+        return False
+    return bool(served) and served != hashlib.sha256(RECEIPT.with_name("dashboard.html").read_bytes()).hexdigest()[:12]
+
+
+def quit_app(exe):
+    """Ask a running kip-app to quit (it stops the server it started), and wait until its exe is free to rebuild.
+    Whether one was running."""
+    try:
+        if subprocess.run([str(exe), "--quit"], timeout=10).returncode:
+            return False  # exit 1: none running
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    for _ in range(50):
+        try:
+            open(exe, "r+b").close()  # Windows won't open a running exe for writing
+            break
+        except PermissionError:
+            time.sleep(0.2)
+    return True
+
+
 def build_app(platform=sys.platform):
     """Build kip-app into APP_TARGET with cargo unless it's current; what happened."""
-    binary, stamp = Path(app_command(platform)[0]), APP_TARGET / "kip-app.stamp"
-    if binary.exists() and stamp.is_file() and stamp.read_text(encoding="utf-8") == app_stamp():
+    binary = Path(app_command(platform)[0])
+    if app_current(platform):
         return f"up to date: {binary}"
     cargo = shutil.which("cargo")
     if not cargo:
@@ -733,7 +770,7 @@ def build_app(platform=sys.platform):
               key=lambda p: p.stat().st_mtime, default=None)
     if dll:
         shutil.copy2(dll, binary.parent)
-    stamp.write_text(app_stamp(), encoding="utf-8")
+    (APP_TARGET / "kip-app.stamp").write_text(app_stamp(), encoding="utf-8")
     return f"built {binary}"
 
 
@@ -744,6 +781,8 @@ def quit_shell():
         subprocess.run([str(pythonw), str(shell), "--quit"])
         shutil.rmtree(APP, ignore_errors=True)  # else kip-app would serve this stale copy, which install no longer refreshes
         print(f"  quit the pythonw shell it replaces and removed {APP}")
+        return True
+    return False
 
 
 def install_app(platform=sys.platform):
@@ -751,14 +790,26 @@ def install_app(platform=sys.platform):
     if os.environ.get("KIP_APP") == "0":
         return
     print("kip-app")
+    exe = Path(app_command(platform)[0])
+    # Windows: a running kip-app locks its exe, and the server it started keeps the page it loaded, so it's quit
+    # first when either is out of date, and started again once installed.
+    running = platform == "win32" and (not app_current(platform) or dashboard_stale()) and quit_app(exe)
+    if running:
+        print("  quit the running kip-app")
     note = build_app(platform)
-    if not Path(app_command(platform)[0]).exists():
+    if not exe.exists():
         return print(f"  skipped: {note} (KIP_APP=0 stops trying)")
     print(f"  {note}")
     if platform == "win32":
-        quit_shell()
+        running = quit_shell() or running
         login_value(app_command(platform))
         where = f"HKCU\\{RUN_KEY}\\{RUN_VALUE}"
+        if running:
+            try:
+                subprocess.Popen([str(exe)], creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
+                print("  started it again")
+            except OSError as err:
+                print(f"  not started again ({err})")
     else:
         where, text = login_file(platform)
         where.parent.mkdir(parents=True, exist_ok=True)

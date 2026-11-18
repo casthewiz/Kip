@@ -265,13 +265,20 @@ fn main() {
     let home = kip_home();
     let _ = fs::create_dir_all(&home);
 
-    // Single instance: the lock holder listens on a local port; a second launch pokes it to show its window.
+    // Single instance: the lock holder listens on a local port; a second launch pokes it to show its window, or with
+    // --quit (kip.py install, before it rebuilds) sends "quit". --quit exits 1 when no instance is running.
+    let quitting = env::args().nth(1).as_deref() == Some("--quit");
     let lock = OpenOptions::new().create(true).truncate(false).write(true).open(home.join("kip-app.lock")).expect("kip-app.lock");
     if lock.try_lock().is_err() {
         if let Some(p) = fs::read_to_string(home.join("kip-app.port")).ok().and_then(|p| p.trim().parse::<u16>().ok()) {
-            let _ = TcpStream::connect(("127.0.0.1", p));
+            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", p)) {
+                let _ = s.write_all(if quitting { b"quit" } else { b"show" });
+            }
         }
         return;
+    }
+    if quitting {
+        std::process::exit(1);
     }
     let listener = TcpListener::bind("127.0.0.1:0").expect("local socket");
     let _ = fs::write(home.join("kip-app.port"), listener.local_addr().unwrap().port().to_string());
@@ -279,7 +286,14 @@ fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let p = proxy.clone();
-    thread::spawn(move || listener.incoming().for_each(|_| drop(p.send_event(UserEvent::Show))));
+    thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let mut word = [0u8; 4];
+            let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+            let quit = s.read_exact(&mut word).is_ok() && &word == b"quit";
+            drop(p.send_event(if quit { UserEvent::Quit } else { UserEvent::Show }));
+        }
+    });
     let p = proxy.clone();
     thread::spawn(move || {
         let (child, ok) = connect(port);

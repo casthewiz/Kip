@@ -211,6 +211,7 @@ def check_app():
                 assert (exe.parent / "WebView2Loader.dll").read_text() == arch
                 assert (home / "quit").read_text() == repr((["--quit"], None)), (home / "quit").read_text()
                 assert not shell.exists() and "quit the pythonw shell" in out, out
+                assert "started again" in out and "quit the running kip-app" not in out, out  # the fake exe won't run
                 assert f"up to date: {exe}" in kip("install", "--host", "claude-code") and calls() == 1
                 assert doctor() == "  starts at login", doctor()
                 assert "removed HKCU" in kip("uninstall", "--host", "claude-code") and value() is None

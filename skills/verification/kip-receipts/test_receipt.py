@@ -247,7 +247,8 @@ def moods():
             assert wait_until(lambda: get("/api/status")["active"] == 5, 10), get("/api/status")
             status = get("/api/status")
             assert {**status, "approval": sorted(status["approval"])} == {
-                "mood": "failure", "active": 5, "approval": ["approval", "question"], "blocked": ["blocked"]}, status
+                "mood": "failure", "active": 5, "approval": ["approval", "question"], "blocked": ["blocked"],
+                "version": hashlib.sha256(SCRIPT.with_name("dashboard.html").read_bytes()).hexdigest()[:12]}, status
             sessions = {r["session"]: r["mood"] for r in get("/api/sessions")}
             assert sessions == {"working": "working", "approval": "waiting", "question": "waiting",
                                 "blocked": "failure", "asks": "asking", "old": "failure"}, sessions
