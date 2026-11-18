@@ -700,8 +700,12 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        servers = command_lines(f"serve --port {port}")  # before the server goes idle
-        assert len(servers) == 1, servers
+        servers = []
+
+        def one_server():  # Windows' process table query comes back empty now and then: ask again, before idle
+            servers[:] = command_lines(f"serve --port {port}")
+            return len(servers) == 1
+        assert wait_until(one_server, 5), servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
         # A log that can't be written changes nothing about what the gate says.
