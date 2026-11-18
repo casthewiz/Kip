@@ -377,9 +377,9 @@ def main():
         write(old_run / "receipt.json", {"id": old_run.name, "repo": "demo", "branch": "main", "level": "full",
                                          "created_at": "2025-01-01T00:00:00+00:00", "claims": []})
         out = kip("install")
-        assert f"receipts\n  imported 1 runs and 0 session starts from the JSON store\n  {kipdb} · schema v2 of 2 · 1 runs" \
+        assert f"receipts\n  imported 1 runs and 0 session starts from the JSON store\n  {kipdb} · schema v3 of 3 · 1 runs" \
             in out, out
-        assert f"receipts\n  {kipdb} · schema v2 of 2 · 1 runs" in kip("doctor")
+        assert f"receipts\n  {kipdb} · schema v3 of 3 · 1 runs" in kip("doctor")
         first = settings.read_text(encoding="utf-8")
         assert "cursor: skipped, missing ~/.cursor" in out, out
         for d in (home / ".kip" / "skills", home / ".claude" / "skills"):
@@ -631,7 +631,7 @@ def main():
         assert snapshot() != before and (home / ".cursor" / "hooks.json").exists()
         out = kip("uninstall", HOME=str(home), USERPROFILE=str(home))
         kept = home / ".kip" / "receipts" / "kip.db"
-        assert f"receipts\n  kept: {kept} · schema v2 of 2 · 0 runs" in out and kept.exists(), out
+        assert f"receipts\n  kept: {kept} · schema v3 of 3 · 0 runs" in out and kept.exists(), out
         assert json.loads(snapshot()[1][0]) == json.loads(before[1][0]) and snapshot()[1][1:] == before[1][1:], snapshot()
         assert snapshot()[0] == before[0], snapshot()
         assert not [p for p in home.rglob("*") if p.is_symlink() and os.readlink(p).startswith(str(ROOT))], out

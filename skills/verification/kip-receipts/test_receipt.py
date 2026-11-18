@@ -701,8 +701,12 @@ def main():
         assert not list(records.glob("*.json")), "the start hook's shared server took the session's id"
         check("--hook", "start", event=dash, extra_env=auto)
         time.sleep(1)
-        servers = command_lines(f"serve --port {port}")  # before the server goes idle
-        assert len(servers) == 1, servers
+        servers = []
+
+        def one_server():  # Windows' process table query comes back empty now and then: ask again, before idle
+            servers[:] = command_lines(f"serve --port {port}")
+            return len(servers) == 1
+        assert wait_until(one_server, 5), servers
         assert wait_until(lambda: not listening(port), 20), "the launched server never went idle"
 
         # A log that can't be written changes nothing about what the gate says.
@@ -1976,7 +1980,7 @@ def main():
         odd = Path(tmp, "fresh dir #1" + ("?" if os.name != "nt" else ""))  # Windows refuses a ? in a name
         fresh = {"KIP_RECEIPTS_DIR": str(odd)}  # a path a hand-built file: URI would break on
         assert rc("db", extra_env=fresh) == f"{odd / 'kip.db'} · not created yet"
-        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v2 of 2 · 0 runs")
+        assert rc("db", "--migrate", extra_env=fresh).endswith("kip.db · schema v3 of 3 · 0 runs")
         upgrade = f"""import sys
 sys.path.insert(0, {str(SCRIPT.parent)!r})
 import receipt
@@ -1985,7 +1989,7 @@ receipt._db = None
 receipt.SCHEMA.append("ALTER TABLE runs ADD COLUMN note TEXT")
 con = receipt.db()
 print(con.execute("PRAGMA user_version").fetchone()[0], con.execute("SELECT id, note FROM runs").fetchall())"""
-        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "3 [('r1', None)]"
+        assert sh(sys.executable, "-c", upgrade, extra_env=fresh) == "4 [('r1', None)]"
         # Upgrading a v1 kip.db leaves `sessions` as an older Kip (another checkout's hooks) writes it: that still
         # works, and its rows read as starts in an unknown worktree.
         v1 = f"""import sys
@@ -2065,6 +2069,8 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
         rc("attach", "c1", str(clip), extra_env=seg)
         sid = {"session_id": "seg1", "cwd": str(repo)}
         check("--hook", "start", event=sid, extra_env=seg)
+        check("--hook", "tool", event={**sid, "tool_name": "WebFetch", "tool_input": {"url": "https://docs.test/early"}},
+              extra_env=seg)  # in the first run: its ref keeps that run, not the session's last
         sh("git", "checkout", "-q", "-b", "seg-b")
         second = Path(rc("init", extra_env=seg))
         check("--hook", "stop", event=sid, extra_env=seg)
@@ -2074,7 +2080,15 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
                  ("mcp__github__get_issue", {"owner": "me", "repo": "demo", "issue_number": 12}),
                  ("WebSearch", {"query": "UTF-8 decode error"}), ("WebFetch", {"url": "https://docs.test/a"}),
                  ("Bash", {"command": "curl -s https://api.test/v1 | jq ."}), ("Read", {"file_path": "app.py"}),
-                 ("Bash", {"command": "curl http://127.0.0.1:7377/api/sessions"})]
+                 ("Bash", {"command": "curl http://127.0.0.1:7377/api/sessions"}),
+                 ("mcp__notion__notion-fetch", {"id": "40ee6112-fa50-81e0-9726-e9f6c7e1bf63"}),
+                 ("mcp__notion__notion-fetch", {"id": "collection://40ee6112-fa50-81e0-9726-e9f6c7e1bf63"}),
+                 ("mcp__notion__notion-update-page", {"command": "update_content", "new_str": "x" * 300,
+                                                      "page_id": "11112222333344445555666677778888"}),
+                 ("mcp__notion__notion-create-pages", {"pages": [{"content": "y" * 300}],
+                                                       "parent": {"page_id": "aaaabbbb-cccc-dddd-eeee-ffff00001111"}}),
+                 ("mcp__figma__get_design_context", {"clientLanguages": "z" * 300, "fileKey": "abc123", "nodeId": "1:2"}),
+                 ("mcp__figma__get_metadata", {"fileKey": "def456"})]
         for name, tool_input in calls:
             check("--hook", "tool", event={**sid, "tool_name": name, "tool_input": tool_input}, extra_env=seg)
         # Cursor names the MCP server only on beforeMCPExecution, with its input as JSON text
@@ -2085,6 +2099,43 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
                                             "mcp_server_name": "linear"}, extra_env=seg) == \
             (0, '{"permission": "allow"}')
         check("--hook", "prompt", event={**sid, "prompt": "fix it, see https://linear.test/ENG-42."}, extra_env=seg)
+        # A stop keeps what the session referenced in kip.db: again changes nothing, and it outlives the event log.
+        def refs():
+            with contextlib.closing(sqlite3.connect(Path(seg["KIP_RECEIPTS_DIR"], "kip.db"))) as con:
+                return sorted(con.execute("SELECT repo, run, kind, name, via, count FROM refs WHERE session = 'seg1'"))
+        check("--hook", "stop", event=sid, extra_env=seg)
+        kept = refs()
+        assert [(k, n, v, c) for _, _, k, n, v, c in kept if k == "issue"] == [
+            ("issue", "ENG-42", "linear", 2), ("issue", "ENG-77", "linear", 1), ("issue", "PROJ-7", "claude_ai_Atlassian", 1),
+            ("issue", "me/demo#12", "github", 1)], kept
+        assert ("web", "https://docs.test/a", None, 1) in [r[2:] for r in kept] and \
+            ("link", "https://linear.test/ENG-42", None, 1) in [r[2:] for r in kept] and \
+            ("web", "https://www.notion.so/40ee6112fa5081e09726e9f6c7e1bf63", None, 1) in [r[2:] for r in kept] and \
+            ("web", "https://www.figma.com/design/abc123?node-id=1-2", None, 1) in [r[2:] for r in kept], kept
+        assert {r[:2] for r in kept if r[3] != "https://docs.test/early"} == {(repo.name, second.name)} and \
+            (repo.name, first.name, "web", "https://docs.test/early", None, 1) in kept, kept
+        with contextlib.closing(sqlite3.connect(Path(seg["KIP_RECEIPTS_DIR"], "kip.db"))) as con:
+            assert con.execute("SELECT count(*) FROM refs WHERE session = 'seg1' AND (first IS NULL OR first > last)").fetchone()[0] == 0
+        check("--hook", "stop", event=sid, extra_env=seg)
+        assert refs() == kept, "a second stop changed the refs"
+        events = Path(seg["KIP_RECEIPTS_DIR"], "events")
+        swept = events.with_name("events-kept")
+        events.rename(swept)
+        check("--hook", "stop", event=sid, extra_env=seg)
+        assert refs() == kept, "sweeping the event log lost refs"
+        shutil.rmtree(events)
+        swept.rename(events)
+        # A declared plan or design doc is a ref of the repo, tied to the branch's run; declaring it again adds no row.
+        for _ in range(2):
+            assert rc("ref", "https://www.notion.so/plan1", "--kind", "plan", extra_env=seg) == \
+                f"plan: https://www.notion.so/plan1 · run {second.name}"
+        rc("ref", "https://www.figma.com/design/k1", "--kind", "design", "--run", first.name, extra_env=seg)
+        rc("ref", "notion.so/plan1", "--kind", "plan", ok=False, extra_env=seg)
+        rc("ref", "https://www.notion.so/plan1", "--kind", "spec", ok=False, extra_env=seg)
+        with contextlib.closing(sqlite3.connect(Path(seg["KIP_RECEIPTS_DIR"], "kip.db"))) as con:
+            declared = con.execute("SELECT repo, session, run, kind, name, count FROM refs WHERE kind IN ('plan', 'design')").fetchall()
+            assert sorted(declared) == sorted([(repo.name, "", first.name, "design", "https://www.figma.com/design/k1", 1),
+                                               (repo.name, "", second.name, "plan", "https://www.notion.so/plan1", 1)]), declared
         sh("git", "checkout", "-q", "-")
         sh("git", "checkout", "-q", "-")
         port = free_port()
@@ -2100,9 +2151,25 @@ print(receipt.session_states({{"session_id": "s1"}}))"""
                 [("ENG-42", "linear"), ("ENG-77", "linear"), ("ENG-9", "linear"), ("PROJ-7", "claude_ai_Atlassian"),
                  ("me/demo#12", "github")], row["issues"]
             assert sorted((s["kind"], s["name"], s["count"]) for s in row["sources"]) == [
-                ("link", "https://linear.test/ENG-42", 1), ("mcp", "claude_ai_Atlassian", 1), ("mcp", "github", 2),
-                ("mcp", "linear", 3), ("search", "UTF-8 decode error", 1), ("web", "https://api.test/v1", 1),
-                ("web", "https://docs.test/a", 1)], row["sources"]
+                ("link", "https://linear.test/ENG-42", 1), ("mcp", "claude_ai_Atlassian", 1), ("mcp", "figma", 2),
+                ("mcp", "github", 2), ("mcp", "linear", 3), ("mcp", "notion", 4), ("search", "UTF-8 decode error", 1),
+                ("web", "https://api.test/v1", 1), ("web", "https://docs.test/a", 1), ("web", "https://docs.test/early", 1),
+                ("web", "https://www.figma.com/design/abc123?node-id=1-2", 1),
+                ("web", "https://www.figma.com/design/def456", 1),
+                ("web", "https://www.notion.so/11112222333344445555666677778888", 1),
+                ("web", "https://www.notion.so/40ee6112fa5081e09726e9f6c7e1bf63", 1),
+                ("web", "https://www.notion.so/aaaabbbbccccddddeeeeffff00001111", 1)], row["sources"]
+            # References: each repo's refs past the session log, declared plans and designs first, then issues, then
+            # sources; and a run's own refs in its review panel, declared first.
+            mine = next(x["refs"] for x in json.loads(get(port, "/api/refs")) if x["repo"] == repo.name)
+            kinds = [x["kind"] for x in mine]
+            assert kinds[:2] == ["plan", "design"] or kinds[:2] == ["design", "plan"], kinds
+            assert kinds.index("issue") < min(kinds.index(k) for k in ("mcp", "web", "search", "link")), kinds
+            plan = next(x for x in mine if x["kind"] == "plan")
+            assert (plan["name"], plan["runs"], plan["sessions"]) == ("https://www.notion.so/plan1", [second.name], 1), plan
+            assert ("web", "https://www.notion.so/40ee6112fa5081e09726e9f6c7e1bf63") in [(x["kind"], x["name"]) for x in mine]
+            assert [(x["kind"], x["name"]) for x in json.loads(get(port, f"/api/runs/{first.name}"))["refs"]] == \
+                [("design", "https://www.figma.com/design/k1"), ("web", "https://docs.test/early")]
             detail = json.loads(get(port, f"/api/runs/{first.name}"))
             c1 = detail["claims"][0]
             assert c1["verdict"] == "✅ verified" and c1["provider"] == "frontend", c1

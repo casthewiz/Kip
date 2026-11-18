@@ -15,6 +15,12 @@ dashboard reads Cursor's own `renderer.log` (under the folders in `defaults.json
 in `~/.kip/config.json`, or the repo's with `--project`), and `--conversation`
 turns it back on.
 
+Each stop also keeps the session's Issues and Sources (below) in `kip.db`'s
+`refs` table, by repo, session, and the run each was used in, so they outlive
+the 14 days. Notion and Figma MCP calls are kept as the `notion.so` or
+`figma.com` URL of the page or file they touched. Plan and design docs declared
+with `receipt.py ref` sit in the same table.
+
 ## Running it
 
 A user `install` runs a live dashboard at <http://127.0.0.1:7377> as a login
@@ -52,6 +58,11 @@ splits what it touched into segments:
 - **Receipts**: every run the session touched, each opening a review panel with
   every claim's verdict, its evidence (command, exit, excerpt, commit, log and
   patch), and its screenshots and videos inline.
+
+The **References** tab lists each repo's refs from `kip.db`, each page or link
+once however many sessions used it: declared plans and designs, then issues,
+then sources, newest first. A run's review panel lists the refs tied to it the
+same way.
 
 ## Runs
 

@@ -14,6 +14,7 @@
   receipt.py attach CLAIM PATH [--type image|video|log]     copy a file into the run
   receipt.py unverified CLAIM "REASON"                      mark a claim as unverifiable
   receipt.py accept CLAIM [--reason TEXT]                   the user takes an unverified claim as it stands
+  receipt.py ref URL --kind plan|design                     record a doc the work is planned or designed against
   receipt.py reopen CLAIM [--reason TEXT]                   a person gives a claim whose fix loop closed a new one
   receipt.py retire CLAIM --check EVIDENCE --reason TEXT    a person sets aside a check that no longer speaks for
                                                             the claim; its runs stop deciding the verdict
@@ -205,6 +206,9 @@ SCHEMA = [  # one entry per version: append a new one, never edit a shipped one
     # hooks) shares this kip.db and still writes it, and its rows read as starts in an unknown worktree ('').
     """CREATE TABLE session_starts (repo TEXT NOT NULL, id TEXT NOT NULL, worktree TEXT NOT NULL, state TEXT NOT NULL,
                                     PRIMARY KEY (repo, id, worktree))""",
+    # What a session referenced (issues and sources, as the dashboard folds them), kept after its event log is swept.
+    """CREATE TABLE refs (repo TEXT NOT NULL, session TEXT NOT NULL DEFAULT '', run TEXT, kind TEXT NOT NULL, name TEXT NOT NULL,
+                          via TEXT, count INTEGER NOT NULL, first TEXT, last TEXT, PRIMARY KEY (repo, session, kind, name))""",
 ]
 _db, _imported = None, (0, 0)
 
@@ -746,6 +750,20 @@ def cmd_accept(a):
         if not c["unverified"]:
             sys.exit(f"{c['id']} isn't marked unverified; only an unverified claim can be accepted")
         c["accepted"], c["accepted_by"] = a.reason or True, writer()
+
+
+def cmd_ref(a):
+    """A doc the work is planned or designed against (a Notion page, a Figma file): a ref of the repo, tied to this
+    branch's run when it has one. Declaring it again only moves its last-seen time."""
+    if not re.fullmatch(r"https?://\S+", a.url):
+        sys.exit(f"not a URL: {a.url}")
+    d = run_path(a.run) if a.run else branch_run()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    with tx() as con:
+        con.execute("INSERT INTO refs VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?) ON CONFLICT (repo, session, kind, name) "
+                    "DO UPDATE SET run = coalesce(excluded.run, run), last = excluded.last",
+                    (repo_name(), writer() or "", d and d.name, a.kind, a.url, now, now))
+    print(f"{a.kind}: {a.url}" + (f" · run {d.name}" if d else ""))
 
 
 def cmd_reopen(a):
@@ -1431,10 +1449,9 @@ def edit_gate(hook):
 
 
 
-def session_skills(sid):
-    """The skills a session has used, from the event log."""
-    used = set()
-    for p in EVENTS.glob("*.jsonl"):
+def session_events(sid):
+    """A session's events, oldest day first."""
+    for p in sorted(EVENTS.glob("*.jsonl")):
         with open(p, encoding="utf-8", errors="replace") as f:
             for line in f:
                 if sid not in line:
@@ -1443,9 +1460,32 @@ def session_skills(sid):
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if e.get("session") == sid and e.get("hook") == "tool":
-                    used.add(used_skill(str(e.get("tool")), str(e.get("input") or "")))
-    return used
+                if isinstance(e, dict) and e.get("session") == sid:
+                    yield e
+
+
+def session_skills(sid):
+    """The skills a session has used, from the event log."""
+    return {used_skill(str(e.get("tool")), str(e.get("input") or "")) for e in session_events(sid) if e.get("hook") == "tool"}
+
+
+def keep_refs(sid):
+    """Store the issues and sources a session's events show in kip.db, so they outlive the event log. The whole
+    session is folded again and each row keeps its highest count, so repeating this changes nothing and a swept
+    day's refs stay."""
+    rows = {}
+    for e in session_events(sid):
+        fold(rows, e)
+    r = rows.get(sid)
+    if not (r and r["repo"]):
+        return
+    found = [(i["run"], "issue", i["key"], i["via"], i["count"], i["first"], i["last"]) for i in r["issues"].values()] + \
+        [(s["run"], s["kind"], s["name"], None, s["count"], s["first"], s["last"]) for s in r["sources"].values()]
+    with tx() as con:
+        con.executemany("INSERT INTO refs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (repo, session, kind, name) DO UPDATE "
+                        "SET run = coalesce(excluded.run, run), count = max(count, excluded.count), "
+                        "first = min(first, excluded.first), last = max(last, excluded.last)",
+                        [(r["repo"], sid, run and Path(run).name, *f) for run, *f in found])
 
 
 def skills_due(hook, stages):
@@ -1757,6 +1797,9 @@ ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 TRACKER = re.compile(r"linear|jira|atlassian|github-issue", re.I)  # an MCP server or sink whose issue keys are issues
 GITHUB_ISSUE = [re.compile(rf'"{k}": "?([\w.-]+)') for k in ("owner", "repo", "issue_number")]  # in a GitHub MCP call
 URL = re.compile(r"https?://(?!(?:localhost|127\.0\.0\.1|\[::1\])[:/])[^\s<>()\"'`]*[^\s<>()\"'`.,;:!?]")  # not this machine; not a sentence's period
+REFS = ("page_id", "pageId", "id", "fileKey", "nodeId")  # what an MCP call is about: logged first, so the cut keeps it
+NOTION_PAGE = re.compile(r'"(?:page_id|pageId|id)": "([0-9a-f]{8}(?:-?[0-9a-f]{4}){3}-?[0-9a-f]{12})"', re.I)
+FIGMA = [re.compile(rf'"{k}": "([\w:;-]+)"') for k in ("fileKey", "nodeId")]
 
 
 def used_skill(tool, what):
@@ -1788,8 +1831,11 @@ def log_tool(hook, kind="tool"):
     if str(hook.get("tool_name")).startswith("MCP:"):  # Cursor's preToolUse has no server; beforeMCPExecution logs it
         return
     ti = tool_input(hook)
-    what = next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
-                 if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
+    refs = {k: v for k in REFS for d in [ti, *ti.values()] if isinstance(d, dict) for v in [d.get(k)]
+            if isinstance(v, str)} if str(hook.get("tool_name")).startswith("mcp__") else {}
+    what = json.dumps({**refs, **ti}, ensure_ascii=False) if refs else \
+        next((ti[k] for k in ("skill", "command", "file_path", "pattern", "url", "query", "description")
+              if isinstance(ti.get(k), str)), None) or hook.get("command") or hook.get("file_path") or \
         (json.dumps(ti, ensure_ascii=False) if ti else "")
     append_event(hook, hook=kind, tool=hook.get("tool_name") or hook.get("hook_event_name") or "tool",
                  input=redact(str(what))[:200])
@@ -1909,7 +1955,14 @@ def reason_kind(line):
 def sources(tool, what):
     """What outside the machine a tool call reads from: an MCP server, a web search, or the URLs it names."""
     if tool.startswith("mcp__"):
-        return [("mcp", tool.split("__")[1])]
+        found = [("mcp", tool.split("__")[1])]
+        if re.search("notion", tool, re.I):
+            found += [("web", "https://www.notion.so/" + p.replace("-", "").lower()) for p in NOTION_PAGE.findall(what)]
+        file, node = (m.search(what) for m in FIGMA)
+        if file and re.search("figma", tool, re.I):
+            found.append(("web", f"https://www.figma.com/design/{file[1]}" +
+                          (f"?node-id={node[1].replace(':', '-')}" if node else "")))
+        return found
     if tool == "WebSearch":
         return [("search", what)]
     return [("web", url) for url in URL.findall(what)]
@@ -1942,7 +1995,8 @@ def fold(rows, e):
         keys = ISSUE_KEY.findall(what) if TRACKER.search(server) else \
             ["{}/{}#{}".format(*(m[1] for m in gh))] if gh and all(gh) else []
         for key in keys:
-            r["issues"].setdefault(key, {"key": key, "via": server})
+            i = r["issues"].setdefault(key, {"key": key, "via": server, "count": 0, "first": e["at"]})
+            i.update(count=i["count"] + 1, last=e["at"], run=r["run"])
         skill = used_skill(tool, what)
         if skill:
             tool, what = "Skill", skill
@@ -1954,8 +2008,8 @@ def fold(rows, e):
             r["stage"] = stage
             r["reached"] = sorted(set(r["reached"]) | {stage}, key=STAGES.index)
     for kind, name in found:
-        s = r["sources"].setdefault(f"{kind} {name}", {"kind": kind, "name": name, "count": 0})
-        s.update(count=s["count"] + 1, last=e["at"])
+        s = r["sources"].setdefault(f"{kind} {name}", {"kind": kind, "name": name, "count": 0, "first": e["at"]})
+        s.update(count=s["count"] + 1, last=e["at"], run=r["run"])
     if e.get("hook") == "stop" and e.get("message") != NUDGED:  # the stop it let through after a block isn't a pass
         r["blocked"] = r["blocked"] + 1 if e.get("blocked") else 0
     if e.get("hook") == "pr" and not e.get("blocked"):
@@ -1989,7 +2043,10 @@ def run_detail(rec):
     def url(f):
         return f and f"/runs/{rec['id']}/{f['path']}"
 
-    return {**run_summary(rec), "commit": rec.get("commit"), "claims": [
+    refs = db().execute(f"SELECT kind, name, max(via), sum(count), max(last) FROM refs WHERE run = ? GROUP BY kind, name "
+                        f"ORDER BY {REF_ORDER}", (rec["id"],))
+    return {**run_summary(rec), "commit": rec.get("commit"), "refs": [
+        {"kind": k, "name": n, "via": v, "count": c, "last": t} for k, n, v, c, t in refs], "claims": [
         {"id": c["id"], "text": c["text"], "unit": c.get("unit"), "stage": c.get("stage"),
          "delegated": delegate(c) and c["delegated"], "delegated_from": c.get("delegated_from"),
          "provider": c.get("provider") or "generic", "verdict": verdict(c, rec), "unverified": c.get("unverified"),
@@ -2000,6 +2057,21 @@ def run_detail(rec):
                       for e in c["evidence"]],
          "files": [{"type": f["type"], "name": Path(f["path"]).name, "url": url(f)} for f in c["files"]]}
         for c in rec["claims"]]}
+
+
+REF_ORDER = "kind NOT IN ('plan', 'design'), kind != 'issue', max(last) DESC"  # declared, issues, sources; newest first
+
+
+def refs_by_repo():
+    """Every repo's refs, each name once across its sessions: declared plans and designs, then issues, then
+    sources, newest first within each."""
+    out = {}
+    for repo, kind, name, via, count, last, runs, sessions in db().execute(
+            "SELECT repo, kind, name, max(via), sum(count), max(last), group_concat(DISTINCT run), count(DISTINCT session) "
+            f"FROM refs GROUP BY repo, kind, name ORDER BY repo, {REF_ORDER}"):
+        out.setdefault(repo, []).append({"kind": kind, "name": name, "via": via, "count": count, "last": last,
+                                         "runs": sorted(runs.split(",")) if runs else [], "sessions": sessions})
+    return [{"repo": repo, "refs": refs} for repo, refs in out.items()]
 
 
 def writes(rec):
@@ -2272,6 +2344,10 @@ def cmd_serve(a):
                 with reading:
                     body = json.dumps(triage(seen), ensure_ascii=False)
                 self.send(body)
+            elif path == "/api/refs":
+                with reading:
+                    body = json.dumps(refs_by_repo(), ensure_ascii=False)
+                self.send(body)
             elif path == "/api/sessions":
                 with lock:
                     snapshot = copy.deepcopy(rows)
@@ -2433,6 +2509,11 @@ def cmd_check(a):
         log_said(hook, "response", hook.get("last_assistant_message"))
     if a.hook and (a.hook != "pr" or opens_pr(hook)) and (a.hook != "edit" or blocked):  # the tool hook logs the rest
         log_gate(a.hook, hook, blocked, msg)
+    if a.hook == "stop" and session_id(hook):
+        try:
+            keep_refs(session_id(hook))
+        except Exception:
+            pass
     if a.hook == "pr" and isinstance(hook, dict) and hook.get("mcp_server_name"):
         log_tool({**hook, "tool_name": f"mcp__{hook['mcp_server_name']}__{hook.get('tool_name')}"})
     if a.hook == "start":
@@ -2519,6 +2600,11 @@ def main():
     s.add_argument("claim")
     s.add_argument("--reason", help="why it's fine as it stands")
     s.set_defaults(fn=cmd_accept)
+
+    s = sub.add_parser("ref", parents=[common])
+    s.add_argument("url")
+    s.add_argument("--kind", choices=["plan", "design"], required=True)
+    s.set_defaults(fn=cmd_ref)
 
     s = sub.add_parser("reopen", parents=[common])
     s.add_argument("claim")

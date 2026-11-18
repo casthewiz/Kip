@@ -46,6 +46,7 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **plan run**: the receipts run decompose records, its claims tagged `--unit N`. [kip-decompose](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan)
 - **unit run**: a run started with `init --parent <plan run> --unit N`, usually in the unit's worktree, which takes over that unit's open claims. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#recording)
 - **delegated claim**: a plan claim handed to a unit run; its verdict is the unit run's, and it returns to the plan if that run is orphaned. [dashboard](dashboard.md#runs)
+- **ref**: something outside the repo a session or plan points at, kept in `kip.db`'s `refs` table by repo, session and run. Its kind is `plan` or `design` when declared (`receipt.py ref`), else `issue` or a source's kind (`mcp`, `web`, `search`, `link`), stored at each stop. [kip-decompose](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan) · [dashboard](dashboard.md#session-log)
 
 ## Receipts
 
@@ -152,6 +153,7 @@ Layered: `defaults.json`, then `~/.kip/config.json`, then `<repo>/.kip/config.js
 - `receipt.py attach`: attach a file to a claim.
 - `receipt.py unverified`: mark a claim unverified with a reason.
 - `receipt.py accept`: accept an unverified claim.
+- `receipt.py ref URL --kind plan|design`: declare a doc the work is planned or designed against, a ref of the repo tied to this branch's run.
 - `receipt.py reopen`: a person reopens a claim's closed fix loop.
 - `receipt.py retire`: a person retires one of a claim's checks (`--check`, `--reason`) so its runs stop deciding the verdict.
 - `receipt.py orphan`: set the run aside.
