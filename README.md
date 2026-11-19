@@ -42,7 +42,7 @@ opened it.
 | [kip-objection](skills/verification/kip-objection/SKILL.md) | Adversarial review that runs the same way on every host |
 | [kip-receipts](skills/verification/kip-receipts/SKILL.md) | Back every claim of done-ness with deterministic evidence |
 | [kip-kubrick](skills/verification/kip-kubrick/SKILL.md) | Capture screenshots and recordings with Playwright the same way every time |
-| [kip-dress-rehearsal](skills/verification/kip-dress-rehearsal/SKILL.md) | Plan a staged rollout against a live system, with proposed test records |
+| [kip-dress-rehearsal](skills/verification/kip-dress-rehearsal/SKILL.md) | Plan a staged rollout with an observable outcome per stage |
 
 Plus always-on [rules](rules/user-rules.md) that tie them together.
 

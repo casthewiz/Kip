@@ -1,28 +1,28 @@
 ---
 name: kip-dress-rehearsal
 description: >
-  Writes a test plan for a change that touches a live system (a CRM, a billing
-  platform, a partner API, production data), framed as a staged rollout:
-  sandbox, then dev test records in production, then a few proposed real
-  records someone watches, then a wider internal group. Finds candidate
-  records by querying the live system read-only, checks every ID in both
-  systems, and marks every real record as proposed until its owner approves
-  it, with collapsible lists of other criteria to pick by. Supports levels:
-  lite (stages and cases, no lookups), full (default: candidates queried and
-  verified), ultra (also history checks and a natural example for every
-  failure path). Use when the user says "test plan", "rollout plan", "how do
-  we test this in prod", "find test properties/accounts/records", "dress
-  rehearsal", or "staged rollout", and before turning on a write path to an
-  external system. Do NOT use for unit or browser tests of the change itself
-  (write those) or to prove work is done (kip-receipts).
+  Writes a test plan for a change that reaches something real (a live
+  service, a partner API, production data, devices, customers, a release
+  channel), framed as a staged rollout: each stage widens exposure one step
+  and names the outcome that must be observed before the next. Picks what
+  each stage runs against from the real system, read-only, and marks
+  anything someone else owns as proposed until they approve it, with
+  collapsible lists of other criteria to pick by. Supports levels: lite
+  (stages and outcomes, no lookups), full (default: subjects found and
+  checked), ultra (also each subject's history and a natural trigger for
+  every failure path). Use when the user says "test plan", "rollout plan",
+  "how do we test this in prod", "find test subjects", "dress rehearsal", or
+  "staged rollout", and before turning on a path that reaches a real system.
+  Do NOT use for unit or browser tests of the change itself (write those) or
+  to prove work is done (kip-receipts).
 argument-hint: "[lite|full|ultra] [ticket | spec | PR]"
 license: MIT
 ---
 
 # Dress rehearsal
 
-A change that writes to a system you don't own gets tested on that system
-before customers see it, one ring at a time. This skill writes that plan. It
+A change that reaches something real gets tried where a mistake is cheap,
+then a little less cheap, one ring at a time. This skill writes that plan. It
 does not run it.
 
 ## Persistence
@@ -32,88 +32,101 @@ Runs once per change. Default: **full**. Switch:
 
 ## Levels
 
-| Level | Candidates | Failure paths | Checks |
+| Level | Subjects | Failure paths | Checks |
 |---|---|---|---|
-| **lite** | Name the kind of record each stage needs. No lookups. | List the cases. | None. |
-| **full** | Query the live system for real candidates. Check each ID in both systems. | Name a candidate for each failure case if one turns up. | Every ID on the page came from a query you ran. Default. |
-| **ultra** | Full, plus each candidate's change history and anything billed against it. | Find a natural example of every failure reason, or say why there is none. | Full, plus the plan is re-read after it is saved. |
+| **lite** | Describe what each stage runs against. No lookups. | List the cases. | None. |
+| **full** | Find real subjects in the system, read-only, and check each one exists and is what you think. | Name a subject for each failure case if one turns up. | Every subject on the page traces to a lookup in the appendix. Default. |
+| **ultra** | Full, plus each subject's recent history and anything that depends on it. | Find a natural trigger for every failure path, or say why there is none. | Full, plus the plan is re-read after it is saved. |
 
 ## Rules
 
-- **Read-only.** Planning never writes to the live system. Queries only.
-- **Real records are proposed, never chosen.** Every record a customer owns
-  sits under a "Proposed, not approved" callout that names who approves it.
-  You find candidates; people with the relationship pick them.
-- **Every ID is checked.** An ID on the page came from a query in the
-  appendix, and it resolves in both systems (yours and theirs). Note where
-  names repeat and which ID is the right one.
-- **Name the clock.** If a value only exists for a while (an accepted month,
-  a token lifetime, a promo window), state the dates and when it moves.
-- **Quote constraints exactly.** If someone limited where writes may go, copy
-  their words and their source.
+- **Read-only.** Planning never changes the real system. Look, don't touch.
+- **What others own is proposed, never chosen.** A subject someone else is
+  answerable for (a customer, another team, a user's device) sits under a
+  "Proposed, not approved" callout that names who approves it.
+- **Every subject is checkable.** Say how to find it again: an ID, a name and
+  where it lives, a query, a cohort definition, a percentage. Put the lookup
+  in the appendix. Note anything easy to confuse with it.
+- **Name the clock.** If something only holds for a while (a time window, a
+  token lifetime, a release train), state the dates and when it moves.
+- **Quote constraints exactly.** If someone limited what the change may
+  touch, copy their words and their source.
 
 ## 1. Frame
 
-Read the ticket, the spec, and the code that writes. Write down:
+Read the ticket, the spec, and the code. Write down:
 
-- The loop: what sends, what carries it, what writes, and what reports back.
-- Every outcome the loop can report, success and each failure reason.
-- The switches: feature flags, config, kill switches, and who owns each.
-- How a write is undone, and whether the external system keeps history.
+- The path: what starts it, what carries it, what it changes, and what
+  reports back.
+- Every outcome the path can report or leave behind, success and each
+  failure.
+- The controls: flags, config, kill switches, and who owns each.
+- How an effect is undone, and whether anything records what happened.
 
 ## 2. Stages
 
-Stages are rollout rings. Each widens exposure only after the one before it
-passes. Adjust the count, but keep the order.
+A stage is one step wider in exposure, run until its outcomes are observed.
+Derive the stages from the change, not from a template:
 
-| | 0 Sandbox | 1 Dev test records | 2 Proposed real records | 3 Wider internal group |
-|---|---|---|---|---|
-| Proves | Every path, including failures | The happy path in production | It holds on records someone watches | It holds under real use |
-| Who is exposed | Nobody | Internal test records | A few proposed records | Internal users' own work |
-| Switches | | | | |
-| Writes | | | | |
-| Rollback | | | | |
-| Go/no-go | | | | |
-| Exit criteria | | | | |
+1. List the ways exposure can widen: environment (local, sandbox,
+   production), audience (you, your team, internal users, customers), share
+   (one subject, a handful, a percentage, everyone), time (one run, a day, a
+   billing cycle), and reversibility (undoable, then not).
+2. Start where a mistake costs nothing. Widen one dimension per stage, so a
+   failure points to what changed.
+3. Stop adding stages when the next step is the full rollout.
 
-Fill every cell. Name a person for each go/no-go, and say so when you assumed
-one. Say which cases need stage 0, because production can't safely stage
-them.
+For each stage, write the outcomes, not the activity:
 
-## 3. Candidates
+| Field | Answers |
+|---|---|
+| Proves | What a pass here means that the stage before could not show. |
+| Exposed | Who or what feels a mistake, and how many. |
+| Runs against | The subjects (section 3). |
+| Controls | The switch positions this stage needs. |
+| Pass signal | What you observe, where, and the threshold. Measurable, not "looks fine". |
+| Watch | Who watches, and for how long or how many runs. |
+| Stop signal | What makes you halt and roll back right away. |
+| Rollback | The exact steps, and how you confirm they worked. |
+| Go/no-go | The person who decides to widen. Say so if you assumed one. |
 
-Find them with the system's own CLI or API, read-only. Put each query in the
-appendix.
+A stage whose pass signal you can't observe is not a stage. Fix the signal
+or merge it into the next. Say which failure cases need the safest stage,
+because a wider one can't safely trigger them.
 
-- **Sandbox (stage 0).** List the records it needs. Mark IDs unchecked if you
-  can't reach the sandbox.
-- **Dev test records (stage 1).** Search by name (`test`, `demo`, `sandbox`),
-  by an internal owner, and by any constraint someone gave. Check that
-  nothing is billed against them, and flag any that are.
-- **Real records (stage 2).** Pick by criteria that keep risk small, for
-  example a quiet history, exactly one row where the code expects one, and
-  no cascading effects. Put them under the proposed callout. Below the table,
-  add a collapsed toggle, "Other criteria we could use", with alternatives
-  such as only future periods, owner volunteers, the lowest revenue at risk,
-  or one parent account.
-- **Failure paths.** For each failure reason, look for a record that hits it
-  naturally (duplicate rows, a missing row). These are proposed too, and the
-  plan says what should *not* happen to them. Add the same collapsed toggle,
-  including "build the case in the sandbox instead".
+## 3. Subjects
 
-For each candidate, give its ID in both systems and the rows the change will
-touch.
+A subject is whatever a stage runs against: a record, an account, a device, a
+build channel, a slice of traffic, a file, a region. Find each one in the real
+system, read-only, and put the lookup in the appendix.
+
+- **Safe subjects** (the earliest stages): look for what already exists for
+  testing (names like `test`, `demo`, `sandbox`, internal owners, staging
+  channels). Check that nothing real depends on them, and flag any that
+  something does.
+- **Real subjects** (the middle stages): pick by criteria that keep the blast
+  radius small and the signal clear, for example quiet history, the simplest
+  shape the change expects, and nothing downstream. Put them under the
+  proposed callout. Below them, add a collapsed toggle, "Other criteria we
+  could use", with alternatives such as owner volunteers, least at stake,
+  only future effects, or one group.
+- **Failure-path subjects**: for each failure the path can report, look for a
+  subject that triggers it naturally. These are proposed too, and the plan
+  says what should *not* happen to them. Add the same toggle, including
+  "build the case in the safest stage instead".
+
+For each subject, say how to find it and what the change will touch.
 
 ## 4. Cases
 
 One table: an ID, a case, the expected outcome, and a column per stage saying
-where it runs. Cover the happy path, input validation, every failure reason,
-replays and races, and rollback. Each case becomes a kip-receipts claim when
-the plan runs.
+where it runs. Cover the happy path, bad input, every failure the path can
+report, repeats and races, and rollback. Each case becomes a kip-receipts
+claim when the plan runs.
 
 ## 5. Cleanup
 
-What to undo after each stage, how to check it was undone, and who does it.
+What to undo after each stage, how to confirm it was undone, and who does it.
 
 ## Output
 
@@ -124,19 +137,19 @@ beside the spec. The layout:
 ```
 <At a glance: the change, the stages, the decision needed and from whom>
 1. Preconditions
-2. Stages        (table, then candidates per stage, proposed callouts, criteria toggles)
+2. Stages        (outcomes per stage, then subjects, proposed callouts, criteria toggles)
 3. Cases         (table with a column per stage)
 4. Cleanup
-Appendix         (collapsed: every query that produced an ID)
+Appendix         (collapsed: every lookup that found a subject)
 ```
 
-Then give the user the link, say what is unverified (sandbox IDs, assumed
-owners, unset limits), and offer to ask the approvers.
+Then give the user the link, say what is unverified (unreached environments,
+assumed owners, unset thresholds), and offer to ask the approvers.
 
 ## Boundaries
 
-Dress rehearsal plans testing in the live system. kip-decompose plans the
-build, kip-objection reviews the code, and kip-receipts proves each case when
-the plan runs.
+Dress rehearsal plans trying the change on the real thing. kip-decompose
+plans the build, kip-objection reviews the code, and kip-receipts proves each
+case when the plan runs.
 
 Rehearse on the real stage before the audience arrives.
