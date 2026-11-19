@@ -46,6 +46,8 @@ The loop every non-trivial task follows; a session's **stage** is where it is in
 - **plan run**: the receipts run decompose records, its claims tagged `--unit N`. [kip-decompose](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan)
 - **unit run**: a run started with `init --parent <plan run> --unit N`, usually in the unit's worktree, which takes over that unit's open claims. [kip-receipts](../skills/verification/kip-receipts/SKILL.md#recording)
 - **delegated claim**: a plan claim handed to a unit run; its verdict is the unit run's, and it returns to the plan if that run is orphaned. [dashboard](dashboard.md#runs)
+- **dress rehearsal**: a test plan for a change that writes to a live system, staged as rollout rings: sandbox, dev test records, proposed real records, a wider internal group. [kip-dress-rehearsal](../skills/verification/kip-dress-rehearsal/SKILL.md)
+- **proposed** (record): a real record a dress rehearsal suggests testing on, under a callout naming who must approve it. [kip-dress-rehearsal](../skills/verification/kip-dress-rehearsal/SKILL.md#rules)
 - **ref**: something outside the repo a session or plan points at, kept in `kip.db`'s `refs` table by repo, session and run. Its kind is `plan` or `design` when declared (`receipt.py ref`), else `issue` or a source's kind (`mcp`, `web`, `search`, `link`), stored at each stop. [kip-decompose](../skills/analysis/kip-decompose/SKILL.md#recording-the-plan) · [dashboard](dashboard.md#session-log)
 
 ## Receipts
